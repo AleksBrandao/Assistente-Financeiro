@@ -46,6 +46,7 @@ class DiagnosticStore(context: Context) :
             )"""
         )
         createTransactionsTable(db)
+        createCategoryRulesTable(db)
         createIndexes(db)
     }
 
@@ -71,11 +72,21 @@ class DiagnosticStore(context: Context) :
                 "ALTER TABLE transactions ADD COLUMN category TEXT NOT NULL DEFAULT 'UNCATEGORIZED'"
             )
         }
+        if (oldVersion in 4..5) {
+            db.execSQL(
+                "ALTER TABLE transactions ADD COLUMN category_source TEXT NOT NULL DEFAULT 'DEFAULT'"
+            )
+            db.execSQL("ALTER TABLE transactions ADD COLUMN rule_key TEXT")
+        }
+        createCategoryRulesTable(db)
 
         reclassifyExistingEvents(db)
 
         if (oldVersion < 4) {
             rebuildTransactionsFromEvents(db)
+        }
+        if (oldVersion < 6) {
+            initializeCategoryMetadata(db)
         }
     }
 
@@ -142,6 +153,7 @@ class DiagnosticStore(context: Context) :
                     amount = transaction.amount.toPlainString(),
                     occurredAt = transaction.occurredAt.toString(),
                     description = transactionDescription(transaction.type, transaction.merchant),
+                    merchant = transaction.merchant,
                 )
             }
 
@@ -192,7 +204,7 @@ class DiagnosticStore(context: Context) :
     fun recentTransactions(limit: Int = 100): List<FinancialTransactionRecord> =
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
-                      category
+                      category,category_source,rule_key
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 500).toString()),
         ).use { cursor ->
@@ -212,6 +224,9 @@ class DiagnosticStore(context: Context) :
                                 description = cursor.getString(6),
                                 sourcePackage = cursor.getString(7),
                                 category = TransactionCategory.fromStored(cursor.getString(8)),
+                                categorySource =
+                                    TransactionCategorySource.fromStored(cursor.getString(9)),
+                                ruleKey = cursor.getString(10),
                             )
                         )
                     }
@@ -223,32 +238,81 @@ class DiagnosticStore(context: Context) :
         transactionId: Long,
         description: String,
         category: TransactionCategory,
+        applyToFuture: Boolean = false,
     ): Boolean {
         val normalizedDescription = description.trim()
         if (normalizedDescription.isBlank()) return false
 
-        val direction = readableDatabase.rawQuery(
-            "SELECT direction FROM transactions WHERE id = ?",
+        val db = writableDatabase
+        val metadata = db.rawQuery(
+            "SELECT direction,type,rule_key FROM transactions WHERE id = ?",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
-            if (cursor.moveToFirst()) {
-                FinancialTransactionDirection.fromStored(cursor.getString(0))
-            } else {
-                null
-            }
+            if (!cursor.moveToFirst()) return@use null
+            val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
+                ?: return@use null
+            val type = FinancialTransactionType.fromStored(cursor.getString(1))
+                ?: return@use null
+            StoredTransactionMetadata(direction, type, cursor.getString(2))
         } ?: return false
 
-        if (!category.supports(direction)) return false
+        if (!category.supports(metadata.direction)) return false
+        val shouldSaveRule = applyToFuture && TransactionCategoryRule.canApplyToFuture(
+            type = metadata.type,
+            category = category,
+            ruleKey = metadata.ruleKey,
+        )
 
-        return writableDatabase.update(
-            "transactions",
-            ContentValues().apply {
-                put("description", normalizedDescription)
-                put("category", category.name)
-            },
-            "id = ?",
-            arrayOf(transactionId.toString()),
-        ) == 1
+        var updated = false
+        db.beginTransaction()
+        try {
+            updated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("description", normalizedDescription)
+                    put("category", category.name)
+                    put("category_source", TransactionCategorySource.MANUAL.name)
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+
+            if (updated && shouldSaveRule) {
+                val ruleKey = checkNotNull(metadata.ruleKey)
+                db.insertWithOnConflict(
+                    "category_rules",
+                    null,
+                    ContentValues().apply {
+                        put("rule_key", ruleKey)
+                        put("direction", metadata.direction.name)
+                        put("category", category.name)
+                        put("updated_at", System.currentTimeMillis())
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+                db.update(
+                    "transactions",
+                    ContentValues().apply {
+                        put("category", category.name)
+                        put("category_source", TransactionCategorySource.RULE.name)
+                    },
+                    """rule_key = ? AND direction = ? AND id <> ?
+                       AND category_source IN (?, ?)""",
+                    arrayOf(
+                        ruleKey,
+                        metadata.direction.name,
+                        transactionId.toString(),
+                        TransactionCategorySource.DEFAULT.name,
+                        TransactionCategorySource.RULE.name,
+                    ),
+                )
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return updated
     }
 
     fun clearEvents() {
@@ -324,6 +388,7 @@ class DiagnosticStore(context: Context) :
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val type = FinancialTransactionType.fromStored(cursor.getString(2)) ?: continue
+                val merchant = cursor.getString(5)
                 insertTransaction(
                     db = db,
                     sourceEventId = cursor.getLong(0),
@@ -331,7 +396,8 @@ class DiagnosticStore(context: Context) :
                     type = type,
                     amount = cursor.getString(3),
                     occurredAt = cursor.getString(4),
-                    description = transactionDescription(type, cursor.getString(5)),
+                    description = transactionDescription(type, merchant),
+                    merchant = merchant,
                 )
             }
         }
@@ -345,7 +411,16 @@ class DiagnosticStore(context: Context) :
         amount: String,
         occurredAt: String,
         description: String,
+        merchant: String?,
     ) {
+        val ruleKey = if (type == FinancialTransactionType.CARD_PURCHASE) {
+            TransactionCategoryRule.normalizeMerchant(merchant)
+        } else {
+            null
+        }
+        val ruleCategory = ruleKey?.let {
+            findCategoryRule(db, it, type.direction)
+        }
         db.insertWithOnConflict(
             "transactions",
             null,
@@ -357,10 +432,60 @@ class DiagnosticStore(context: Context) :
                 put("occurred_at", occurredAt)
                 put("description", description)
                 put("source_package", sourcePackage)
-                put("category", TransactionCategory.UNCATEGORIZED.name)
+                put(
+                    "category",
+                    (ruleCategory ?: TransactionCategory.UNCATEGORIZED).name,
+                )
+                put(
+                    "category_source",
+                    if (ruleCategory == null) {
+                        TransactionCategorySource.DEFAULT.name
+                    } else {
+                        TransactionCategorySource.RULE.name
+                    },
+                )
+                put("rule_key", ruleKey)
             },
             SQLiteDatabase.CONFLICT_IGNORE,
         )
+    }
+
+    private fun findCategoryRule(
+        db: SQLiteDatabase,
+        ruleKey: String,
+        direction: FinancialTransactionDirection,
+    ): TransactionCategory? = db.rawQuery(
+        "SELECT category FROM category_rules WHERE rule_key = ? AND direction = ?",
+        arrayOf(ruleKey, direction.name),
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) return@use null
+        TransactionCategory.fromStored(cursor.getString(0)).takeIf { it.supports(direction) }
+    }
+
+    private fun initializeCategoryMetadata(db: SQLiteDatabase) {
+        db.execSQL(
+            """UPDATE transactions
+               SET category_source = 'MANUAL'
+               WHERE category <> 'UNCATEGORIZED'"""
+        )
+        db.rawQuery(
+            """SELECT transactions.id,events.merchant
+               FROM transactions
+               INNER JOIN events ON events.id = transactions.source_event_id
+               WHERE transactions.type = 'CARD_PURCHASE'""",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val ruleKey = TransactionCategoryRule.normalizeMerchant(cursor.getString(1))
+                    ?: continue
+                db.update(
+                    "transactions",
+                    ContentValues().apply { put("rule_key", ruleKey) },
+                    "id = ?",
+                    arrayOf(cursor.getLong(0).toString()),
+                )
+            }
+        }
     }
 
     private fun transactionDescription(
@@ -383,7 +508,21 @@ class DiagnosticStore(context: Context) :
                 occurred_at TEXT NOT NULL,
                 description TEXT NOT NULL,
                 source_package TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'UNCATEGORIZED'
+                category TEXT NOT NULL DEFAULT 'UNCATEGORIZED',
+                category_source TEXT NOT NULL DEFAULT 'DEFAULT',
+                rule_key TEXT
+            )"""
+        )
+    }
+
+    private fun createCategoryRulesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS category_rules(
+                rule_key TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                category TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(rule_key, direction)
             )"""
         )
     }
@@ -407,8 +546,14 @@ class DiagnosticStore(context: Context) :
         val body: String,
     )
 
+    private data class StoredTransactionMetadata(
+        val direction: FinancialTransactionDirection,
+        val type: FinancialTransactionType,
+        val ruleKey: String?,
+    )
+
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 5
+        const val DATABASE_VERSION = 6
     }
 }
