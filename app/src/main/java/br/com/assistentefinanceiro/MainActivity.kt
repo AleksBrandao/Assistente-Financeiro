@@ -163,11 +163,16 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Saldo do mês", style = MaterialTheme.typography.labelLarge)
+                Text("Resultado do mês", style = MaterialTheme.typography.labelLarge)
                 Text(
                     text = formatCurrency(statement.balance.toPlainString()),
                     color = balanceColor,
                     style = MaterialTheme.typography.headlineMedium,
+                )
+                Text(
+                    text = "Com base nas notificações reconhecidas",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                 )
                 HorizontalDivider()
                 Row(Modifier.fillMaxWidth()) {
