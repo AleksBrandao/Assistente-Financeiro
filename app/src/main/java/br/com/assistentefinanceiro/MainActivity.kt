@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import br.com.assistentefinanceiro.notifications.*
+import java.text.NumberFormat
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +64,24 @@ class MainActivity : ComponentActivity() {
                     Card { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(event.title, style = MaterialTheme.typography.titleMedium)
                         Text(event.body)
-                        Text(if (event.parsed) "Reconhecida: final ${event.cardLastFour} · R$ ${event.amount} · ${event.merchant}" else "Aguardando regra", color = if (event.parsed) Color(0xFF0A7D65) else Color(0xFFBA3B46))
+                        val statusText = when (event.classification) {
+                            NotificationClassification.TRANSACTION -> when (event.transactionType) {
+                                FinancialTransactionType.CARD_PURCHASE ->
+                                    "Reconhecida: final ${event.cardLastFour} · ${formatCurrency(event.amount)} · ${event.merchant}"
+                                FinancialTransactionType.PIX_RECEIVED ->
+                                    "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
+                                null -> "Transação reconhecida"
+                            }
+                            NotificationClassification.IGNORED_PROMOTION ->
+                                "Ignorada: ${event.classificationReason ?: "promoção"}"
+                            NotificationClassification.PENDING_RULE -> "Aguardando regra"
+                        }
+                        val statusColor = when (event.classification) {
+                            NotificationClassification.TRANSACTION -> Color(0xFF0A7D65)
+                            NotificationClassification.IGNORED_PROMOTION -> MaterialTheme.colorScheme.onSurfaceVariant
+                            NotificationClassification.PENDING_RULE -> Color(0xFFBA3B46)
+                        }
+                        Text(statusText, color = statusColor)
                     } }
                 }
             }
@@ -74,5 +93,9 @@ class MainActivity : ComponentActivity() {
         return Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
             ?.split(":")?.any { ComponentName.unflattenFromString(it) == component } == true
     }
-}
 
+    private fun formatCurrency(amount: String?): String =
+        amount?.toBigDecimalOrNull()?.let {
+            NumberFormat.getCurrencyInstance(Locale("pt", "BR")).format(it)
+        } ?: "valor indisponível"
+}
