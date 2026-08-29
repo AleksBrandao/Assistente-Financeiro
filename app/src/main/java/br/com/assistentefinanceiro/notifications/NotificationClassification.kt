@@ -14,9 +14,21 @@ enum class NotificationClassification {
     }
 }
 
-enum class FinancialTransactionType {
-    CARD_PURCHASE,
-    PIX_RECEIVED;
+enum class FinancialTransactionDirection {
+    INCOME,
+    EXPENSE;
+
+    companion object {
+        fun fromStored(value: String?): FinancialTransactionDirection? =
+            entries.firstOrNull { it.name == value }
+    }
+}
+
+enum class FinancialTransactionType(
+    val direction: FinancialTransactionDirection,
+) {
+    CARD_PURCHASE(FinancialTransactionDirection.EXPENSE),
+    PIX_RECEIVED(FinancialTransactionDirection.INCOME);
 
     companion object {
         fun fromStored(value: String?): FinancialTransactionType? =
