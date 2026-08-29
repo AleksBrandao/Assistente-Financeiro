@@ -66,6 +66,11 @@ class DiagnosticStore(context: Context) :
             createTransactionsTable(db)
             createIndexes(db)
         }
+        if (oldVersion == 4) {
+            db.execSQL(
+                "ALTER TABLE transactions ADD COLUMN category TEXT NOT NULL DEFAULT 'UNCATEGORIZED'"
+            )
+        }
 
         reclassifyExistingEvents(db)
 
@@ -186,7 +191,8 @@ class DiagnosticStore(context: Context) :
 
     fun recentTransactions(limit: Int = 100): List<FinancialTransactionRecord> =
         readableDatabase.rawQuery(
-            """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package
+            """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
+                      category
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 500).toString()),
         ).use { cursor ->
@@ -205,12 +211,45 @@ class DiagnosticStore(context: Context) :
                                 occurredAt = cursor.getString(5),
                                 description = cursor.getString(6),
                                 sourcePackage = cursor.getString(7),
+                                category = TransactionCategory.fromStored(cursor.getString(8)),
                             )
                         )
                     }
                 }
             }
         }
+
+    fun updateTransactionDetails(
+        transactionId: Long,
+        description: String,
+        category: TransactionCategory,
+    ): Boolean {
+        val normalizedDescription = description.trim()
+        if (normalizedDescription.isBlank()) return false
+
+        val direction = readableDatabase.rawQuery(
+            "SELECT direction FROM transactions WHERE id = ?",
+            arrayOf(transactionId.toString()),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                FinancialTransactionDirection.fromStored(cursor.getString(0))
+            } else {
+                null
+            }
+        } ?: return false
+
+        if (!category.supports(direction)) return false
+
+        return writableDatabase.update(
+            "transactions",
+            ContentValues().apply {
+                put("description", normalizedDescription)
+                put("category", category.name)
+            },
+            "id = ?",
+            arrayOf(transactionId.toString()),
+        ) == 1
+    }
 
     fun clearEvents() {
         val db = writableDatabase
@@ -318,6 +357,7 @@ class DiagnosticStore(context: Context) :
                 put("occurred_at", occurredAt)
                 put("description", description)
                 put("source_package", sourcePackage)
+                put("category", TransactionCategory.UNCATEGORIZED.name)
             },
             SQLiteDatabase.CONFLICT_IGNORE,
         )
@@ -342,7 +382,8 @@ class DiagnosticStore(context: Context) :
                 amount TEXT NOT NULL,
                 occurred_at TEXT NOT NULL,
                 description TEXT NOT NULL,
-                source_package TEXT NOT NULL
+                source_package TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'UNCATEGORIZED'
             )"""
         )
     }
@@ -368,6 +409,6 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 5
     }
 }

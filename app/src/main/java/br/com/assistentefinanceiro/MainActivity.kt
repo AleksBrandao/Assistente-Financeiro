@@ -65,6 +65,9 @@ class MainActivity : ComponentActivity() {
         val statement = remember(transactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, transactions)
         }
+        var editingTransaction by remember {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
 
         Scaffold(
             topBar = {
@@ -120,10 +123,32 @@ class MainActivity : ComponentActivity() {
                         items = group.transactions,
                         key = { "statement-${it.id}" },
                     ) { transaction ->
-                        TransactionCard(transaction)
+                        TransactionCard(
+                            transaction = transaction,
+                            onClick = { editingTransaction = transaction },
+                        )
                     }
                 }
             }
+        }
+
+        editingTransaction?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editingTransaction = null },
+                onSave = { description, category ->
+                    if (
+                        store.updateTransactionDetails(
+                            transactionId = transaction.id,
+                            description = description,
+                            category = category,
+                        )
+                    ) {
+                        editingTransaction = null
+                        refresh++
+                    }
+                },
+            )
         }
     }
 
@@ -211,12 +236,15 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun TransactionCard(transaction: FinancialTransactionRecord) {
+    private fun TransactionCard(
+        transaction: FinancialTransactionRecord,
+        onClick: () -> Unit,
+    ) {
         val isIncome = transaction.direction == FinancialTransactionDirection.INCOME
         val amountPrefix = if (isIncome) "+ " else "- "
         val amountColor = if (isIncome) Color(0xFF0A7D65) else Color(0xFFBA3B46)
 
-        Card {
+        Card(onClick = onClick) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -241,10 +269,8 @@ class MainActivity : ComponentActivity() {
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        text = when (transaction.type) {
-                            FinancialTransactionType.CARD_PURCHASE -> "Compra no cartão"
-                            FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
-                        },
+                        text = transactionTypeLabel(transaction.type) +
+                            " · " + transaction.category.displayName,
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
@@ -254,6 +280,88 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Composable
+    private fun EditTransactionDialog(
+        transaction: FinancialTransactionRecord,
+        onDismiss: () -> Unit,
+        onSave: (String, TransactionCategory) -> Unit,
+    ) {
+        var description by remember(transaction.id) {
+            mutableStateOf(transaction.description)
+        }
+        var selectedCategory by remember(transaction.id) {
+            mutableStateOf(transaction.category)
+        }
+        var categoryMenuExpanded by remember(transaction.id) {
+            mutableStateOf(false)
+        }
+        val availableCategories = remember(transaction.direction) {
+            TransactionCategory.availableFor(transaction.direction)
+        }
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Editar movimentação") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { newValue ->
+                            if (newValue.length <= DESCRIPTION_MAX_LENGTH) {
+                                description = newValue
+                            }
+                        },
+                        label = { Text("Descrição") },
+                        supportingText = {
+                            Text("${description.length}/$DESCRIPTION_MAX_LENGTH")
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = "Categoria",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    Box {
+                        OutlinedButton(
+                            onClick = { categoryMenuExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(selectedCategory.displayName)
+                        }
+                        DropdownMenu(
+                            expanded = categoryMenuExpanded,
+                            onDismissRequest = { categoryMenuExpanded = false },
+                        ) {
+                            availableCategories.forEach { category ->
+                                DropdownMenuItem(
+                                    text = { Text(category.displayName) },
+                                    onClick = {
+                                        selectedCategory = category
+                                        categoryMenuExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { onSave(description, selectedCategory) },
+                    enabled = description.isNotBlank(),
+                ) {
+                    Text("Salvar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancelar")
+                }
+            },
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -406,6 +514,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun transactionTypeLabel(type: FinancialTransactionType): String =
+        when (type) {
+            FinancialTransactionType.CARD_PURCHASE -> "Compra no cartão"
+            FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+        }
+
     private fun notificationAccessEnabled(): Boolean {
         val component = ComponentName(this, FinanceNotificationListener::class.java)
         return Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
@@ -439,5 +553,6 @@ class MainActivity : ComponentActivity() {
             DateTimeFormatter.ofPattern("dd 'de' MMMM", PT_BR)
         val TIME_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("HH:mm", PT_BR)
+        const val DESCRIPTION_MAX_LENGTH = 80
     }
 }
