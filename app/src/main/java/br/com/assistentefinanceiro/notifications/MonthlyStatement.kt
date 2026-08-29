@@ -1,6 +1,7 @@
 package br.com.assistentefinanceiro.notifications
 
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
@@ -10,11 +11,19 @@ data class DailyTransactionGroup(
     val transactions: List<FinancialTransactionRecord>,
 )
 
+data class CategoryExpenseSummary(
+    val category: TransactionCategory,
+    val total: BigDecimal,
+    val transactionCount: Int,
+    val sharePercent: Int,
+)
+
 data class MonthlyStatement(
     val period: YearMonth,
     val totalIncome: BigDecimal,
     val totalExpense: BigDecimal,
     val balance: BigDecimal,
+    val categoryExpenses: List<CategoryExpenseSummary>,
     val groups: List<DailyTransactionGroup>,
 ) {
     val transactionCount: Int
@@ -37,12 +46,35 @@ object MonthlyStatementCalculator {
             NormalizedTransaction(transaction, occurredAt, amount)
         }.filter { YearMonth.from(it.occurredAt) == period }
 
-        val totalIncome = normalized
-            .filter { it.transaction.direction == FinancialTransactionDirection.INCOME }
-            .fold(BigDecimal.ZERO) { total, item -> total + item.amount }
-        val totalExpense = normalized
-            .filter { it.transaction.direction == FinancialTransactionDirection.EXPENSE }
-            .fold(BigDecimal.ZERO) { total, item -> total + item.amount }
+        val incomeItems = normalized.filter {
+            it.transaction.direction == FinancialTransactionDirection.INCOME
+        }
+        val expenseItems = normalized.filter {
+            it.transaction.direction == FinancialTransactionDirection.EXPENSE
+        }
+        val totalIncome = incomeItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.amount
+        }
+        val totalExpense = expenseItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.amount
+        }
+        val categoryExpenses = expenseItems
+            .groupBy { it.transaction.category }
+            .map { (category, items) ->
+                val categoryTotal = items.fold(BigDecimal.ZERO) { total, item ->
+                    total + item.amount
+                }
+                CategoryExpenseSummary(
+                    category = category,
+                    total = categoryTotal,
+                    transactionCount = items.size,
+                    sharePercent = percentageOf(categoryTotal, totalExpense),
+                )
+            }
+            .sortedWith(
+                compareByDescending<CategoryExpenseSummary> { it.total }
+                    .thenBy { it.category.displayName }
+            )
 
         val groups = normalized
             .groupBy { it.occurredAt.toLocalDate() }
@@ -62,8 +94,18 @@ object MonthlyStatementCalculator {
             totalIncome = totalIncome,
             totalExpense = totalExpense,
             balance = totalIncome - totalExpense,
+            categoryExpenses = categoryExpenses,
             groups = groups,
         )
+    }
+
+    private fun percentageOf(value: BigDecimal, total: BigDecimal): Int {
+        if (total.signum() == 0) return 0
+        return value
+            .multiply(BigDecimal(100))
+            .divide(total, 0, RoundingMode.HALF_UP)
+            .toInt()
+            .coerceIn(0, 100)
     }
 
     private data class NormalizedTransaction(
