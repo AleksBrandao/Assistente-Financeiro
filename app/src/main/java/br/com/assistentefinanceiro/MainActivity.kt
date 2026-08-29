@@ -136,12 +136,13 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category ->
+                onSave = { description, category, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
+                            applyToFuture = applyToFuture,
                         )
                     ) {
                         editingTransaction = null
@@ -270,7 +271,12 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text(
                         text = transactionTypeLabel(transaction.type) +
-                            " · " + transaction.category.displayName,
+                            " · " + transaction.category.displayName +
+                            if (transaction.categorySource == TransactionCategorySource.RULE) {
+                                " · automática"
+                            } else {
+                                ""
+                            },
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
@@ -286,7 +292,7 @@ class MainActivity : ComponentActivity() {
     private fun EditTransactionDialog(
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
-        onSave: (String, TransactionCategory) -> Unit,
+        onSave: (String, TransactionCategory, Boolean) -> Unit,
     ) {
         var description by remember(transaction.id) {
             mutableStateOf(transaction.description)
@@ -295,6 +301,9 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(transaction.category)
         }
         var categoryMenuExpanded by remember(transaction.id) {
+            mutableStateOf(false)
+        }
+        var applyToFuture by remember(transaction.id) {
             mutableStateOf(false)
         }
         val availableCategories = remember(transaction.direction) {
@@ -346,11 +355,33 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    if (
+                        TransactionCategoryRule.canApplyToFuture(
+                            type = transaction.type,
+                            category = selectedCategory,
+                            ruleKey = transaction.ruleKey,
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = applyToFuture,
+                                onCheckedChange = { applyToFuture = it },
+                            )
+                            Text("Aplicar a compras futuras deste estabelecimento")
+                        }
+                    } else {
+                        applyToFuture = false
+                    }
                 }
             },
             confirmButton = {
                 TextButton(
-                    onClick = { onSave(description, selectedCategory) },
+                    onClick = {
+                        onSave(description, selectedCategory, applyToFuture)
+                    },
                     enabled = description.isNotBlank(),
                 ) {
                     Text("Salvar")
