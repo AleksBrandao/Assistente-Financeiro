@@ -1,5 +1,8 @@
 package br.com.assistentefinanceiro.notifications
 
+import java.math.BigDecimal
+import java.time.LocalDateTime
+
 enum class NotificationClassification {
     TRANSACTION,
     IGNORED_PROMOTION,
@@ -11,10 +14,28 @@ enum class NotificationClassification {
     }
 }
 
+enum class FinancialTransactionType {
+    CARD_PURCHASE,
+    PIX_RECEIVED;
+
+    companion object {
+        fun fromStored(value: String?): FinancialTransactionType? =
+            entries.firstOrNull { it.name == value }
+    }
+}
+
+data class ParsedFinancialTransaction(
+    val type: FinancialTransactionType,
+    val amount: BigDecimal,
+    val occurredAt: LocalDateTime,
+    val cardLastFour: String? = null,
+    val merchant: String? = null,
+)
+
 data class NotificationClassificationResult(
     val classification: NotificationClassification,
     val reason: String,
-    val purchase: ParsedCardPurchase? = null,
+    val transaction: ParsedFinancialTransaction? = null,
 )
 
 object FinancialNotificationClassifier {
@@ -46,7 +67,25 @@ object FinancialNotificationClassifier {
             return NotificationClassificationResult(
                 classification = NotificationClassification.TRANSACTION,
                 reason = "Compra aprovada reconhecida",
-                purchase = purchase,
+                transaction = ParsedFinancialTransaction(
+                    type = FinancialTransactionType.CARD_PURCHASE,
+                    amount = purchase.amount,
+                    occurredAt = purchase.occurredAt,
+                    cardLastFour = purchase.cardLastFour,
+                    merchant = purchase.merchant,
+                ),
+            )
+        }
+
+        SantanderPixParser.parse(title, body)?.let { pix ->
+            return NotificationClassificationResult(
+                classification = NotificationClassification.TRANSACTION,
+                reason = "PIX recebido reconhecido",
+                transaction = ParsedFinancialTransaction(
+                    type = FinancialTransactionType.PIX_RECEIVED,
+                    amount = pix.amount,
+                    occurredAt = pix.occurredAt,
+                ),
             )
         }
 

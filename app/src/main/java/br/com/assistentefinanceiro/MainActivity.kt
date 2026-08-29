@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import br.com.assistentefinanceiro.notifications.*
+import java.text.NumberFormat
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,8 +65,13 @@ class MainActivity : ComponentActivity() {
                         Text(event.title, style = MaterialTheme.typography.titleMedium)
                         Text(event.body)
                         val statusText = when (event.classification) {
-                            NotificationClassification.TRANSACTION ->
-                                "Reconhecida: final ${event.cardLastFour} · R$ ${event.amount} · ${event.merchant}"
+                            NotificationClassification.TRANSACTION -> when (event.transactionType) {
+                                FinancialTransactionType.CARD_PURCHASE ->
+                                    "Reconhecida: final ${event.cardLastFour} · ${formatCurrency(event.amount)} · ${event.merchant}"
+                                FinancialTransactionType.PIX_RECEIVED ->
+                                    "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
+                                null -> "Transação reconhecida"
+                            }
                             NotificationClassification.IGNORED_PROMOTION ->
                                 "Ignorada: ${event.classificationReason ?: "promoção"}"
                             NotificationClassification.PENDING_RULE -> "Aguardando regra"
@@ -86,4 +93,9 @@ class MainActivity : ComponentActivity() {
         return Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
             ?.split(":")?.any { ComponentName.unflattenFromString(it) == component } == true
     }
+
+    private fun formatCurrency(amount: String?): String =
+        amount?.toBigDecimalOrNull()?.let {
+            NumberFormat.getCurrencyInstance(Locale("pt", "BR")).format(it)
+        } ?: "valor indisponível"
 }

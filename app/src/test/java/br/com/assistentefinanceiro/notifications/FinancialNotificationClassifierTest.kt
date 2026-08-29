@@ -14,7 +14,20 @@ class FinancialNotificationClassifierTest {
         )
 
         assertEquals(NotificationClassification.TRANSACTION, result.classification)
-        assertNotNull(result.purchase)
+        assertEquals(FinancialTransactionType.CARD_PURCHASE, result.transaction?.type)
+        assertNotNull(result.transaction)
+    }
+
+    @Test
+    fun classifiesReceivedPix() {
+        val result = classify(
+            title = "Você acaba de receber um PIX!",
+            body = "PIX recebido em 29/08/2026 as 12:38 no valor de R$ 58,00.",
+        )
+
+        assertEquals(NotificationClassification.TRANSACTION, result.classification)
+        assertEquals(FinancialTransactionType.PIX_RECEIVED, result.transaction?.type)
+        assertEquals("58.00", result.transaction?.amount?.toPlainString())
     }
 
     @Test
@@ -26,7 +39,7 @@ class FinancialNotificationClassifierTest {
 
         assertEquals(NotificationClassification.IGNORED_PROMOTION, result.classification)
         assertEquals("Oferta de crédito", result.reason)
-        assertNull(result.purchase)
+        assertNull(result.transaction)
     }
 
     @Test
@@ -37,7 +50,7 @@ class FinancialNotificationClassifierTest {
         )
 
         assertEquals(NotificationClassification.PENDING_RULE, result.classification)
-        assertNull(result.purchase)
+        assertNull(result.transaction)
     }
 
     @Test
