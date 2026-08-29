@@ -23,8 +23,8 @@ data class MonthlyStatement(
     val totalIncome: BigDecimal,
     val totalExpense: BigDecimal,
     val balance: BigDecimal,
-    val categoryExpenses: List<CategoryExpenseSummary>,
     val groups: List<DailyTransactionGroup>,
+    val categoryExpenses: List<CategoryExpenseSummary> = emptyList(),
 ) {
     val transactionCount: Int
         get() = groups.sumOf { it.transactions.size }
