@@ -32,6 +32,7 @@ class MainActivity : ComponentActivity() {
         var refresh by remember { mutableIntStateOf(0) }
         val allowed = remember(refresh) { preferences.allowedPackages() }
         val candidates = remember(refresh) { store.candidates() }
+        val transactions = remember(refresh) { store.recentTransactions() }
         val events = remember(refresh) { store.recentEvents() }
         val enabled = remember(refresh) { notificationAccessEnabled() }
 
@@ -54,6 +55,46 @@ class MainActivity : ComponentActivity() {
                             if (it) preferences.allow(packageName) else preferences.remove(packageName); refresh++
                         })
                     } }
+                }
+                item { Text("Movimentações estruturadas", style = MaterialTheme.typography.titleLarge) }
+                if (transactions.isEmpty()) item { Text("Nenhuma movimentação reconhecida.") }
+                items(transactions, key = { "transaction-${it.id}" }) { transaction ->
+                    val isIncome = transaction.direction == FinancialTransactionDirection.INCOME
+                    val amountPrefix = if (isIncome) "+ " else "- "
+                    val amountColor = if (isIncome) Color(0xFF0A7D65) else Color(0xFFBA3B46)
+                    Card {
+                        Column(
+                            Modifier.fillMaxWidth().padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(
+                                    transaction.description,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    amountPrefix + formatCurrency(transaction.amount),
+                                    color = amountColor,
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                            }
+                            Text(
+                                when (transaction.type) {
+                                    FinancialTransactionType.CARD_PURCHASE -> "Compra no cartão"
+                                    FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                transaction.occurredAt.replace('T', ' '),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                 }
                 item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Eventos autorizados", style = MaterialTheme.typography.titleLarge)
