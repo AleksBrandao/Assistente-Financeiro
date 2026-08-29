@@ -24,6 +24,17 @@ data class DiagnosticEvent(
         get() = classification == NotificationClassification.TRANSACTION
 }
 
+data class FinancialTransactionRecord(
+    val id: Long,
+    val sourceEventId: Long,
+    val direction: FinancialTransactionDirection,
+    val type: FinancialTransactionType,
+    val amount: String,
+    val occurredAt: String,
+    val description: String,
+    val sourcePackage: String,
+)
+
 class DiagnosticStore(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
@@ -38,12 +49,15 @@ class DiagnosticStore(context: Context) :
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 package_name TEXT NOT NULL, app_label TEXT NOT NULL,
                 title TEXT NOT NULL, body TEXT NOT NULL, posted_at INTEGER NOT NULL,
+                notification_key TEXT, fingerprint TEXT,
                 parsed INTEGER NOT NULL,
                 classification TEXT NOT NULL DEFAULT 'PENDING_RULE', classification_reason TEXT,
                 transaction_type TEXT, occurred_at TEXT,
                 card_last_four TEXT, amount TEXT, merchant TEXT
             )"""
         )
+        createTransactionsTable(db)
+        createIndexes(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -57,7 +71,18 @@ class DiagnosticStore(context: Context) :
             db.execSQL("ALTER TABLE events ADD COLUMN transaction_type TEXT")
             db.execSQL("ALTER TABLE events ADD COLUMN occurred_at TEXT")
         }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE events ADD COLUMN notification_key TEXT")
+            db.execSQL("ALTER TABLE events ADD COLUMN fingerprint TEXT")
+            createTransactionsTable(db)
+            createIndexes(db)
+        }
+
         reclassifyExistingEvents(db)
+
+        if (oldVersion < 4) {
+            rebuildTransactionsFromEvents(db)
+        }
     }
 
     fun recordCandidate(packageName: String, appLabel: String, postedAt: Long) {
@@ -73,24 +98,63 @@ class DiagnosticStore(context: Context) :
         )
     }
 
-    fun recordEvent(packageName: String, appLabel: String, title: String, body: String, postedAt: Long) {
+    fun recordEvent(
+        packageName: String,
+        appLabel: String,
+        title: String,
+        body: String,
+        postedAt: Long,
+        notificationKey: String? = null,
+    ) {
         val result = FinancialNotificationClassifier.classify(packageName, appLabel, title, body)
         val transaction = result.transaction
-        writableDatabase.insert("events", null, ContentValues().apply {
-            put("package_name", packageName)
-            put("app_label", appLabel)
-            put("title", title)
-            put("body", body)
-            put("posted_at", postedAt)
-            put("parsed", if (result.classification == NotificationClassification.TRANSACTION) 1 else 0)
-            put("classification", result.classification.name)
-            put("classification_reason", result.reason)
-            put("transaction_type", transaction?.type?.name)
-            put("occurred_at", transaction?.occurredAt?.toString())
-            put("card_last_four", transaction?.cardLastFour)
-            put("amount", transaction?.amount?.toPlainString())
-            put("merchant", transaction?.merchant)
-        })
+        val fingerprint = NotificationFingerprint.create(packageName, title, body, postedAt)
+        val db = writableDatabase
+
+        db.beginTransaction()
+        try {
+            val eventId = db.insertWithOnConflict(
+                "events",
+                null,
+                ContentValues().apply {
+                    put("package_name", packageName)
+                    put("app_label", appLabel)
+                    put("title", title)
+                    put("body", body)
+                    put("posted_at", postedAt)
+                    put("notification_key", notificationKey)
+                    put("fingerprint", fingerprint)
+                    put(
+                        "parsed",
+                        if (result.classification == NotificationClassification.TRANSACTION) 1 else 0,
+                    )
+                    put("classification", result.classification.name)
+                    put("classification_reason", result.reason)
+                    put("transaction_type", transaction?.type?.name)
+                    put("occurred_at", transaction?.occurredAt?.toString())
+                    put("card_last_four", transaction?.cardLastFour)
+                    put("amount", transaction?.amount?.toPlainString())
+                    put("merchant", transaction?.merchant)
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            )
+
+            if (eventId != -1L && transaction != null) {
+                insertTransaction(
+                    db = db,
+                    sourceEventId = eventId,
+                    sourcePackage = packageName,
+                    type = transaction.type,
+                    amount = transaction.amount.toPlainString(),
+                    occurredAt = transaction.occurredAt.toString(),
+                    description = transactionDescription(transaction.type, transaction.merchant),
+                )
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun candidates(): List<Pair<String, String>> = readableDatabase.rawQuery(
@@ -131,7 +195,45 @@ class DiagnosticStore(context: Context) :
         }
     }
 
-    fun clearEvents() = writableDatabase.delete("events", null, null)
+    fun recentTransactions(limit: Int = 100): List<FinancialTransactionRecord> =
+        readableDatabase.rawQuery(
+            """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package
+               FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
+            arrayOf(limit.coerceIn(1, 500).toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val direction = FinancialTransactionDirection.fromStored(cursor.getString(2))
+                    val type = FinancialTransactionType.fromStored(cursor.getString(3))
+                    if (direction != null && type != null) {
+                        add(
+                            FinancialTransactionRecord(
+                                id = cursor.getLong(0),
+                                sourceEventId = cursor.getLong(1),
+                                direction = direction,
+                                type = type,
+                                amount = cursor.getString(4),
+                                occurredAt = cursor.getString(5),
+                                description = cursor.getString(6),
+                                sourcePackage = cursor.getString(7),
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+    fun clearEvents() {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("transactions", null, null)
+            db.delete("events", null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     private fun reclassifyExistingEvents(db: SQLiteDatabase) {
         val events = db.rawQuery(
@@ -182,6 +284,91 @@ class DiagnosticStore(context: Context) :
         }
     }
 
+    private fun rebuildTransactionsFromEvents(db: SQLiteDatabase) {
+        db.rawQuery(
+            """SELECT id,package_name,transaction_type,amount,occurred_at,merchant
+               FROM events
+               WHERE classification = 'TRANSACTION'
+                 AND transaction_type IS NOT NULL
+                 AND amount IS NOT NULL
+                 AND occurred_at IS NOT NULL""",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val type = FinancialTransactionType.fromStored(cursor.getString(2)) ?: continue
+                insertTransaction(
+                    db = db,
+                    sourceEventId = cursor.getLong(0),
+                    sourcePackage = cursor.getString(1),
+                    type = type,
+                    amount = cursor.getString(3),
+                    occurredAt = cursor.getString(4),
+                    description = transactionDescription(type, cursor.getString(5)),
+                )
+            }
+        }
+    }
+
+    private fun insertTransaction(
+        db: SQLiteDatabase,
+        sourceEventId: Long,
+        sourcePackage: String,
+        type: FinancialTransactionType,
+        amount: String,
+        occurredAt: String,
+        description: String,
+    ) {
+        db.insertWithOnConflict(
+            "transactions",
+            null,
+            ContentValues().apply {
+                put("source_event_id", sourceEventId)
+                put("direction", type.direction.name)
+                put("type", type.name)
+                put("amount", amount)
+                put("occurred_at", occurredAt)
+                put("description", description)
+                put("source_package", sourcePackage)
+            },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
+    }
+
+    private fun transactionDescription(
+        type: FinancialTransactionType,
+        merchant: String?,
+    ): String = when (type) {
+        FinancialTransactionType.CARD_PURCHASE ->
+            merchant?.takeIf { it.isNotBlank() } ?: "Compra no cartão"
+        FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+    }
+
+    private fun createTransactionsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS transactions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_event_id INTEGER NOT NULL UNIQUE,
+                direction TEXT NOT NULL,
+                type TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                description TEXT NOT NULL,
+                source_package TEXT NOT NULL
+            )"""
+        )
+    }
+
+    private fun createIndexes(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_events_fingerprint
+               ON events(fingerprint) WHERE fingerprint IS NOT NULL"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_occurred_at
+               ON transactions(occurred_at DESC)"""
+        )
+    }
+
     private data class StoredEvent(
         val id: Long,
         val packageName: String,
@@ -192,6 +379,6 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 3
+        const val DATABASE_VERSION = 4
     }
 }
