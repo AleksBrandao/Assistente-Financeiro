@@ -9,4 +9,5 @@ data class FinancialTransactionRecord(
     val occurredAt: String,
     val description: String,
     val sourcePackage: String,
+    val category: TransactionCategory = TransactionCategory.UNCATEGORIZED,
 )
