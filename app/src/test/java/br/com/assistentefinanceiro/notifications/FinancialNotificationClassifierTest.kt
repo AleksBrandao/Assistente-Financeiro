@@ -15,6 +15,7 @@ class FinancialNotificationClassifierTest {
 
         assertEquals(NotificationClassification.TRANSACTION, result.classification)
         assertEquals(FinancialTransactionType.CARD_PURCHASE, result.transaction?.type)
+        assertEquals(FinancialTransactionDirection.EXPENSE, result.transaction?.type?.direction)
         assertNotNull(result.transaction)
     }
 
@@ -27,6 +28,7 @@ class FinancialNotificationClassifierTest {
 
         assertEquals(NotificationClassification.TRANSACTION, result.classification)
         assertEquals(FinancialTransactionType.PIX_RECEIVED, result.transaction?.type)
+        assertEquals(FinancialTransactionDirection.INCOME, result.transaction?.type?.direction)
         assertEquals("58.00", result.transaction?.amount?.toPlainString())
     }
 
