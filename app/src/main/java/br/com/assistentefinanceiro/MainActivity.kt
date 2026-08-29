@@ -62,7 +62,19 @@ class MainActivity : ComponentActivity() {
                     Card { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(event.title, style = MaterialTheme.typography.titleMedium)
                         Text(event.body)
-                        Text(if (event.parsed) "Reconhecida: final ${event.cardLastFour} · R$ ${event.amount} · ${event.merchant}" else "Aguardando regra", color = if (event.parsed) Color(0xFF0A7D65) else Color(0xFFBA3B46))
+                        val statusText = when (event.classification) {
+                            NotificationClassification.TRANSACTION ->
+                                "Reconhecida: final ${event.cardLastFour} · R$ ${event.amount} · ${event.merchant}"
+                            NotificationClassification.IGNORED_PROMOTION ->
+                                "Ignorada: ${event.classificationReason ?: "promoção"}"
+                            NotificationClassification.PENDING_RULE -> "Aguardando regra"
+                        }
+                        val statusColor = when (event.classification) {
+                            NotificationClassification.TRANSACTION -> Color(0xFF0A7D65)
+                            NotificationClassification.IGNORED_PROMOTION -> MaterialTheme.colorScheme.onSurfaceVariant
+                            NotificationClassification.PENDING_RULE -> Color(0xFFBA3B46)
+                        }
+                        Text(statusText, color = statusColor)
                     } }
                 }
             }
@@ -75,4 +87,3 @@ class MainActivity : ComponentActivity() {
             ?.split(":")?.any { ComponentName.unflattenFromString(it) == component } == true
     }
 }
-
