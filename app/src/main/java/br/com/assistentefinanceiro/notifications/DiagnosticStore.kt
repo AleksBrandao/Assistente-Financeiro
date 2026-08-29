@@ -24,17 +24,6 @@ data class DiagnosticEvent(
         get() = classification == NotificationClassification.TRANSACTION
 }
 
-data class FinancialTransactionRecord(
-    val id: Long,
-    val sourceEventId: Long,
-    val direction: FinancialTransactionDirection,
-    val type: FinancialTransactionType,
-    val amount: String,
-    val occurredAt: String,
-    val description: String,
-    val sourcePackage: String,
-)
-
 class DiagnosticStore(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
