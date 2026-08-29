@@ -22,6 +22,13 @@ class FinanceNotificationListener : NotificationListenerService() {
         val body = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         if (title.isBlank() && body.isBlank()) return
-        store.recordEvent(packageName, appLabel, title, body, notification.postTime)
+        store.recordEvent(
+            packageName = packageName,
+            appLabel = appLabel,
+            title = title,
+            body = body,
+            postedAt = notification.postTime,
+            notificationKey = notification.key,
+        )
     }
 }
