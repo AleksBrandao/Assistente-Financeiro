@@ -372,8 +372,6 @@ class MainActivity : ComponentActivity() {
                             )
                             Text("Aplicar a compras futuras deste estabelecimento")
                         }
-                    } else {
-                        applyToFuture = false
                     }
                 }
             },
