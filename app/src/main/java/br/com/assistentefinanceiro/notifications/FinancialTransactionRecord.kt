@@ -10,4 +10,6 @@ data class FinancialTransactionRecord(
     val description: String,
     val sourcePackage: String,
     val category: TransactionCategory = TransactionCategory.UNCATEGORIZED,
+    val categorySource: TransactionCategorySource = TransactionCategorySource.DEFAULT,
+    val ruleKey: String? = null,
 )
