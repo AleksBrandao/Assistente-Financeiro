@@ -20,7 +20,16 @@ data class FinancialAccountRecord(
     val closingDay: Int? = null,
     val dueDay: Int? = null,
     val isDefault: Boolean = false,
+    val cardIdentifiers: String? = null,
 )
+
+fun FinancialAccountRecord.matchesCardLastFour(lastFour: String?): Boolean {
+    val target = lastFour?.filter(Char::isDigit)?.takeLast(4) ?: return false
+    return cardIdentifiers
+        ?.split(",", "/", ";", " ")
+        ?.map { it.filter(Char::isDigit).takeLast(4) }
+        ?.any { it == target } == true
+}
 
 object FinancialAccountIdentity {
     fun normalize(name: String): String = Normalizer
@@ -34,4 +43,12 @@ object FinancialAccountIdentity {
             FinancialAccountType.CREDIT_CARD
         else -> FinancialAccountType.BANK_ACCOUNT
     }
+
+    fun normalizedIdentifiers(value: String?): String? = value
+        ?.split(",", "/", ";", " ")
+        ?.map { it.filter(Char::isDigit).takeLast(4) }
+        ?.filter { it.length == 4 }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+        ?.joinToString(",")
 }
