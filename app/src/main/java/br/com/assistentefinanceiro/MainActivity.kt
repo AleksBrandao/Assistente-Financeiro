@@ -97,7 +97,6 @@ class MainActivity : ComponentActivity() {
                                 store.markExistingTransactions(
                                     MobillsImportAnalyzer.analyze(
                                         rawRows = SimpleXlsxReader.readMobillsRows(input),
-                                        today = LocalDate.now(),
                                     )
                                 )
                             }
@@ -195,12 +194,13 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, applyToFuture ->
+                onSave = { description, category, status, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
+                            status = status,
                             applyToFuture = applyToFuture,
                         )
                     ) {
@@ -218,7 +218,7 @@ class MainActivity : ComponentActivity() {
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Prontos: ${preview.readyCount}")
-                        Text("Planejados: ${preview.plannedCount}")
+                        Text("Pendentes: ${preview.pendingCount}")
                         Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
                         Text("Rejeitados: ${preview.rejectedCount}")
                         preview.rejectionReasons.forEach { (reason, count) ->
@@ -320,14 +320,14 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Resultado do mês", style = MaterialTheme.typography.labelLarge)
+                Text("Resultado realizado", style = MaterialTheme.typography.labelLarge)
                 Text(
                     text = formatCurrency(statement.balance.toPlainString()),
                     color = balanceColor,
                     style = MaterialTheme.typography.headlineMedium,
                 )
                 Text(
-                    text = "Com base nas notificações reconhecidas",
+                    text = "Somente valores pagos ou recebidos",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -346,6 +346,24 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.weight(1f),
                     )
                 }
+                HorizontalDivider()
+                Text("Resultado previsto", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = formatCurrency(statement.projectedBalance.toPlainString()),
+                    color = if (statement.projectedBalance.signum() < 0) {
+                        Color(0xFFBA3B46)
+                    } else {
+                        Color(0xFF0A7D65)
+                    },
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text(
+                    text = "Inclui pendências: + " +
+                        formatCurrency(statement.pendingIncome.toPlainString()) +
+                        " / - " + formatCurrency(statement.pendingExpense.toPlainString()),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
@@ -464,8 +482,8 @@ class MainActivity : ComponentActivity() {
                                 " · automática"
                             } else {
                                 ""
-                            } + if (transaction.status == TransactionStatus.PLANNED) {
-                                " · planejada"
+                            } + if (transaction.status == TransactionStatus.PENDING) {
+                                " · pendente"
                             } else "",
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -482,7 +500,7 @@ class MainActivity : ComponentActivity() {
     private fun EditTransactionDialog(
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
-        onSave: (String, TransactionCategory, Boolean) -> Unit,
+        onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
     ) {
         var description by remember(transaction.id) {
             mutableStateOf(transaction.description)
@@ -495,6 +513,9 @@ class MainActivity : ComponentActivity() {
         }
         var applyToFuture by remember(transaction.id) {
             mutableStateOf(false)
+        }
+        var selectedStatus by remember(transaction.id) {
+            mutableStateOf(transaction.status)
         }
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
@@ -545,6 +566,37 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Switch(
+                            checked = selectedStatus == TransactionStatus.REALIZED,
+                            onCheckedChange = { checked ->
+                                selectedStatus = if (checked) {
+                                    TransactionStatus.REALIZED
+                                } else {
+                                    TransactionStatus.PENDING
+                                }
+                            },
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (transaction.direction == FinancialTransactionDirection.INCOME) {
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Recebido"
+                                } else {
+                                    "Não recebido"
+                                }
+                            } else {
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Pago"
+                                } else {
+                                    "Não pago"
+                                }
+                            }
+                        )
+                    }
                     if (
                         TransactionCategoryRule.canApplyToFuture(
                             type = transaction.type,
@@ -568,7 +620,7 @@ class MainActivity : ComponentActivity() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onSave(description, selectedCategory, applyToFuture)
+                        onSave(description, selectedCategory, selectedStatus, applyToFuture)
                     },
                     enabled = description.isNotBlank(),
                 ) {
