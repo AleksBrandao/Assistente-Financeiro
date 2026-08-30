@@ -287,7 +287,16 @@ class MainActivity : ComponentActivity() {
                                 checked = consolidateInvoices,
                                 onCheckedChange = { consolidateInvoices = it },
                             )
-                            Text("Agrupar compras por fatura")
+                            Text("Consolidar faturas por vencimento")
+                        }
+                        if (consolidateInvoices) {
+                            Text(
+                                "Os totais mensais passam a considerar a fatura inteira " +
+                                    "no mês em que ela vence.",
+                                modifier = Modifier.padding(start = 48.dp, end = 8.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                     }
                 }
