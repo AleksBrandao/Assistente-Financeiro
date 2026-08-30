@@ -51,6 +51,7 @@ class DiagnosticStore(context: Context) :
         )
         createTransactionsTable(db)
         createCategoryRulesTable(db)
+        createFinancialAccountsTable(db)
         createIndexes(db)
     }
 
@@ -87,6 +88,13 @@ class DiagnosticStore(context: Context) :
         } else if (oldVersion < 8) {
             db.execSQL("ALTER TABLE transactions ADD COLUMN original_status TEXT")
             db.delete("transactions", "origin = ?", arrayOf(TransactionOrigin.MOBILLS.name))
+        }
+        if (oldVersion < 9) {
+            createFinancialAccountsTable(db)
+            if (oldVersion >= 7) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN account_id INTEGER")
+            }
+            initializeFinancialAccounts(db)
         }
         createCategoryRulesTable(db)
 
@@ -215,7 +223,7 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status
+                      original_status,account_id
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -243,6 +251,7 @@ class DiagnosticStore(context: Context) :
                                 account = cursor.getString(13),
                                 originalCategory = cursor.getString(14),
                                 originalStatus = cursor.getString(15),
+                                accountId = if (cursor.isNull(16)) null else cursor.getLong(16),
                             )
                         )
                     }
@@ -351,6 +360,7 @@ class DiagnosticStore(context: Context) :
                 val direction = row.direction ?: return@forEach
                 val date = row.date ?: return@forEach
                 val amount = row.amount ?: return@forEach
+                val accountId = ensureFinancialAccount(db, row.account)
                 val result = db.insertWithOnConflict(
                     "transactions",
                     null,
@@ -384,6 +394,7 @@ class DiagnosticStore(context: Context) :
                         put("account", row.account)
                         put("original_category", row.originalCategory)
                         put("original_status", row.situation)
+                        put("account_id", accountId)
                         put("import_key", row.importKey)
                     },
                     SQLiteDatabase.CONFLICT_IGNORE,
@@ -395,6 +406,81 @@ class DiagnosticStore(context: Context) :
             db.endTransaction()
         }
         return MobillsImportResult(imported, alreadyImported)
+    }
+
+    fun financialAccounts(): List<FinancialAccountRecord> = readableDatabase.rawQuery(
+        """SELECT id,name,type,closing_day,due_day,is_default
+           FROM financial_accounts
+           ORDER BY type DESC,is_default DESC,name COLLATE NOCASE""",
+        null,
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                add(
+                    FinancialAccountRecord(
+                        id = cursor.getLong(0),
+                        name = cursor.getString(1),
+                        type = FinancialAccountType.fromStored(cursor.getString(2)),
+                        closingDay = if (cursor.isNull(3)) null else cursor.getInt(3),
+                        dueDay = if (cursor.isNull(4)) null else cursor.getInt(4),
+                        isDefault = cursor.getInt(5) == 1,
+                    )
+                )
+            }
+        }
+    }
+
+    fun saveFinancialAccount(
+        id: Long?,
+        name: String,
+        type: FinancialAccountType,
+        closingDay: Int?,
+        dueDay: Int?,
+        isDefault: Boolean,
+    ): Boolean {
+        val normalizedName = name.trim()
+        if (normalizedName.isBlank()) return false
+        if (closingDay != null && closingDay !in 1..31) return false
+        if (dueDay != null && dueDay !in 1..31) return false
+        val normalizedKey = FinancialAccountIdentity.normalize(normalizedName)
+        if (normalizedKey.isBlank()) return false
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            if (isDefault && type == FinancialAccountType.CREDIT_CARD) {
+                db.update(
+                    "financial_accounts",
+                    ContentValues().apply { put("is_default", 0) },
+                    "type = ?",
+                    arrayOf(FinancialAccountType.CREDIT_CARD.name),
+                )
+            }
+            val values = ContentValues().apply {
+                put("name", normalizedName)
+                put("normalized_name", normalizedKey)
+                put("type", type.name)
+                if (closingDay == null) putNull("closing_day") else put("closing_day", closingDay)
+                if (dueDay == null) putNull("due_day") else put("due_day", dueDay)
+                put("is_default", if (isDefault && type == FinancialAccountType.CREDIT_CARD) 1 else 0)
+            }
+            val accountId = if (id == null) {
+                db.insertWithOnConflict(
+                    "financial_accounts", null, values, SQLiteDatabase.CONFLICT_ABORT,
+                )
+            } else {
+                if (db.update("financial_accounts", values, "id = ?", arrayOf(id.toString())) != 1) {
+                    -1L
+                } else id
+            }
+            if (accountId == -1L) return false
+            linkTransactionsToAccount(db, accountId, normalizedKey)
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun markExistingTransactions(preview: MobillsImportPreview): MobillsImportPreview {
@@ -663,6 +749,7 @@ class DiagnosticStore(context: Context) :
                 account TEXT,
                 original_category TEXT,
                 original_status TEXT,
+                account_id INTEGER,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -678,6 +765,87 @@ class DiagnosticStore(context: Context) :
                 PRIMARY KEY(rule_key, direction)
             )"""
         )
+    }
+
+    private fun createFinancialAccountsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS financial_accounts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                closing_day INTEGER,
+                due_day INTEGER,
+                is_default INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+    }
+
+    private fun initializeFinancialAccounts(db: SQLiteDatabase) {
+        db.rawQuery(
+            "SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL AND TRIM(account) <> ''",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) ensureFinancialAccount(db, cursor.getString(0))
+        }
+        db.rawQuery("SELECT id,normalized_name FROM financial_accounts", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                linkTransactionsToAccount(db, cursor.getLong(0), cursor.getString(1))
+            }
+        }
+    }
+
+    private fun ensureFinancialAccount(db: SQLiteDatabase, name: String): Long {
+        val trimmed = name.trim().ifBlank { "Sem conta" }
+        val normalized = FinancialAccountIdentity.normalize(trimmed)
+        db.rawQuery(
+            "SELECT id FROM financial_accounts WHERE normalized_name = ?",
+            arrayOf(normalized),
+        ).use { cursor -> if (cursor.moveToFirst()) return cursor.getLong(0) }
+
+        val preset = knownAccountPreset(normalized)
+        return db.insertOrThrow(
+            "financial_accounts",
+            null,
+            ContentValues().apply {
+                put("name", trimmed)
+                put("normalized_name", normalized)
+                put("type", (preset?.type ?: FinancialAccountIdentity.inferredType(trimmed)).name)
+                preset?.closingDay?.let { put("closing_day", it) }
+                preset?.dueDay?.let { put("due_day", it) }
+                put("is_default", if (preset?.isDefault == true) 1 else 0)
+            },
+        )
+    }
+
+    private fun linkTransactionsToAccount(
+        db: SQLiteDatabase,
+        accountId: Long,
+        normalizedName: String,
+    ) {
+        db.rawQuery(
+            "SELECT id,account FROM transactions WHERE account IS NOT NULL",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (FinancialAccountIdentity.normalize(cursor.getString(1)) == normalizedName) {
+                    db.update(
+                        "transactions",
+                        ContentValues().apply { put("account_id", accountId) },
+                        "id = ?",
+                        arrayOf(cursor.getLong(0).toString()),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun knownAccountPreset(normalizedName: String): KnownAccountPreset? = when (normalizedName) {
+        "CINZA" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 26, 5, true)
+        "VERMELHO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 11, null, false)
+        "PRETO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 8, null, false)
+        "CARREFOUR" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 20, null, false)
+        else -> null
     }
 
     private fun createIndexes(db: SQLiteDatabase) {
@@ -705,9 +873,16 @@ class DiagnosticStore(context: Context) :
         val ruleKey: String?,
     )
 
+    private data class KnownAccountPreset(
+        val type: FinancialAccountType,
+        val closingDay: Int?,
+        val dueDay: Int?,
+        val isDefault: Boolean,
+    )
+
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 8
+        const val DATABASE_VERSION = 9
     }
 }
 
