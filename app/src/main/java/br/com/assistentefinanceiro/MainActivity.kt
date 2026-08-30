@@ -550,8 +550,8 @@ class MainActivity : ComponentActivity() {
                 account = account,
                 invoice = invoice,
                 onBack = { selectedInvoice = null },
-                onPayment = { amount, paidAt ->
-                    if (store.recordInvoicePayment(invoice, amount, paidAt)) {
+                onPayment = { amount, paidAt, sourceAccountId ->
+                    if (store.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)) {
                         refresh++
                         selectedInvoice = store.creditCardInvoices(account.id)
                             .firstOrNull { it.id == invoice.id }
@@ -646,17 +646,24 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         invoice: CreditCardInvoiceRecord,
         onBack: () -> Unit,
-        onPayment: (java.math.BigDecimal, LocalDate) -> Boolean,
+        onPayment: (java.math.BigDecimal, LocalDate, Long?) -> Boolean,
         onDeletePayment: (Long) -> Boolean,
     ) {
         val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
         val payments = remember(invoice.id, invoice.paidAmount) { store.invoicePayments(invoice) }
+        val bankAccounts = remember { store.financialAccounts().filter {
+            it.type == FinancialAccountType.BANK_ACCOUNT
+        } }
         val referenceMonth = invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod
         var addingPayment by remember(invoice.id) { mutableStateOf(false) }
         var paymentAmount by remember(invoice.id, invoice.outstandingAmount) {
             mutableStateOf(invoice.outstandingAmount.toPlainString().replace('.', ','))
         }
         var paymentDate by remember(invoice.id) { mutableStateOf(LocalDate.now().toString()) }
+        var sourceAccountId by remember(invoice.id) {
+            mutableStateOf(bankAccounts.singleOrNull()?.id)
+        }
+        var sourceAccountMenuExpanded by remember { mutableStateOf(false) }
         var deletingPayment by remember(invoice.id) {
             mutableStateOf<InvoicePaymentRecord?>(null)
         }
@@ -732,6 +739,12 @@ class MainActivity : ComponentActivity() {
                                         payment.paidAt.format(SHORT_DATE_FORMATTER),
                                         style = MaterialTheme.typography.bodySmall,
                                     )
+                                    payment.sourceAccountName?.let { name ->
+                                        Text(
+                                            "Pago com $name",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
                                 }
                                 TextButton(onClick = { deletingPayment = payment }) {
                                     Text("Excluir", color = Color(0xFFBA3B46))
@@ -827,6 +840,33 @@ class MainActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                         )
+                        if (bankAccounts.isNotEmpty()) {
+                            Box {
+                                OutlinedButton(
+                                    onClick = { sourceAccountMenuExpanded = true },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        bankAccounts.firstOrNull { it.id == sourceAccountId }?.name
+                                            ?: "Selecionar conta de pagamento"
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = sourceAccountMenuExpanded,
+                                    onDismissRequest = { sourceAccountMenuExpanded = false },
+                                ) {
+                                    bankAccounts.forEach { bankAccount ->
+                                        DropdownMenuItem(
+                                            text = { Text(bankAccount.name) },
+                                            onClick = {
+                                                sourceAccountId = bankAccount.id
+                                                sourceAccountMenuExpanded = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         OutlinedTextField(
                             value = paymentDate,
                             onValueChange = { paymentDate = it.take(10) },
@@ -838,12 +878,19 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            if (onPayment(checkNotNull(parsedAmount), checkNotNull(parsedDate))) {
+                            if (
+                                onPayment(
+                                    checkNotNull(parsedAmount),
+                                    checkNotNull(parsedDate),
+                                    sourceAccountId,
+                                )
+                            ) {
                                 addingPayment = false
                             }
                         },
                         enabled = parsedAmount != null && parsedAmount.signum() > 0 &&
-                            parsedAmount <= invoice.outstandingAmount && parsedDate != null,
+                            parsedAmount <= invoice.outstandingAmount && parsedDate != null &&
+                            (bankAccounts.isEmpty() || sourceAccountId != null),
                     ) { Text("Confirmar") }
                 },
                 dismissButton = {
