@@ -2,6 +2,7 @@ package br.com.assistentefinanceiro.notifications
 
 import java.time.LocalDate
 import java.time.YearMonth
+import java.math.BigDecimal
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -82,5 +83,31 @@ class CreditCardBillingCycleTest {
         assertEquals(YearMonth.of(2026, 9), dates.closingPeriod)
         assertEquals(LocalDate.of(2026, 9, 8), dates.closingDate)
         assertEquals(LocalDate.of(2026, 9, 18), dates.dueDate)
+    }
+
+    @Test
+    fun paymentStatusPrioritizesPaidAndOverdue() {
+        val closing = LocalDate.of(2026, 8, 26)
+        val due = LocalDate.of(2026, 9, 5)
+        val total = BigDecimal("100.00")
+
+        assertEquals(
+            CreditCardInvoiceStatus.PARTIALLY_PAID,
+            CreditCardBillingCycle.paymentStatus(
+                total, BigDecimal("40.00"), closing, due, LocalDate.of(2026, 9, 1),
+            ),
+        )
+        assertEquals(
+            CreditCardInvoiceStatus.OVERDUE,
+            CreditCardBillingCycle.paymentStatus(
+                total, BigDecimal("40.00"), closing, due, LocalDate.of(2026, 9, 6),
+            ),
+        )
+        assertEquals(
+            CreditCardInvoiceStatus.PAID,
+            CreditCardBillingCycle.paymentStatus(
+                total, total, closing, due, LocalDate.of(2026, 9, 6),
+            ),
+        )
     }
 }
