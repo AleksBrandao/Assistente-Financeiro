@@ -38,6 +38,10 @@ data class MobillsImportPreview(val rows: List<MobillsImportRow>) {
         it.disposition == ImportDisposition.POSSIBLE_DUPLICATE
     }
     val rejectedCount = rows.count { it.disposition == ImportDisposition.REJECTED }
+    val rejectionReasons: Map<String, Int> = rows
+        .filter { it.disposition == ImportDisposition.REJECTED }
+        .groupingBy { it.rejectionReason ?: "Motivo não informado" }
+        .eachCount()
 }
 
 object MobillsImportAnalyzer {
