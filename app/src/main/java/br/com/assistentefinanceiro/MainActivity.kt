@@ -540,6 +540,18 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
     ) {
         val invoices = remember(account.id) { store.creditCardInvoices(account.id) }
+        var selectedInvoice by remember(account.id) {
+            mutableStateOf<CreditCardInvoiceRecord?>(null)
+        }
+        selectedInvoice?.let { invoice ->
+            InvoiceDetailScreen(
+                store = store,
+                account = account,
+                invoice = invoice,
+                onBack = { selectedInvoice = null },
+            )
+            return
+        }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -566,7 +578,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 items(invoices, key = { "invoice-${it.id}" }) { invoice ->
-                    Card {
+                    Card(onClick = { selectedInvoice = invoice }) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -600,6 +612,118 @@ class MainActivity : ComponentActivity() {
                                     (invoice.dueDate?.let {
                                         " · vence em ${it.format(SHORT_DATE_FORMATTER)}"
                                     } ?: " · vencimento não informado"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun InvoiceDetailScreen(
+        store: DiagnosticStore,
+        account: FinancialAccountRecord,
+        invoice: CreditCardInvoiceRecord,
+        onBack: () -> Unit,
+    ) {
+        val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
+        val referenceMonth = invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(formatMonth(referenceMonth)) },
+                    actions = { TextButton(onClick = onBack) { Text("Faturas") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Card {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(account.name, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                formatCurrency(invoice.total.toPlainString()),
+                                color = if (invoice.total.signum() < 0) {
+                                    Color(0xFF0A7D65)
+                                } else {
+                                    Color(0xFFBA3B46)
+                                },
+                                style = MaterialTheme.typography.headlineSmall,
+                            )
+                            Text("${invoice.status.displayName} · ${transactions.size} movimentações")
+                            Text(
+                                "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
+                                    (invoice.dueDate?.let {
+                                        " · vence em ${it.format(SHORT_DATE_FORMATTER)}"
+                                    } ?: " · vencimento não informado"),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                item { Text("Lançamentos", style = MaterialTheme.typography.titleLarge) }
+                items(transactions, key = { "invoice-transaction-${it.id}" }) { transaction ->
+                    Card {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(
+                                    transaction.description,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    (if (transaction.direction == FinancialTransactionDirection.EXPENSE) {
+                                        "- "
+                                    } else {
+                                        "+ "
+                                    }) + formatCurrency(transaction.amount),
+                                    color = if (
+                                        transaction.direction == FinancialTransactionDirection.EXPENSE
+                                    ) Color(0xFFBA3B46) else Color(0xFF0A7D65),
+                                )
+                            }
+                            val occurredAt = runCatching {
+                                LocalDateTime.parse(transaction.occurredAt)
+                            }.getOrNull()
+                            val dateLabel = occurredAt?.toLocalDate()?.format(SHORT_DATE_FORMATTER)
+                                ?.let { date ->
+                                    if (transaction.origin == TransactionOrigin.MOBILLS) {
+                                        "Referência $date"
+                                    } else {
+                                        date
+                                    }
+                                }
+                            Text(
+                                listOfNotNull(
+                                    transaction.category.displayName,
+                                    dateLabel,
+                                    if (transaction.origin == TransactionOrigin.MOBILLS) {
+                                        "Mobills"
+                                    } else {
+                                        "Notificação"
+                                    },
+                                    if (transaction.status == TransactionStatus.PENDING) {
+                                        "Pendente"
+                                    } else {
+                                        "Realizada"
+                                    },
+                                ).joinToString(" · "),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
