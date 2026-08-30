@@ -93,6 +93,9 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item { StatementSummary(statement) }
+                if (statement.categoryExpenses.isNotEmpty()) {
+                    item { ExpenseByCategoryCard(statement.categoryExpenses) }
+                }
                 item {
                     OutlinedButton(
                         onClick = { refresh++ },
@@ -214,6 +217,63 @@ class MainActivity : ComponentActivity() {
                         color = Color(0xFFBA3B46),
                         modifier = Modifier.weight(1f),
                     )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ExpenseByCategoryCard(
+        summaries: List<CategoryExpenseSummary>,
+    ) {
+        Card {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(
+                    text = "Despesas por categoria",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                summaries.forEachIndexed { index, summary ->
+                    if (index > 0) HorizontalDivider()
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = summary.category.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    text = if (summary.transactionCount == 1) {
+                                        "1 movimentação"
+                                    } else {
+                                        "${summary.transactionCount} movimentações"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = formatCurrency(summary.total.toPlainString()),
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                Text(
+                                    text = "${summary.sharePercent}% das despesas",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                        LinearProgressIndicator(
+                            progress = { summary.sharePercent / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
