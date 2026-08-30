@@ -11,7 +11,7 @@ import java.util.Locale
 
 enum class ImportDisposition {
     READY,
-    PLANNED,
+    PENDING,
     POSSIBLE_DUPLICATE,
     REJECTED,
 }
@@ -33,7 +33,7 @@ data class MobillsImportRow(
 
 data class MobillsImportPreview(val rows: List<MobillsImportRow>) {
     val readyCount = rows.count { it.disposition == ImportDisposition.READY }
-    val plannedCount = rows.count { it.disposition == ImportDisposition.PLANNED }
+    val pendingCount = rows.count { it.disposition == ImportDisposition.PENDING }
     val possibleDuplicateCount = rows.count {
         it.disposition == ImportDisposition.POSSIBLE_DUPLICATE
     }
@@ -49,7 +49,7 @@ object MobillsImportAnalyzer {
         .ofPattern("dd/MM/uuuu", Locale("pt", "BR"))
         .withResolverStyle(ResolverStyle.STRICT)
 
-    fun analyze(rawRows: List<List<String>>, today: LocalDate): MobillsImportPreview {
+    fun analyze(rawRows: List<List<String>>): MobillsImportPreview {
         if (rawRows.isEmpty()) return MobillsImportPreview(emptyList())
         val header = rawRows.first().map { normalizeHeader(it) }
         val required = listOf("data", "descricao", "valor", "conta", "situacao", "categoria")
@@ -68,7 +68,7 @@ object MobillsImportAnalyzer {
 
         val parsed = rawRows.drop(1).mapIndexedNotNull { index, cells ->
             if (cells.all { it.isBlank() }) return@mapIndexedNotNull null
-            parseRow(index + 2, cells, indexes, today)
+            parseRow(index + 2, cells, indexes)
         }
         val repeatedKeys = parsed
             .filter { it.disposition != ImportDisposition.REJECTED && it.importKey != null }
@@ -99,7 +99,6 @@ object MobillsImportAnalyzer {
         sourceRow: Int,
         cells: List<String>,
         indexes: Map<String, Int>,
-        today: LocalDate,
     ): MobillsImportRow {
         fun value(name: String): String = cells.getOrNull(indexes.getValue(name))?.trim().orEmpty()
         val dateText = value("data")
@@ -111,11 +110,13 @@ object MobillsImportAnalyzer {
         val date = runCatching { LocalDate.parse(dateText, dateFormatter) }.getOrNull()
         val amount = amountText.replace(",", ".").toBigDecimalOrNull()
 
+        val normalizedSituation = normalizeHeader(situation)
         val reason = when {
             date == null -> "Data inválida"
             description.isBlank() -> "Descrição vazia"
             amount == null -> "Valor inválido"
             amount.signum() == 0 -> "Valor igual a zero"
+            normalizedSituation !in setOf("paga", "pendente") -> "Situação inválida"
             else -> null
         }
         if (reason != null) {
@@ -153,8 +154,8 @@ object MobillsImportAnalyzer {
             originalCategory = originalCategory,
             category = mapCategory(originalCategory, direction),
             direction = direction,
-            disposition = if (date!!.isAfter(today)) {
-                ImportDisposition.PLANNED
+            disposition = if (normalizedSituation == "pendente") {
+                ImportDisposition.PENDING
             } else {
                 ImportDisposition.READY
             },
