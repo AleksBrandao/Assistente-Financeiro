@@ -544,6 +544,46 @@ class DiagnosticStore(context: Context) :
         }
     }
 
+    fun invoiceTransactions(invoiceId: Long): List<FinancialTransactionRecord> =
+        readableDatabase.rawQuery(
+            """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
+                      category,category_source,rule_key,origin,status,account,original_category,
+                      original_status,account_id,invoice_id
+               FROM transactions WHERE invoice_id = ?
+               ORDER BY occurred_at DESC,id DESC""",
+            arrayOf(invoiceId.toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val direction = FinancialTransactionDirection.fromStored(cursor.getString(2))
+                        ?: continue
+                    val type = FinancialTransactionType.fromStored(cursor.getString(3)) ?: continue
+                    add(
+                        FinancialTransactionRecord(
+                            id = cursor.getLong(0),
+                            sourceEventId = if (cursor.isNull(1)) null else cursor.getLong(1),
+                            direction = direction,
+                            type = type,
+                            amount = cursor.getString(4),
+                            occurredAt = cursor.getString(5),
+                            description = cursor.getString(6),
+                            sourcePackage = cursor.getString(7),
+                            category = TransactionCategory.fromStored(cursor.getString(8)),
+                            categorySource = TransactionCategorySource.fromStored(cursor.getString(9)),
+                            ruleKey = cursor.getString(10),
+                            origin = TransactionOrigin.fromStored(cursor.getString(11)),
+                            status = TransactionStatus.fromStored(cursor.getString(12)),
+                            account = cursor.getString(13),
+                            originalCategory = cursor.getString(14),
+                            originalStatus = cursor.getString(15),
+                            accountId = if (cursor.isNull(16)) null else cursor.getLong(16),
+                            invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
+                        )
+                    )
+                }
+            }
+        }
+
     fun markExistingTransactions(preview: MobillsImportPreview): MobillsImportPreview {
         val existing = readableDatabase.rawQuery(
             "SELECT direction,amount,occurred_at,description FROM transactions",
