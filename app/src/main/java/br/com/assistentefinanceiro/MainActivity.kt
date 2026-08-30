@@ -539,7 +539,8 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         onBack: () -> Unit,
     ) {
-        val invoices = remember(account.id) { store.creditCardInvoices(account.id) }
+        var refresh by remember(account.id) { mutableIntStateOf(0) }
+        val invoices = remember(account.id, refresh) { store.creditCardInvoices(account.id) }
         var selectedInvoice by remember(account.id) {
             mutableStateOf<CreditCardInvoiceRecord?>(null)
         }
@@ -549,6 +550,22 @@ class MainActivity : ComponentActivity() {
                 account = account,
                 invoice = invoice,
                 onBack = { selectedInvoice = null },
+                onPayment = { amount, paidAt ->
+                    if (store.recordInvoicePayment(invoice, amount, paidAt)) {
+                        refresh++
+                        selectedInvoice = store.creditCardInvoices(account.id)
+                            .firstOrNull { it.id == invoice.id }
+                        true
+                    } else false
+                },
+                onDeletePayment = { paymentId ->
+                    if (store.deleteInvoicePayment(invoice, paymentId)) {
+                        refresh++
+                        selectedInvoice = store.creditCardInvoices(account.id)
+                            .firstOrNull { it.id == invoice.id }
+                        true
+                    } else false
+                },
             )
             return
         }
@@ -629,9 +646,20 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         invoice: CreditCardInvoiceRecord,
         onBack: () -> Unit,
+        onPayment: (java.math.BigDecimal, LocalDate) -> Boolean,
+        onDeletePayment: (Long) -> Boolean,
     ) {
         val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
+        val payments = remember(invoice.id, invoice.paidAmount) { store.invoicePayments(invoice) }
         val referenceMonth = invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod
+        var addingPayment by remember(invoice.id) { mutableStateOf(false) }
+        var paymentAmount by remember(invoice.id, invoice.outstandingAmount) {
+            mutableStateOf(invoice.outstandingAmount.toPlainString().replace('.', ','))
+        }
+        var paymentDate by remember(invoice.id) { mutableStateOf(LocalDate.now().toString()) }
+        var deletingPayment by remember(invoice.id) {
+            mutableStateOf<InvoicePaymentRecord?>(null)
+        }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -661,6 +689,15 @@ class MainActivity : ComponentActivity() {
                                 style = MaterialTheme.typography.headlineSmall,
                             )
                             Text("${invoice.status.displayName} · ${transactions.size} movimentações")
+                            if (invoice.paidAmount.signum() > 0) {
+                                Text("Pago: ${formatCurrency(invoice.paidAmount.toPlainString())}")
+                            }
+                            if (invoice.outstandingAmount.signum() > 0) {
+                                Text(
+                                    "Saldo: ${formatCurrency(invoice.outstandingAmount.toPlainString())}",
+                                    color = Color(0xFFBA3B46),
+                                )
+                            }
                             Text(
                                 "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
                                     (invoice.dueDate?.let {
@@ -668,6 +705,38 @@ class MainActivity : ComponentActivity() {
                                     } ?: " · vencimento não informado"),
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            if (invoice.outstandingAmount.signum() > 0) {
+                                Button(
+                                    onClick = { addingPayment = true },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Registrar pagamento") }
+                            }
+                        }
+                    }
+                }
+                if (payments.isNotEmpty()) {
+                    item { Text("Pagamentos", style = MaterialTheme.typography.titleLarge) }
+                    items(payments, key = { "invoice-payment-${it.id}" }) { payment ->
+                        Card {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        formatCurrency(payment.amount.toPlainString()),
+                                        color = Color(0xFF0A7D65),
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Text(
+                                        payment.paidAt.format(SHORT_DATE_FORMATTER),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                TextButton(onClick = { deletingPayment = payment }) {
+                                    Text("Excluir", color = Color(0xFFBA3B46))
+                                }
+                            }
                         }
                     }
                 }
@@ -731,6 +800,76 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+        if (addingPayment) {
+            val normalizedPaymentAmount = if (',' in paymentAmount) {
+                paymentAmount.replace(".", "").replace(',', '.')
+            } else {
+                paymentAmount
+            }
+            val parsedAmount = normalizedPaymentAmount.toBigDecimalOrNull()
+            val parsedDate = runCatching { LocalDate.parse(paymentDate) }.getOrNull()
+            AlertDialog(
+                onDismissRequest = { addingPayment = false },
+                title = { Text("Registrar pagamento") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "Saldo da fatura: " +
+                                formatCurrency(invoice.outstandingAmount.toPlainString())
+                        )
+                        OutlinedTextField(
+                            value = paymentAmount,
+                            onValueChange = { value ->
+                                paymentAmount = value.filter { it.isDigit() || it in ",." }.take(16)
+                            },
+                            label = { Text("Valor pago") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = paymentDate,
+                            onValueChange = { paymentDate = it.take(10) },
+                            label = { Text("Data (AAAA-MM-DD)") },
+                            singleLine = true,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (onPayment(checkNotNull(parsedAmount), checkNotNull(parsedDate))) {
+                                addingPayment = false
+                            }
+                        },
+                        enabled = parsedAmount != null && parsedAmount.signum() > 0 &&
+                            parsedAmount <= invoice.outstandingAmount && parsedDate != null,
+                    ) { Text("Confirmar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { addingPayment = false }) { Text("Cancelar") }
+                },
+            )
+        }
+        deletingPayment?.let { payment ->
+            AlertDialog(
+                onDismissRequest = { deletingPayment = null },
+                title = { Text("Excluir pagamento?") },
+                text = {
+                    Text(
+                        formatCurrency(payment.amount.toPlainString()) + " em " +
+                            payment.paidAt.format(SHORT_DATE_FORMATTER)
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (onDeletePayment(payment.id)) deletingPayment = null
+                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingPayment = null }) { Text("Cancelar") }
+                },
+            )
         }
     }
 
