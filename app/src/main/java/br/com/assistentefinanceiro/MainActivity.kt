@@ -52,6 +52,12 @@ private data class AccountLedgerItem(
     val movement: AccountMovementRecord? = null,
 )
 
+private data class StatementInvoiceItem(
+    val account: FinancialAccountRecord,
+    val invoice: CreditCardInvoiceRecord,
+    val transaction: FinancialTransactionRecord,
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,9 +96,59 @@ class MainActivity : ComponentActivity() {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var pendingOnly by remember { mutableStateOf(false) }
+        var consolidateInvoices by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
-        val statement = remember(transactions, selectedMonth) {
-            MonthlyStatementCalculator.calculate(selectedMonth, transactions)
+        val statementInvoiceItems = remember(refresh) {
+            store.financialAccounts()
+                .filter { it.type == FinancialAccountType.CREDIT_CARD }
+                .flatMap { account ->
+                    store.creditCardInvoices(account.id).mapNotNull { invoice ->
+                        val dueDate = invoice.dueDate ?: return@mapNotNull null
+                        if (invoice.total.signum() == 0) return@mapNotNull null
+                        val isCredit = invoice.total.signum() < 0
+                        StatementInvoiceItem(
+                            account = account,
+                            invoice = invoice,
+                            transaction = FinancialTransactionRecord(
+                                id = -invoice.id,
+                                sourceEventId = null,
+                                direction = if (isCredit) {
+                                    FinancialTransactionDirection.INCOME
+                                } else FinancialTransactionDirection.EXPENSE,
+                                type = if (isCredit) {
+                                    FinancialTransactionType.IMPORTED_INCOME
+                                } else FinancialTransactionType.IMPORTED_EXPENSE,
+                                amount = invoice.total.abs().toPlainString(),
+                                occurredAt = dueDate.atTime(23, 59, 59).toString(),
+                                description = "Fatura ${account.name}",
+                                sourcePackage = "credit-card-invoice",
+                                status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                                    TransactionStatus.REALIZED
+                                } else TransactionStatus.PENDING,
+                                account = account.name,
+                                accountId = account.id,
+                                invoiceId = invoice.id,
+                            ),
+                        )
+                    }
+                }
+        }
+        val invoiceItemByTransactionId = remember(statementInvoiceItems) {
+            statementInvoiceItems.associateBy { it.transaction.id }
+        }
+        val statementTransactions = remember(
+            transactions, statementInvoiceItems, consolidateInvoices,
+        ) {
+            if (!consolidateInvoices) transactions else {
+                val consolidatedInvoiceIds = statementInvoiceItems.map { it.invoice.id }.toSet()
+                transactions.filterNot {
+                    it.invoiceId != null && it.invoiceId in consolidatedInvoiceIds
+                } +
+                    statementInvoiceItems.map { it.transaction }
+            }
+        }
+        val statement = remember(statementTransactions, selectedMonth) {
+            MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
         }
         val visibleGroups = remember(statement.groups, pendingOnly) {
             if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
@@ -111,6 +167,9 @@ class MainActivity : ComponentActivity() {
         var importMessage by remember { mutableStateOf<String?>(null) }
         var importError by remember { mutableStateOf<String?>(null) }
         var readingImport by remember { mutableStateOf(false) }
+        var selectedStatementInvoice by remember {
+            mutableStateOf<StatementInvoiceItem?>(null)
+        }
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
         val importLauncher = rememberLauncherForActivityResult(
@@ -139,6 +198,32 @@ class MainActivity : ComponentActivity() {
                     readingImport = false
                 }
             }
+        }
+
+        selectedStatementInvoice?.let { selected ->
+            InvoiceDetailScreen(
+                store = store,
+                account = selected.account,
+                invoice = selected.invoice,
+                onBack = { selectedStatementInvoice = null },
+                onPayment = { amount, paidAt, sourceAccountId ->
+                    if (store.recordInvoicePayment(
+                            selected.invoice, amount, paidAt, sourceAccountId,
+                        )) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+                onDeletePayment = { paymentId ->
+                    if (store.deleteInvoicePayment(selected.invoice, paymentId)) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+            )
+            return
         }
 
         Scaffold(
@@ -177,19 +262,31 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = pendingOnly,
-                            onCheckedChange = { pendingOnly = it },
-                        )
-                        Text("Mostrar somente pendentes")
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = pendingOnly,
+                                onCheckedChange = { pendingOnly = it },
+                            )
+                            Text("Mostrar somente pendentes")
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = consolidateInvoices,
+                                onCheckedChange = { consolidateInvoices = it },
+                            )
+                            Text("Agrupar compras por fatura")
+                        }
                     }
                 }
                 item { StatementSummary(statement) }
-                if (statement.categoryExpenses.isNotEmpty()) {
+                if (!consolidateInvoices && statement.categoryExpenses.isNotEmpty()) {
                     item { ExpenseByCategoryCard(statement.categoryExpenses) }
                 }
                 item {
@@ -226,10 +323,18 @@ class MainActivity : ComponentActivity() {
                         items = group.transactions,
                         key = { "statement-${it.id}" },
                     ) { transaction ->
-                        TransactionCard(
-                            transaction = transaction,
-                            onClick = { editingTransaction = transaction },
-                        )
+                        val invoiceItem = invoiceItemByTransactionId[transaction.id]
+                        if (invoiceItem != null) {
+                            StatementInvoiceCard(
+                                item = invoiceItem,
+                                onClick = { selectedStatementInvoice = invoiceItem },
+                            )
+                        } else {
+                            TransactionCard(
+                                transaction = transaction,
+                                onClick = { editingTransaction = transaction },
+                            )
+                        }
                     }
                 }
             }
@@ -1659,6 +1764,51 @@ class MainActivity : ComponentActivity() {
                 color = color,
                 style = MaterialTheme.typography.titleMedium,
             )
+        }
+    }
+
+    @Composable
+    private fun StatementInvoiceCard(
+        item: StatementInvoiceItem,
+        onClick: () -> Unit,
+    ) {
+        val invoice = item.invoice
+        val transaction = item.transaction
+        val isCredit = transaction.direction == FinancialTransactionDirection.INCOME
+        Card(onClick = onClick) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        transaction.description,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        (if (isCredit) "+ " else "- ") +
+                            formatCurrency(transaction.amount),
+                        color = if (isCredit) Color(0xFF0A7D65) else Color(0xFFBA3B46),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Text(
+                    "${invoice.status.displayName} · ${invoice.transactionCount} compras" +
+                        if (invoice.paidAmount.signum() > 0) {
+                            " · pago ${formatCurrency(invoice.paidAmount.toPlainString())}"
+                        } else "",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Vencimento ${invoice.dueDate?.format(SHORT_DATE_FORMATTER)} · toque para detalhes",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 
