@@ -721,7 +721,7 @@ class DiagnosticStore(context: Context) :
                 val date = runCatching {
                     LocalDateTime.parse(cursor.getString(2)).toLocalDate()
                 }.getOrNull() ?: continue
-                if (fromDate != null && !date.isAfter(fromDate)) continue
+                if (fromDate != null && date.isBefore(fromDate)) continue
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
                 val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
                     ?: continue
@@ -731,7 +731,7 @@ class DiagnosticStore(context: Context) :
             }
         }
         val movements = accountMovements(account.id).filter { movement ->
-            fromDate == null || movement.occurredAt.isAfter(fromDate)
+            fromDate == null || !movement.occurredAt.isBefore(fromDate)
         }
         return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
     }
