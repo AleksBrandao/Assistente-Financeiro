@@ -89,9 +89,19 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
+        var pendingOnly by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
         val statement = remember(transactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, transactions)
+        }
+        val visibleGroups = remember(statement.groups, pendingOnly) {
+            if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
+                group.copy(
+                    transactions = group.transactions.filter {
+                        it.status == TransactionStatus.PENDING
+                    },
+                ).takeIf { it.transactions.isNotEmpty() }
+            }
         }
         var editingTransaction by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
@@ -166,6 +176,18 @@ class MainActivity : ComponentActivity() {
                         onNext = { selectedMonth = selectedMonth.plusMonths(1) },
                     )
                 }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = pendingOnly,
+                            onCheckedChange = { pendingOnly = it },
+                        )
+                        Text("Mostrar somente pendentes")
+                    }
+                }
                 item { StatementSummary(statement) }
                 if (statement.categoryExpenses.isNotEmpty()) {
                     item { ExpenseByCategoryCard(statement.categoryExpenses) }
@@ -178,18 +200,22 @@ class MainActivity : ComponentActivity() {
                         Text("Atualizar movimentações")
                     }
                 }
-                if (statement.groups.isEmpty()) {
+                if (visibleGroups.isEmpty()) {
                     item {
                         Card {
                             Text(
-                                text = "Nenhuma movimentação reconhecida neste mês.",
+                                text = if (pendingOnly) {
+                                    "Nenhuma movimentação pendente neste mês."
+                                } else {
+                                    "Nenhuma movimentação reconhecida neste mês."
+                                },
                                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                                 textAlign = TextAlign.Center,
                             )
                         }
                     }
                 }
-                statement.groups.forEach { group ->
+                visibleGroups.forEach { group ->
                     item(key = "date-${group.date}") {
                         Text(
                             text = formatDate(group.date),
@@ -609,6 +635,7 @@ class MainActivity : ComponentActivity() {
         onChanged: () -> Unit,
     ) {
         var refresh by remember(account.id) { mutableIntStateOf(0) }
+        var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
         val movements = remember(account.id, refresh) { store.accountMovements(account.id) }
         val transactions = remember(account.id, refresh) {
             store.recentTransactions(10_000).filter { it.accountId == account.id }
@@ -656,9 +683,8 @@ class MainActivity : ComponentActivity() {
                     .thenByDescending { it.transaction?.id ?: it.movement?.id ?: 0L },
             )
         }
-        val ledgerByMonth = remember(ledgerItems) {
-            ledgerItems.groupBy { YearMonth.from(it.occurredAt) }
-                .toList().sortedByDescending { it.first }
+        val visibleLedgerItems = remember(ledgerItems, selectedMonth) {
+            ledgerItems.filter { YearMonth.from(it.occurredAt) == selectedMonth }
         }
         var addingTransaction by remember { mutableStateOf(false) }
         var editingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
@@ -711,21 +737,24 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Adicionar receita ou despesa") }
                 }
-                if (movements.isEmpty() && transactions.isEmpty()) {
+                item {
+                    MonthSelector(
+                        selectedMonth = selectedMonth,
+                        onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
+                        onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    )
+                }
+                if (visibleLedgerItems.isEmpty()) {
                     item {
                         Card {
                             Text(
-                                "Nenhuma movimentação de conta registrada.",
+                                "Nenhuma movimentação nesta conta em ${formatMonth(selectedMonth)}.",
                                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                             )
                         }
                     }
                 }
-                ledgerByMonth.forEach { (month, monthItems) ->
-                    item(key = "account-month-$month") {
-                        Text(formatMonth(month), style = MaterialTheme.typography.titleLarge)
-                    }
-                    items(monthItems, key = { it.key }) { ledgerItem ->
+                items(visibleLedgerItems, key = { it.key }) { ledgerItem ->
                     Card(onClick = {
                         ledgerItem.transaction?.takeIf {
                             it.origin == TransactionOrigin.MANUAL
@@ -759,7 +788,6 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                    }
                     }
                 }
             }
@@ -1081,7 +1109,13 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
     ) {
         var refresh by remember(account.id) { mutableIntStateOf(0) }
+        var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
         val invoices = remember(account.id, refresh) { store.creditCardInvoices(account.id) }
+        val visibleInvoice = remember(invoices, selectedMonth) {
+            invoices.firstOrNull { invoice ->
+                (invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod) == selectedMonth
+            }
+        }
         var selectedInvoice by remember(account.id) {
             mutableStateOf<CreditCardInvoiceRecord?>(null)
         }
@@ -1125,17 +1159,25 @@ class MainActivity : ComponentActivity() {
                 item {
                     Text("Faturas", style = MaterialTheme.typography.headlineSmall)
                 }
-                if (invoices.isEmpty()) {
+                item {
+                    MonthSelector(
+                        selectedMonth = selectedMonth,
+                        onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
+                        onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    )
+                }
+                if (visibleInvoice == null) {
                     item {
                         Card {
                             Text(
-                                "Nenhuma fatura calculada. Informe o fechamento do cartão.",
+                                "Nenhuma fatura em ${formatMonth(selectedMonth)}.",
                                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                             )
                         }
                     }
                 }
-                items(invoices, key = { "invoice-${it.id}" }) { invoice ->
+                visibleInvoice?.let { invoice ->
+                item(key = "invoice-${invoice.id}") {
                     Card(onClick = { selectedInvoice = invoice }) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -1175,6 +1217,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                }
                 }
             }
         }
