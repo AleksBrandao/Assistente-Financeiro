@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
@@ -36,6 +38,7 @@ import kotlinx.coroutines.withContext
 private enum class AppScreen {
     STATEMENT,
     DIAGNOSTIC,
+    ACCOUNTS,
 }
 
 class MainActivity : ComponentActivity() {
@@ -50,12 +53,17 @@ class MainActivity : ComponentActivity() {
                 when (screen) {
                     AppScreen.STATEMENT -> MonthlyStatementScreen(
                         store = store,
-                        onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
+                        onOpenAccounts = { screen = AppScreen.ACCOUNTS },
                     )
                     AppScreen.DIAGNOSTIC -> DiagnosticScreen(
                         store = store,
                         preferences = preferences,
                         onOpenStatement = { screen = AppScreen.STATEMENT },
+                    )
+                    AppScreen.ACCOUNTS -> AccountsScreen(
+                        store = store,
+                        onOpenStatement = { screen = AppScreen.STATEMENT },
+                        onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
                     )
                 }
             }
@@ -66,7 +74,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MonthlyStatementScreen(
         store: DiagnosticStore,
-        onOpenDiagnostic: () -> Unit,
+        onOpenAccounts: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -129,8 +137,8 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text(if (readingImport) "Lendo…" else "Importar")
                         }
-                        TextButton(onClick = onOpenDiagnostic) {
-                            Text("Diagnóstico")
+                        TextButton(onClick = onOpenAccounts) {
+                            Text("Contas")
                         }
                     },
                 )
@@ -282,6 +290,200 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AccountsScreen(
+        store: DiagnosticStore,
+        onOpenStatement: () -> Unit,
+        onOpenDiagnostic: () -> Unit,
+    ) {
+        var refresh by remember { mutableIntStateOf(0) }
+        val accounts = remember(refresh) { store.financialAccounts() }
+        var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var creatingAccount by remember { mutableStateOf(false) }
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Contas e cartões") },
+                    actions = {
+                        TextButton(onClick = onOpenStatement) { Text("Extrato") }
+                        TextButton(onClick = onOpenDiagnostic) { Text("Diagnóstico") }
+                    },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Button(
+                        onClick = { creatingAccount = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Adicionar conta ou cartão") }
+                }
+                items(accounts, key = { "account-${it.id}" }) { account ->
+                    Card(onClick = { editingAccount = account }) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(account.name, style = MaterialTheme.typography.titleMedium)
+                                if (account.isDefault) {
+                                    Text("Padrão", color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                            Text(
+                                account.type.displayName,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (account.type == FinancialAccountType.CREDIT_CARD) {
+                                Text(
+                                    "Fechamento: ${account.closingDay ?: "não informado"} · " +
+                                        "Vencimento: ${account.dueDay ?: "não informado"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val dialogAccount = editingAccount ?: if (creatingAccount) {
+            FinancialAccountRecord(
+                id = 0,
+                name = "",
+                type = FinancialAccountType.BANK_ACCOUNT,
+            )
+        } else null
+        dialogAccount?.let { account ->
+            EditAccountDialog(
+                account = account,
+                isNew = creatingAccount,
+                onDismiss = {
+                    editingAccount = null
+                    creatingAccount = false
+                },
+                onSave = { name, type, closingDay, dueDay, isDefault ->
+                    if (
+                        store.saveFinancialAccount(
+                            id = account.id.takeUnless { creatingAccount },
+                            name = name,
+                            type = type,
+                            closingDay = closingDay,
+                            dueDay = dueDay,
+                            isDefault = isDefault,
+                        )
+                    ) {
+                        editingAccount = null
+                        creatingAccount = false
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun EditAccountDialog(
+        account: FinancialAccountRecord,
+        isNew: Boolean,
+        onDismiss: () -> Unit,
+        onSave: (String, FinancialAccountType, Int?, Int?, Boolean) -> Unit,
+    ) {
+        var name by remember(account.id, isNew) { mutableStateOf(account.name) }
+        var type by remember(account.id, isNew) { mutableStateOf(account.type) }
+        var closingDay by remember(account.id, isNew) {
+            mutableStateOf(account.closingDay?.toString().orEmpty())
+        }
+        var dueDay by remember(account.id, isNew) {
+            mutableStateOf(account.dueDay?.toString().orEmpty())
+        }
+        var isDefault by remember(account.id, isNew) { mutableStateOf(account.isDefault) }
+        var typeMenuExpanded by remember { mutableStateOf(false) }
+        val closingValue = closingDay.toIntOrNull()
+        val dueValue = dueDay.toIntOrNull()
+        val daysValid = (closingDay.isBlank() || closingValue in 1..31) &&
+            (dueDay.isBlank() || dueValue in 1..31)
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(if (isNew) "Nova conta ou cartão" else "Editar conta ou cartão") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it.take(60) },
+                        label = { Text("Nome") },
+                        singleLine = true,
+                    )
+                    Box {
+                        OutlinedButton(
+                            onClick = { typeMenuExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(type.displayName) }
+                        DropdownMenu(
+                            expanded = typeMenuExpanded,
+                            onDismissRequest = { typeMenuExpanded = false },
+                        ) {
+                            FinancialAccountType.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.displayName) },
+                                    onClick = {
+                                        type = option
+                                        if (type == FinancialAccountType.BANK_ACCOUNT) {
+                                            closingDay = ""
+                                            dueDay = ""
+                                            isDefault = false
+                                        }
+                                        typeMenuExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    if (type == FinancialAccountType.CREDIT_CARD) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = closingDay,
+                                onValueChange = { closingDay = it.filter(Char::isDigit).take(2) },
+                                label = { Text("Fechamento") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                            )
+                            OutlinedTextField(
+                                value = dueDay,
+                                onValueChange = { dueDay = it.filter(Char::isDigit).take(2) },
+                                label = { Text("Vencimento") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = isDefault, onCheckedChange = { isDefault = it })
+                            Text("Cartão padrão")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { onSave(name, type, closingValue, dueValue, isDefault) },
+                    enabled = name.isNotBlank() && daysValid,
+                ) { Text("Salvar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @Composable
