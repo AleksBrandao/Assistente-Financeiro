@@ -217,7 +217,7 @@ class MainActivity : ComponentActivity() {
                 title = { Text("Prévia da importação Mobills") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Prontos: ${preview.readyCount}")
+                        Text("Realizados: ${preview.readyCount}")
                         Text("Pendentes: ${preview.pendingCount}")
                         Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
                         Text("Rejeitados: ${preview.rejectedCount}")
