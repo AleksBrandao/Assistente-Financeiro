@@ -4,6 +4,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import br.com.assistentefinanceiro.importing.ImportDisposition
+import br.com.assistentefinanceiro.importing.MobillsImportPreview
+import java.time.LocalDateTime
+import java.util.Locale
 
 data class DiagnosticEvent(
     val id: Long,
@@ -77,6 +81,12 @@ class DiagnosticStore(context: Context) :
                 "ALTER TABLE transactions ADD COLUMN category_source TEXT NOT NULL DEFAULT 'DEFAULT'"
             )
             db.execSQL("ALTER TABLE transactions ADD COLUMN rule_key TEXT")
+        }
+        if (oldVersion < 7) {
+            migrateTransactionsForImports(db)
+        } else if (oldVersion < 8) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN original_status TEXT")
+            db.delete("transactions", "origin = ?", arrayOf(TransactionOrigin.MOBILLS.name))
         }
         createCategoryRulesTable(db)
 
@@ -204,9 +214,10 @@ class DiagnosticStore(context: Context) :
     fun recentTransactions(limit: Int = 100): List<FinancialTransactionRecord> =
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
-                      category,category_source,rule_key
+                      category,category_source,rule_key,origin,status,account,original_category,
+                      original_status
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
-            arrayOf(limit.coerceIn(1, 500).toString()),
+            arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
@@ -216,7 +227,7 @@ class DiagnosticStore(context: Context) :
                         add(
                             FinancialTransactionRecord(
                                 id = cursor.getLong(0),
-                                sourceEventId = cursor.getLong(1),
+                                sourceEventId = if (cursor.isNull(1)) null else cursor.getLong(1),
                                 direction = direction,
                                 type = type,
                                 amount = cursor.getString(4),
@@ -227,6 +238,11 @@ class DiagnosticStore(context: Context) :
                                 categorySource =
                                     TransactionCategorySource.fromStored(cursor.getString(9)),
                                 ruleKey = cursor.getString(10),
+                                origin = TransactionOrigin.fromStored(cursor.getString(11)),
+                                status = TransactionStatus.fromStored(cursor.getString(12)),
+                                account = cursor.getString(13),
+                                originalCategory = cursor.getString(14),
+                                originalStatus = cursor.getString(15),
                             )
                         )
                     }
@@ -238,6 +254,7 @@ class DiagnosticStore(context: Context) :
         transactionId: Long,
         description: String,
         category: TransactionCategory,
+        status: TransactionStatus,
         applyToFuture: Boolean = false,
     ): Boolean {
         val normalizedDescription = description.trim()
@@ -272,6 +289,7 @@ class DiagnosticStore(context: Context) :
                     put("description", normalizedDescription)
                     put("category", category.name)
                     put("category_source", TransactionCategorySource.MANUAL.name)
+                    put("status", status.name)
                 },
                 "id = ?",
                 arrayOf(transactionId.toString()),
@@ -315,11 +333,122 @@ class DiagnosticStore(context: Context) :
         return updated
     }
 
+    fun importMobills(
+        preview: MobillsImportPreview,
+        includePossibleDuplicates: Boolean,
+    ): MobillsImportResult {
+        val accepted = preview.rows.filter { row ->
+            row.disposition == ImportDisposition.READY ||
+                row.disposition == ImportDisposition.PENDING ||
+                (includePossibleDuplicates && row.disposition == ImportDisposition.POSSIBLE_DUPLICATE)
+        }
+        var imported = 0
+        var alreadyImported = 0
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            accepted.forEach { row ->
+                val direction = row.direction ?: return@forEach
+                val date = row.date ?: return@forEach
+                val amount = row.amount ?: return@forEach
+                val result = db.insertWithOnConflict(
+                    "transactions",
+                    null,
+                    ContentValues().apply {
+                        putNull("source_event_id")
+                        put("direction", direction.name)
+                        put(
+                            "type",
+                            if (direction == FinancialTransactionDirection.INCOME) {
+                                FinancialTransactionType.IMPORTED_INCOME.name
+                            } else {
+                                FinancialTransactionType.IMPORTED_EXPENSE.name
+                            },
+                        )
+                        put("amount", amount.toPlainString())
+                        put("occurred_at", date.atStartOfDay().toString())
+                        put("description", row.description)
+                        put("source_package", "MOBILLS")
+                        put("category", row.category.name)
+                        put("category_source", TransactionCategorySource.MANUAL.name)
+                        putNull("rule_key")
+                        put("origin", TransactionOrigin.MOBILLS.name)
+                        put(
+                            "status",
+                            if (row.disposition == ImportDisposition.PENDING) {
+                                TransactionStatus.PENDING.name
+                            } else {
+                                TransactionStatus.REALIZED.name
+                            },
+                        )
+                        put("account", row.account)
+                        put("original_category", row.originalCategory)
+                        put("original_status", row.situation)
+                        put("import_key", row.importKey)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+                if (result == -1L) alreadyImported++ else imported++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return MobillsImportResult(imported, alreadyImported)
+    }
+
+    fun markExistingTransactions(preview: MobillsImportPreview): MobillsImportPreview {
+        val existing = readableDatabase.rawQuery(
+            "SELECT direction,amount,occurred_at,description FROM transactions",
+            null,
+        ).use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) {
+                    val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
+                        ?: continue
+                    val date = runCatching {
+                        LocalDateTime.parse(cursor.getString(2)).toLocalDate()
+                    }.getOrNull() ?: continue
+                    val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
+                    add(existingMatchKey(direction, amount.toPlainString(), date.toString(), cursor.getString(3)))
+                }
+            }
+        }
+        return MobillsImportPreview(
+            preview.rows.map { row ->
+                if (
+                    row.disposition != ImportDisposition.REJECTED &&
+                    row.direction != null && row.amount != null && row.date != null &&
+                    existingMatchKey(
+                        row.direction,
+                        row.amount.toPlainString(),
+                        row.date.toString(),
+                        row.description,
+                    ) in existing
+                ) {
+                    row.copy(disposition = ImportDisposition.POSSIBLE_DUPLICATE)
+                } else row
+            }
+        )
+    }
+
+    private fun existingMatchKey(
+        direction: FinancialTransactionDirection,
+        amount: String,
+        date: String,
+        description: String,
+    ): String = listOf(
+        direction.name,
+        amount.toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString().orEmpty(),
+        date,
+        description.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]"), ""),
+    ).joinToString("|")
+
     fun clearEvents() {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("transactions", null, null)
+            db.delete("transactions", "source_event_id IS NOT NULL", null)
             db.delete("events", null, null)
             db.setTransactionSuccessful()
         } finally {
@@ -495,13 +624,31 @@ class DiagnosticStore(context: Context) :
         FinancialTransactionType.CARD_PURCHASE ->
             merchant?.takeIf { it.isNotBlank() } ?: "Compra no cartão"
         FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+        FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
+        FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
+    }
+
+    private fun migrateTransactionsForImports(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE transactions RENAME TO transactions_before_import")
+        createTransactionsTable(db)
+        db.execSQL(
+            """INSERT INTO transactions(
+                id,source_event_id,direction,type,amount,occurred_at,description,source_package,
+                category,category_source,rule_key,origin,status
+            )
+            SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
+                   category,category_source,rule_key,'NOTIFICATION','REALIZED'
+            FROM transactions_before_import"""
+        )
+        db.execSQL("DROP TABLE transactions_before_import")
+        createIndexes(db)
     }
 
     private fun createTransactionsTable(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE IF NOT EXISTS transactions(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_event_id INTEGER NOT NULL UNIQUE,
+                source_event_id INTEGER UNIQUE,
                 direction TEXT NOT NULL,
                 type TEXT NOT NULL,
                 amount TEXT NOT NULL,
@@ -510,7 +657,13 @@ class DiagnosticStore(context: Context) :
                 source_package TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT 'UNCATEGORIZED',
                 category_source TEXT NOT NULL DEFAULT 'DEFAULT',
-                rule_key TEXT
+                rule_key TEXT,
+                origin TEXT NOT NULL DEFAULT 'NOTIFICATION',
+                status TEXT NOT NULL DEFAULT 'REALIZED',
+                account TEXT,
+                original_category TEXT,
+                original_status TEXT,
+                import_key TEXT UNIQUE
             )"""
         )
     }
@@ -554,6 +707,11 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 6
+        const val DATABASE_VERSION = 8
     }
 }
+
+data class MobillsImportResult(
+    val imported: Int,
+    val alreadyImported: Int,
+)

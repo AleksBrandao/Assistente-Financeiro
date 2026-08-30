@@ -28,7 +28,9 @@ enum class FinancialTransactionType(
     val direction: FinancialTransactionDirection,
 ) {
     CARD_PURCHASE(FinancialTransactionDirection.EXPENSE),
-    PIX_RECEIVED(FinancialTransactionDirection.INCOME);
+    PIX_RECEIVED(FinancialTransactionDirection.INCOME),
+    IMPORTED_EXPENSE(FinancialTransactionDirection.EXPENSE),
+    IMPORTED_INCOME(FinancialTransactionDirection.INCOME);
 
     companion object {
         fun fromStored(value: String?): FinancialTransactionType? =

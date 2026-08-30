@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -14,15 +16,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import br.com.assistentefinanceiro.notifications.*
+import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
+import br.com.assistentefinanceiro.importing.MobillsImportPreview
+import br.com.assistentefinanceiro.importing.SimpleXlsxReader
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class AppScreen {
     STATEMENT,
@@ -61,12 +70,46 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
-        val transactions = remember(refresh) { store.recentTransactions(limit = 500) }
+        val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
         val statement = remember(transactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, transactions)
         }
         var editingTransaction by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var importPreview by remember { mutableStateOf<MobillsImportPreview?>(null) }
+        var includePossibleDuplicates by remember { mutableStateOf(false) }
+        var importMessage by remember { mutableStateOf<String?>(null) }
+        var importError by remember { mutableStateOf<String?>(null) }
+        var readingImport by remember { mutableStateOf(false) }
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        val importLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            if (uri != null) {
+                readingImport = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            context.contentResolver.openInputStream(uri).use { input ->
+                                requireNotNull(input) { "Não foi possível abrir o arquivo" }
+                                store.markExistingTransactions(
+                                    MobillsImportAnalyzer.analyze(
+                                        rawRows = SimpleXlsxReader.readMobillsRows(input),
+                                    )
+                                )
+                            }
+                        }
+                    }.onSuccess {
+                        importPreview = it
+                        includePossibleDuplicates = false
+                    }.onFailure {
+                        importError = it.message ?: "Arquivo Mobills inválido"
+                    }
+                    readingImport = false
+                }
+            }
         }
 
         Scaffold(
@@ -74,6 +117,18 @@ class MainActivity : ComponentActivity() {
                 TopAppBar(
                     title = { Text("Assistente Financeiro") },
                     actions = {
+                        TextButton(
+                            onClick = {
+                                importLauncher.launch(
+                                    arrayOf(
+                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                                )
+                            },
+                            enabled = !readingImport,
+                        ) {
+                            Text(if (readingImport) "Lendo…" else "Importar")
+                        }
                         TextButton(onClick = onOpenDiagnostic) {
                             Text("Diagnóstico")
                         }
@@ -139,18 +194,91 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, applyToFuture ->
+                onSave = { description, category, status, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
+                            status = status,
                             applyToFuture = applyToFuture,
                         )
                     ) {
                         editingTransaction = null
                         refresh++
                     }
+                },
+            )
+        }
+
+        importPreview?.let { preview ->
+            AlertDialog(
+                onDismissRequest = { importPreview = null },
+                title = { Text("Prévia da importação Mobills") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Realizados: ${preview.readyCount}")
+                        Text("Pendentes: ${preview.pendingCount}")
+                        Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
+                        Text("Rejeitados: ${preview.rejectedCount}")
+                        preview.rejectionReasons.forEach { (reason, count) ->
+                            Text(
+                                "• $reason: $count",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (preview.possibleDuplicateCount > 0) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = includePossibleDuplicates,
+                                    onCheckedChange = { includePossibleDuplicates = it },
+                                )
+                                Text("Importar também as possíveis duplicidades")
+                            }
+                        }
+                        Text(
+                            "Registros rejeitados e duplicidades não selecionadas não serão gravados.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val result = store.importMobills(preview, includePossibleDuplicates)
+                        importPreview = null
+                        refresh++
+                        importMessage = "${result.imported} movimentações importadas" +
+                            if (result.alreadyImported > 0) {
+                                " · ${result.alreadyImported} já existentes"
+                            } else ""
+                    }) { Text("Confirmar importação") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { importPreview = null }) { Text("Cancelar") }
+                },
+            )
+        }
+
+        importMessage?.let { message ->
+            AlertDialog(
+                onDismissRequest = { importMessage = null },
+                title = { Text("Importação concluída") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { importMessage = null }) { Text("OK") }
+                },
+            )
+        }
+
+        importError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { importError = null },
+                title = { Text("Não foi possível importar") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { importError = null }) { Text("OK") }
                 },
             )
         }
@@ -192,14 +320,14 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Resultado do mês", style = MaterialTheme.typography.labelLarge)
+                Text("Resultado realizado", style = MaterialTheme.typography.labelLarge)
                 Text(
                     text = formatCurrency(statement.balance.toPlainString()),
                     color = balanceColor,
                     style = MaterialTheme.typography.headlineMedium,
                 )
                 Text(
-                    text = "Com base nas notificações reconhecidas",
+                    text = "Somente valores pagos ou recebidos",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -218,6 +346,24 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.weight(1f),
                     )
                 }
+                HorizontalDivider()
+                Text("Resultado previsto", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = formatCurrency(statement.projectedBalance.toPlainString()),
+                    color = if (statement.projectedBalance.signum() < 0) {
+                        Color(0xFFBA3B46)
+                    } else {
+                        Color(0xFF0A7D65)
+                    },
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text(
+                    text = "Inclui pendências: + " +
+                        formatCurrency(statement.pendingIncome.toPlainString()) +
+                        " / - " + formatCurrency(statement.pendingExpense.toPlainString()),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
@@ -336,7 +482,9 @@ class MainActivity : ComponentActivity() {
                                 " · automática"
                             } else {
                                 ""
-                            },
+                            } + if (transaction.status == TransactionStatus.PENDING) {
+                                " · pendente"
+                            } else "",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
@@ -352,7 +500,7 @@ class MainActivity : ComponentActivity() {
     private fun EditTransactionDialog(
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
-        onSave: (String, TransactionCategory, Boolean) -> Unit,
+        onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
     ) {
         var description by remember(transaction.id) {
             mutableStateOf(transaction.description)
@@ -365,6 +513,9 @@ class MainActivity : ComponentActivity() {
         }
         var applyToFuture by remember(transaction.id) {
             mutableStateOf(false)
+        }
+        var selectedStatus by remember(transaction.id) {
+            mutableStateOf(transaction.status)
         }
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
@@ -415,6 +566,37 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Switch(
+                            checked = selectedStatus == TransactionStatus.REALIZED,
+                            onCheckedChange = { checked ->
+                                selectedStatus = if (checked) {
+                                    TransactionStatus.REALIZED
+                                } else {
+                                    TransactionStatus.PENDING
+                                }
+                            },
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (transaction.direction == FinancialTransactionDirection.INCOME) {
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Recebido"
+                                } else {
+                                    "Não recebido"
+                                }
+                            } else {
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Pago"
+                                } else {
+                                    "Não pago"
+                                }
+                            }
+                        )
+                    }
                     if (
                         TransactionCategoryRule.canApplyToFuture(
                             type = transaction.type,
@@ -438,7 +620,7 @@ class MainActivity : ComponentActivity() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onSave(description, selectedCategory, applyToFuture)
+                        onSave(description, selectedCategory, selectedStatus, applyToFuture)
                     },
                     enabled = description.isNotBlank(),
                 ) {
@@ -583,6 +765,9 @@ class MainActivity : ComponentActivity() {
                                         "Reconhecida: final ${event.cardLastFour} · ${formatCurrency(event.amount)} · ${event.merchant}"
                                     FinancialTransactionType.PIX_RECEIVED ->
                                         "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
+                                    FinancialTransactionType.IMPORTED_EXPENSE,
+                                    FinancialTransactionType.IMPORTED_INCOME ->
+                                        "Movimentação importada"
                                     null -> "Transação reconhecida"
                                 }
                                 NotificationClassification.IGNORED_PROMOTION ->
@@ -607,6 +792,8 @@ class MainActivity : ComponentActivity() {
         when (type) {
             FinancialTransactionType.CARD_PURCHASE -> "Compra no cartão"
             FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+            FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
+            FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
         }
 
     private fun notificationAccessEnabled(): Boolean {

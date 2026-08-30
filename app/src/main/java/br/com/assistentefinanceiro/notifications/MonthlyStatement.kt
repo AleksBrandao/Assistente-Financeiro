@@ -23,11 +23,22 @@ data class MonthlyStatement(
     val totalIncome: BigDecimal,
     val totalExpense: BigDecimal,
     val balance: BigDecimal,
+    val pendingIncome: BigDecimal = BigDecimal.ZERO,
+    val pendingExpense: BigDecimal = BigDecimal.ZERO,
     val groups: List<DailyTransactionGroup>,
     val categoryExpenses: List<CategoryExpenseSummary> = emptyList(),
 ) {
     val transactionCount: Int
         get() = groups.sumOf { it.transactions.size }
+
+    val projectedIncome: BigDecimal
+        get() = totalIncome + pendingIncome
+
+    val projectedExpense: BigDecimal
+        get() = totalExpense + pendingExpense
+
+    val projectedBalance: BigDecimal
+        get() = projectedIncome - projectedExpense
 }
 
 object MonthlyStatementCalculator {
@@ -52,12 +63,31 @@ object MonthlyStatementCalculator {
         val expenseItems = normalized.filter {
             it.transaction.direction == FinancialTransactionDirection.EXPENSE
         }
-        val totalIncome = incomeItems.fold(BigDecimal.ZERO) { total, item ->
+        val realizedIncomeItems = incomeItems.filter {
+            it.transaction.status == TransactionStatus.REALIZED
+        }
+        val realizedExpenseItems = expenseItems.filter {
+            it.transaction.status == TransactionStatus.REALIZED
+        }
+        val pendingIncomeItems = incomeItems.filter {
+            it.transaction.status == TransactionStatus.PENDING
+        }
+        val pendingExpenseItems = expenseItems.filter {
+            it.transaction.status == TransactionStatus.PENDING
+        }
+        val totalIncome = realizedIncomeItems.fold(BigDecimal.ZERO) { total, item ->
             total + item.amount
         }
-        val totalExpense = expenseItems.fold(BigDecimal.ZERO) { total, item ->
+        val totalExpense = realizedExpenseItems.fold(BigDecimal.ZERO) { total, item ->
             total + item.amount
         }
+        val pendingIncome = pendingIncomeItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.amount
+        }
+        val pendingExpense = pendingExpenseItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.amount
+        }
+        val projectedExpense = totalExpense + pendingExpense
         val categoryExpenses = expenseItems
             .groupBy { it.transaction.category }
             .map { (category, items) ->
@@ -68,7 +98,7 @@ object MonthlyStatementCalculator {
                     category = category,
                     total = categoryTotal,
                     transactionCount = items.size,
-                    sharePercent = percentageOf(categoryTotal, totalExpense),
+                    sharePercent = percentageOf(categoryTotal, projectedExpense),
                 )
             }
             .sortedWith(
@@ -94,6 +124,8 @@ object MonthlyStatementCalculator {
             totalIncome = totalIncome,
             totalExpense = totalExpense,
             balance = totalIncome - totalExpense,
+            pendingIncome = pendingIncome,
+            pendingExpense = pendingExpense,
             categoryExpenses = categoryExpenses,
             groups = groups,
         )
