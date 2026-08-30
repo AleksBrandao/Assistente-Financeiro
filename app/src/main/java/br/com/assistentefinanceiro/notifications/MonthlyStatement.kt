@@ -34,6 +34,7 @@ object MonthlyStatementCalculator {
     fun calculate(
         period: YearMonth,
         transactions: List<FinancialTransactionRecord>,
+        today: LocalDate = LocalDate.now(),
     ): MonthlyStatement {
         val normalized = transactions.mapNotNull { transaction ->
             val occurredAt = runCatching {
@@ -42,6 +43,11 @@ object MonthlyStatementCalculator {
             val amount = transaction.amount.toBigDecimalOrNull()
                 ?.takeIf { it.signum() >= 0 }
                 ?: return@mapNotNull null
+
+            if (
+                transaction.status == TransactionStatus.PLANNED &&
+                occurredAt.toLocalDate().isAfter(today)
+            ) return@mapNotNull null
 
             NormalizedTransaction(transaction, occurredAt, amount)
         }.filter { YearMonth.from(it.occurredAt) == period }
