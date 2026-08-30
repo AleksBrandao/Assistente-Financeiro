@@ -6,7 +6,10 @@ import java.time.YearMonth
 
 enum class CreditCardInvoiceStatus(val displayName: String) {
     OPEN("Aberta"),
-    CLOSED("Fechada");
+    CLOSED("Fechada"),
+    PARTIALLY_PAID("Parcialmente paga"),
+    PAID("Paga"),
+    OVERDUE("Em atraso");
 
     companion object {
         fun fromStored(value: String?): CreditCardInvoiceStatus =
@@ -28,7 +31,15 @@ data class CreditCardInvoiceRecord(
     val dueDate: LocalDate?,
     val status: CreditCardInvoiceStatus,
     val total: BigDecimal,
+    val paidAmount: BigDecimal,
+    val outstandingAmount: BigDecimal,
     val transactionCount: Int,
+)
+
+data class InvoicePaymentRecord(
+    val id: Long,
+    val amount: BigDecimal,
+    val paidAt: LocalDate,
 )
 
 object CreditCardBillingCycle {
@@ -60,6 +71,19 @@ object CreditCardBillingCycle {
     fun status(closingDate: LocalDate, today: LocalDate): CreditCardInvoiceStatus =
         if (!today.isBefore(closingDate)) CreditCardInvoiceStatus.CLOSED
         else CreditCardInvoiceStatus.OPEN
+
+    fun paymentStatus(
+        total: BigDecimal,
+        paidAmount: BigDecimal,
+        closingDate: LocalDate,
+        dueDate: LocalDate?,
+        today: LocalDate,
+    ): CreditCardInvoiceStatus {
+        if (total.signum() <= 0 || paidAmount >= total) return CreditCardInvoiceStatus.PAID
+        if (dueDate != null && today.isAfter(dueDate)) return CreditCardInvoiceStatus.OVERDUE
+        if (paidAmount.signum() > 0) return CreditCardInvoiceStatus.PARTIALLY_PAID
+        return status(closingDate, today)
+    }
 
     fun fromImportedInvoiceDate(
         invoiceDate: LocalDate,
