@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,7 +18,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -149,6 +152,9 @@ class MainActivity : ComponentActivity() {
         }
         val statement = remember(statementTransactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
+        }
+        val generalProjectedBalance = remember(refresh, selectedMonth) {
+            store.generalProjectedBalance(selectedMonth.atEndOfMonth())
         }
         val visibleGroups = remember(statement.groups, pendingOnly) {
             if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
@@ -285,7 +291,12 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                item { StatementSummary(statement) }
+                item {
+                    StatementSummary(
+                        statement = statement,
+                        generalProjectedBalance = generalProjectedBalance,
+                    )
+                }
                 if (!consolidateInvoices && statement.categoryExpenses.isNotEmpty()) {
                     item { ExpenseByCategoryCard(statement.categoryExpenses) }
                 }
@@ -1615,9 +1626,27 @@ class MainActivity : ComponentActivity() {
         onPrevious: () -> Unit,
         onNext: () -> Unit,
     ) {
+        val swipeThreshold = with(LocalDensity.current) { 72.dp.toPx() }
         Card {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(selectedMonth, swipeThreshold) {
+                        var horizontalDistance = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { horizontalDistance = 0f },
+                            onHorizontalDrag = { _, dragAmount ->
+                                horizontalDistance += dragAmount
+                            },
+                            onDragEnd = {
+                                when {
+                                    horizontalDistance > swipeThreshold -> onPrevious()
+                                    horizontalDistance < -swipeThreshold -> onNext()
+                                }
+                            },
+                        )
+                    }
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = onPrevious) { Text("‹") }
@@ -1633,7 +1662,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun StatementSummary(statement: MonthlyStatement) {
+    private fun StatementSummary(
+        statement: MonthlyStatement,
+        generalProjectedBalance: java.math.BigDecimal,
+    ) {
         val balanceColor = if (statement.balance.signum() < 0) {
             Color(0xFFBA3B46)
         } else {
@@ -1686,6 +1718,21 @@ class MainActivity : ComponentActivity() {
                     text = "Inclui pendências: + " +
                         formatCurrency(statement.pendingIncome.toPlainString()) +
                         " / - " + formatCurrency(statement.pendingExpense.toPlainString()),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                HorizontalDivider()
+                Text("Saldo geral projetado", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = formatCurrency(generalProjectedBalance.toPlainString()),
+                    color = if (generalProjectedBalance.signum() < 0) {
+                        Color(0xFFBA3B46)
+                    } else Color(0xFF0A7D65),
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    "Saldo acumulado das contas bancárias até o fim de " +
+                        formatMonth(statement.period),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
