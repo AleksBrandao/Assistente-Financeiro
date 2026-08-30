@@ -304,12 +304,21 @@ class MainActivity : ComponentActivity() {
         var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var creatingAccount by remember { mutableStateOf(false) }
         var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var viewingMovementsFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
 
         viewingInvoicesFor?.let { account ->
             CardInvoicesScreen(
                 store = store,
                 account = account,
                 onBack = { viewingInvoicesFor = null },
+            )
+            return
+        }
+        viewingMovementsFor?.let { account ->
+            AccountMovementsScreen(
+                store = store,
+                account = account,
+                onBack = { viewingMovementsFor = null },
             )
             return
         }
@@ -372,6 +381,10 @@ class MainActivity : ComponentActivity() {
                                     TextButton(onClick = { viewingInvoicesFor = account }) {
                                         Text("Faturas")
                                     }
+                                } else {
+                                    TextButton(onClick = { viewingMovementsFor = account }) {
+                                        Text("Movimentações")
+                                    }
                                 }
                             }
                         }
@@ -413,6 +426,62 @@ class MainActivity : ComponentActivity() {
                     }
                 },
             )
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AccountMovementsScreen(
+        store: DiagnosticStore,
+        account: FinancialAccountRecord,
+        onBack: () -> Unit,
+    ) {
+        val movements = remember(account.id) { store.accountMovements(account.id) }
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(account.name) },
+                    actions = { TextButton(onClick = onBack) { Text("Contas") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item { Text("Movimentações da conta", style = MaterialTheme.typography.headlineSmall) }
+                if (movements.isEmpty()) {
+                    item {
+                        Card {
+                            Text(
+                                "Nenhuma movimentação de conta registrada.",
+                                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                            )
+                        }
+                    }
+                }
+                items(movements, key = { "account-movement-${it.id}" }) { movement ->
+                    Card {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(movement.description, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    movement.occurredAt.format(SHORT_DATE_FORMATTER),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Text(
+                                "- " + formatCurrency(movement.amount.toPlainString()),
+                                color = Color(0xFFBA3B46),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 
