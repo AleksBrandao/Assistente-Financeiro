@@ -41,6 +41,17 @@ private enum class AppScreen {
     ACCOUNTS,
 }
 
+private data class AccountLedgerItem(
+    val key: String,
+    val occurredAt: LocalDateTime,
+    val direction: FinancialTransactionDirection,
+    val amount: java.math.BigDecimal,
+    val description: String,
+    val detail: String,
+    val transaction: FinancialTransactionRecord? = null,
+    val movement: AccountMovementRecord? = null,
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -315,7 +326,10 @@ class MainActivity : ComponentActivity() {
             CardInvoicesScreen(
                 store = store,
                 account = account,
-                onBack = { viewingInvoicesFor = null },
+                onBack = {
+                    viewingInvoicesFor = null
+                    refresh++
+                },
             )
             return
         }
@@ -323,7 +337,11 @@ class MainActivity : ComponentActivity() {
             AccountMovementsScreen(
                 store = store,
                 account = account,
-                onBack = { viewingMovementsFor = null },
+                onBack = {
+                    viewingMovementsFor = null
+                    refresh++
+                },
+                onChanged = { refresh++ },
             )
             return
         }
@@ -588,6 +606,7 @@ class MainActivity : ComponentActivity() {
         store: DiagnosticStore,
         account: FinancialAccountRecord,
         onBack: () -> Unit,
+        onChanged: () -> Unit,
     ) {
         var refresh by remember(account.id) { mutableIntStateOf(0) }
         val movements = remember(account.id, refresh) { store.accountMovements(account.id) }
@@ -595,6 +614,52 @@ class MainActivity : ComponentActivity() {
             store.recentTransactions(10_000).filter { it.accountId == account.id }
         }
         val balance = remember(account.id, refresh) { store.accountBalance(account) }
+        val ledgerItems = remember(transactions, movements) {
+            val transactionItems = transactions.mapNotNull { transaction ->
+                val occurredAt = runCatching {
+                    LocalDateTime.parse(transaction.occurredAt)
+                }.getOrNull() ?: return@mapNotNull null
+                AccountLedgerItem(
+                    key = "transaction-${transaction.id}",
+                    occurredAt = occurredAt,
+                    direction = transaction.direction,
+                    amount = transaction.amount.toBigDecimalOrNull() ?: return@mapNotNull null,
+                    description = transaction.description,
+                    detail = listOf(
+                        transaction.category.displayName,
+                        if (transaction.status == TransactionStatus.PENDING) "Pendente"
+                        else "Realizada",
+                    ).joinToString(" · "),
+                    transaction = transaction,
+                )
+            }
+            val movementItems = movements.map { movement ->
+                AccountLedgerItem(
+                    key = "movement-${movement.id}",
+                    // Movimentações criadas no app aparecem antes das importadas no mesmo dia.
+                    occurredAt = movement.occurredAt.atTime(23, 59, 59),
+                    direction = if (movement.direction == AccountMovementDirection.CREDIT) {
+                        FinancialTransactionDirection.INCOME
+                    } else FinancialTransactionDirection.EXPENSE,
+                    amount = movement.amount,
+                    description = movement.description,
+                    detail = listOfNotNull(
+                        movement.relatedAccountName,
+                        if (movement.type == AccountMovementType.TRANSFER) "Transferência"
+                        else "Pagamento de fatura",
+                    ).joinToString(" · "),
+                    movement = movement,
+                )
+            }
+            (transactionItems + movementItems).sortedWith(
+                compareByDescending<AccountLedgerItem> { it.occurredAt }
+                    .thenByDescending { it.transaction?.id ?: it.movement?.id ?: 0L },
+            )
+        }
+        val ledgerByMonth = remember(ledgerItems) {
+            ledgerItems.groupBy { YearMonth.from(it.occurredAt) }
+                .toList().sortedByDescending { it.first }
+        }
         var addingTransaction by remember { mutableStateOf(false) }
         var editingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
         var deletingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
@@ -656,55 +721,45 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (transactions.isNotEmpty()) {
-                    item { Text("Receitas e despesas", style = MaterialTheme.typography.titleLarge) }
-                    items(transactions, key = { "account-transaction-${it.id}" }) { transaction ->
-                        TransactionCard(
-                            transaction = transaction,
-                            onClick = {
-                                if (transaction.origin == TransactionOrigin.MANUAL) {
-                                    editingTransaction = transaction
-                                }
-                            },
-                        )
+                ledgerByMonth.forEach { (month, monthItems) ->
+                    item(key = "account-month-$month") {
+                        Text(formatMonth(month), style = MaterialTheme.typography.titleLarge)
                     }
-                }
-                if (movements.isNotEmpty()) {
-                    item {
-                        Text("Transferências e faturas", style = MaterialTheme.typography.titleLarge)
-                    }
-                }
-                items(movements, key = { "account-movement-${it.id}" }) { movement ->
-                    Card {
+                    items(monthItems, key = { it.key }) { ledgerItem ->
+                    Card(onClick = {
+                        ledgerItem.transaction?.takeIf {
+                            it.origin == TransactionOrigin.MANUAL
+                        }?.let { editingTransaction = it }
+                    }) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(movement.description, style = MaterialTheme.typography.titleMedium)
+                                Text(ledgerItem.description, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    listOfNotNull(
-                                        movement.occurredAt.format(SHORT_DATE_FORMATTER),
-                                        movement.relatedAccountName,
-                                    ).joinToString(" · "),
+                                    ledgerItem.occurredAt.toLocalDate().format(SHORT_DATE_FORMATTER) +
+                                        (ledgerItem.detail.takeIf { it.isNotBlank() }
+                                            ?.let { " · $it" } ?: ""),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
                             Text(
-                                (if (movement.direction == AccountMovementDirection.DEBIT) {
+                                (if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
                                     "- "
-                                } else "+ ") + formatCurrency(movement.amount.toPlainString()),
-                                color = if (movement.direction == AccountMovementDirection.DEBIT) {
+                                } else "+ ") + formatCurrency(ledgerItem.amount.toPlainString()),
+                                color = if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
                                     Color(0xFFBA3B46)
                                 } else Color(0xFF0A7D65),
                                 style = MaterialTheme.typography.titleMedium,
                             )
-                            if (movement.type == AccountMovementType.TRANSFER) {
-                                TextButton(onClick = { deletingTransfer = movement }) {
+                            if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
+                                TextButton(onClick = { deletingTransfer = ledgerItem.movement }) {
                                     Text("Excluir", color = Color(0xFFBA3B46))
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
@@ -720,6 +775,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         addingTransaction = false
                         refresh++
+                        onChanged()
                     }
                 },
             )
@@ -736,6 +792,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         editingTransaction = null
                         refresh++
+                        onChanged()
                     }
                 },
                 onDelete = {
@@ -754,6 +811,7 @@ class MainActivity : ComponentActivity() {
                         if (store.deleteManualTransaction(transaction.id)) {
                             deletingTransaction = null
                             refresh++
+                            onChanged()
                         }
                     }) { Text("Excluir", color = Color(0xFFBA3B46)) }
                 },
@@ -772,6 +830,7 @@ class MainActivity : ComponentActivity() {
                         if (store.deleteTransfer(movement.id)) {
                             deletingTransfer = null
                             refresh++
+                            onChanged()
                         }
                     }) { Text("Excluir", color = Color(0xFFBA3B46)) }
                 },
