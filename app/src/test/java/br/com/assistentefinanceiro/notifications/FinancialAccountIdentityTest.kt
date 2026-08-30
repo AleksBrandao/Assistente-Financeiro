@@ -23,4 +23,19 @@ class FinancialAccountIdentityTest {
             FinancialAccountIdentity.inferredType("Santander"),
         )
     }
+
+    @Test
+    fun normalizesAndMatchesCardIdentifiers() {
+        assertEquals(
+            "6426,5253",
+            FinancialAccountIdentity.normalizedIdentifiers("6426 / 5253"),
+        )
+        val account = FinancialAccountRecord(
+            id = 1,
+            name = "CINZA",
+            type = FinancialAccountType.CREDIT_CARD,
+            cardIdentifiers = "6426,5253",
+        )
+        assertEquals(true, account.matchesCardLastFour("5253"))
+    }
 }
