@@ -17,6 +17,7 @@ data class FinancialTransactionRecord(
     val account: String? = null,
     val originalCategory: String? = null,
     val originalStatus: String? = null,
+    val accountId: Long? = null,
 )
 
 enum class TransactionOrigin {
