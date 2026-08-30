@@ -710,7 +710,10 @@ class DiagnosticStore(context: Context) :
         }
     }
 
-    fun accountBalance(account: FinancialAccountRecord): AccountBalanceSummary {
+    fun accountBalance(
+        account: FinancialAccountRecord,
+        throughDate: LocalDate? = null,
+    ): AccountBalanceSummary {
         val fromDate = account.openingBalanceDate
         val transactions = readableDatabase.rawQuery(
             "SELECT direction,amount,occurred_at,status FROM transactions WHERE account_id = ?",
@@ -722,6 +725,7 @@ class DiagnosticStore(context: Context) :
                     LocalDateTime.parse(cursor.getString(2)).toLocalDate()
                 }.getOrNull() ?: continue
                 if (fromDate != null && date.isBefore(fromDate)) continue
+                if (throughDate != null && date.isAfter(throughDate)) continue
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
                 val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
                     ?: continue
@@ -731,9 +735,41 @@ class DiagnosticStore(context: Context) :
             }
         }
         val movements = accountMovements(account.id).filter { movement ->
-            fromDate == null || !movement.occurredAt.isBefore(fromDate)
+            (fromDate == null || !movement.occurredAt.isBefore(fromDate)) &&
+                (throughDate == null || !movement.occurredAt.isAfter(throughDate))
         }
         return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
+    }
+
+    fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal {
+        val accounts = financialAccounts()
+        val bankBalance = accounts
+            .filter {
+                it.type == FinancialAccountType.BANK_ACCOUNT &&
+                    (it.openingBalanceDate == null || !it.openingBalanceDate.isAfter(throughDate))
+            }
+            .fold(java.math.BigDecimal.ZERO) { total, account ->
+                total + accountBalance(account, throughDate).projectedBalance
+            }
+        val invoiceAdjustment = accounts
+            .filter { it.type == FinancialAccountType.CREDIT_CARD }
+            .flatMap { creditCardInvoices(it.id) }
+            .fold(java.math.BigDecimal.ZERO) { total, invoice ->
+                val payments = invoicePayments(invoice).filter { !it.paidAt.isAfter(throughDate) }
+                val paidThroughDate = payments.fold(java.math.BigDecimal.ZERO) { sum, payment ->
+                    sum + payment.amount
+                }
+                val outstandingAtDate = (invoice.total - paidThroughDate)
+                    .max(java.math.BigDecimal.ZERO)
+                val dueOutstanding = if (
+                    invoice.dueDate != null && !invoice.dueDate.isAfter(throughDate)
+                ) outstandingAtDate else java.math.BigDecimal.ZERO
+                val paymentsWithoutAccount = payments
+                    .filter { it.sourceAccountId == null }
+                    .fold(java.math.BigDecimal.ZERO) { sum, payment -> sum + payment.amount }
+                total + dueOutstanding + paymentsWithoutAccount
+            }
+        return bankBalance - invoiceAdjustment
     }
 
     fun recordTransfer(
