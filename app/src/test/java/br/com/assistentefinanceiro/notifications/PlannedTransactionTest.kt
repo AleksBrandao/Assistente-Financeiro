@@ -1,13 +1,12 @@
 package br.com.assistentefinanceiro.notifications
 
-import java.time.LocalDate
 import java.time.YearMonth
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class PlannedTransactionTest {
+class PendingTransactionTest {
     @Test
-    fun excludesPlannedTransactionUntilItsDate() {
+    fun separatesPendingTransactionFromRealizedResult() {
         val transaction = FinancialTransactionRecord(
             id = 1,
             sourceEventId = null,
@@ -17,18 +16,17 @@ class PlannedTransactionTest {
             occurredAt = "2026-09-10T00:00:00",
             description = "Parcela",
             sourcePackage = "MOBILLS",
-            status = TransactionStatus.PLANNED,
+            status = TransactionStatus.PENDING,
             origin = TransactionOrigin.MOBILLS,
         )
 
-        val before = MonthlyStatementCalculator.calculate(
-            YearMonth.of(2026, 9), listOf(transaction), LocalDate.of(2026, 8, 30)
-        )
-        val onDate = MonthlyStatementCalculator.calculate(
-            YearMonth.of(2026, 9), listOf(transaction), LocalDate.of(2026, 9, 10)
+        val statement = MonthlyStatementCalculator.calculate(
+            YearMonth.of(2026, 9), listOf(transaction)
         )
 
-        assertEquals(0, before.transactionCount)
-        assertEquals(1, onDate.transactionCount)
+        assertEquals(1, statement.transactionCount)
+        assertEquals("0", statement.totalExpense.toPlainString())
+        assertEquals("100.00", statement.pendingExpense.toPlainString())
+        assertEquals("100.00", statement.projectedExpense.toPlainString())
     }
 }
