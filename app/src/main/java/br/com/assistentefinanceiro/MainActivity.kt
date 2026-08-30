@@ -221,6 +221,13 @@ class MainActivity : ComponentActivity() {
                         Text("Planejados: ${preview.plannedCount}")
                         Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
                         Text("Rejeitados: ${preview.rejectedCount}")
+                        preview.rejectionReasons.forEach { (reason, count) ->
+                            Text(
+                                "• $reason: $count",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         if (preview.possibleDuplicateCount > 0) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(
