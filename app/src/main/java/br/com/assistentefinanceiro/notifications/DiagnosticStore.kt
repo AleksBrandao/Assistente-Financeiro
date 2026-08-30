@@ -56,6 +56,7 @@ class DiagnosticStore(context: Context) :
         createFinancialAccountsTable(db)
         createCreditCardInvoicesTable(db)
         createInvoicePaymentsTable(db)
+        createAccountMovementsTable(db)
         createIndexes(db)
     }
 
@@ -116,6 +117,10 @@ class DiagnosticStore(context: Context) :
         }
         if (oldVersion == 11) {
             db.execSQL("ALTER TABLE invoice_payments ADD COLUMN source_account_id INTEGER")
+        }
+        if (oldVersion < 13) {
+            createAccountMovementsTable(db)
+            rebuildPaymentAccountMovements(db)
         }
         createCategoryRulesTable(db)
 
@@ -567,21 +572,34 @@ class DiagnosticStore(context: Context) :
         if (amount.signum() <= 0 || amount > invoice.outstandingAmount) return false
         val db = writableDatabase
         if (sourceAccountId != null && !isBankAccount(db, sourceAccountId)) return false
-        val inserted = db.insert(
-            "invoice_payments",
-            null,
-            ContentValues().apply {
-                put("account_id", invoice.accountId)
-                put("closing_period", invoice.closingPeriod.toString())
-                put("amount", amount.toPlainString())
-                put("paid_at", paidAt.toString())
-                put("created_at", System.currentTimeMillis())
-                if (sourceAccountId == null) putNull("source_account_id")
-                else put("source_account_id", sourceAccountId)
-            },
-        ) != -1L
-        if (inserted) refreshInvoiceStatuses(db, invoice.accountId, LocalDate.now())
-        return inserted
+        db.beginTransaction()
+        return try {
+            val paymentId = db.insertOrThrow(
+                "invoice_payments",
+                null,
+                ContentValues().apply {
+                    put("account_id", invoice.accountId)
+                    put("closing_period", invoice.closingPeriod.toString())
+                    put("amount", amount.toPlainString())
+                    put("paid_at", paidAt.toString())
+                    put("created_at", System.currentTimeMillis())
+                    if (sourceAccountId == null) putNull("source_account_id")
+                    else put("source_account_id", sourceAccountId)
+                },
+            )
+            if (sourceAccountId != null) {
+                insertPaymentAccountMovement(
+                    db, paymentId, sourceAccountId, amount, paidAt, invoice.accountId,
+                )
+            }
+            refreshInvoiceStatuses(db, invoice.accountId, LocalDate.now())
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun invoicePayments(invoice: CreditCardInvoiceRecord): List<InvoicePaymentRecord> =
@@ -615,17 +633,39 @@ class DiagnosticStore(context: Context) :
         paymentId: Long,
     ): Boolean {
         val db = writableDatabase
-        val deleted = db.delete(
-            "invoice_payments",
-            "id = ? AND account_id = ? AND closing_period = ?",
-            arrayOf(
-                paymentId.toString(),
-                invoice.accountId.toString(),
-                invoice.closingPeriod.toString(),
-            ),
-        ) == 1
-        if (deleted) refreshInvoiceStatuses(db, invoice.accountId, LocalDate.now())
-        return deleted
+        db.beginTransaction()
+        return try {
+            db.delete("account_movements", "invoice_payment_id = ?", arrayOf(paymentId.toString()))
+            val deleted = db.delete(
+                "invoice_payments",
+                "id = ? AND account_id = ? AND closing_period = ?",
+                arrayOf(paymentId.toString(), invoice.accountId.toString(), invoice.closingPeriod.toString()),
+            ) == 1
+            if (deleted) refreshInvoiceStatuses(db, invoice.accountId, LocalDate.now())
+            if (deleted) db.setTransactionSuccessful()
+            deleted
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun accountMovements(accountId: Long): List<AccountMovementRecord> = readableDatabase.rawQuery(
+        """SELECT id,amount,occurred_at,description FROM account_movements
+           WHERE account_id = ? ORDER BY occurred_at DESC,id DESC""",
+        arrayOf(accountId.toString()),
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                add(
+                    AccountMovementRecord(
+                        id = cursor.getLong(0),
+                        amount = cursor.getString(1).toBigDecimal(),
+                        occurredAt = LocalDate.parse(cursor.getString(2)),
+                        description = cursor.getString(3),
+                    )
+                )
+            }
+        }
     }
 
     fun invoiceTransactions(invoiceId: Long): List<FinancialTransactionRecord> =
@@ -1031,6 +1071,81 @@ class DiagnosticStore(context: Context) :
         )
     }
 
+    private fun createAccountMovementsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS account_movements(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                description TEXT NOT NULL,
+                invoice_payment_id INTEGER UNIQUE
+            )"""
+        )
+    }
+
+    private fun insertPaymentAccountMovement(
+        db: SQLiteDatabase,
+        paymentId: Long,
+        sourceAccountId: Long,
+        amount: java.math.BigDecimal,
+        paidAt: LocalDate,
+        cardAccountId: Long,
+    ) {
+        val cardName = db.rawQuery(
+            "SELECT name FROM financial_accounts WHERE id = ?",
+            arrayOf(cardAccountId.toString()),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else "cartão" }
+        db.insertOrThrow(
+            "account_movements",
+            null,
+            ContentValues().apply {
+                put("account_id", sourceAccountId)
+                put("type", "CARD_PAYMENT")
+                put("amount", amount.toPlainString())
+                put("occurred_at", paidAt.toString())
+                put("description", "Pagamento da fatura $cardName")
+                put("invoice_payment_id", paymentId)
+            },
+        )
+    }
+
+    private fun rebuildPaymentAccountMovements(db: SQLiteDatabase) {
+        db.rawQuery(
+            """SELECT id,source_account_id,amount,paid_at,account_id FROM invoice_payments
+               WHERE source_account_id IS NOT NULL""",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                db.insertWithOnConflict(
+                    "account_movements",
+                    null,
+                    ContentValues().apply {
+                        val paymentId = cursor.getLong(0)
+                        val sourceAccountId = cursor.getLong(1)
+                        val amount = cursor.getString(2)
+                        val paidAt = cursor.getString(3)
+                        val cardAccountId = cursor.getLong(4)
+                        val cardName = db.rawQuery(
+                            "SELECT name FROM financial_accounts WHERE id = ?",
+                            arrayOf(cardAccountId.toString()),
+                        ).use { nameCursor ->
+                            if (nameCursor.moveToFirst()) nameCursor.getString(0) else "cartão"
+                        }
+                        put("account_id", sourceAccountId)
+                        put("type", "CARD_PAYMENT")
+                        put("amount", amount)
+                        put("occurred_at", paidAt)
+                        put("description", "Pagamento da fatura $cardName")
+                        put("invoice_payment_id", paymentId)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+            }
+        }
+    }
+
     private fun isBankAccount(db: SQLiteDatabase, accountId: Long): Boolean = db.rawQuery(
         "SELECT type FROM financial_accounts WHERE id = ?",
         arrayOf(accountId.toString()),
@@ -1311,7 +1426,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 12
+        const val DATABASE_VERSION = 13
     }
 }
 
