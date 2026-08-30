@@ -303,6 +303,16 @@ class MainActivity : ComponentActivity() {
         val accounts = remember(refresh) { store.financialAccounts() }
         var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var creatingAccount by remember { mutableStateOf(false) }
+        var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+
+        viewingInvoicesFor?.let { account ->
+            CardInvoicesScreen(
+                store = store,
+                account = account,
+                onBack = { viewingInvoicesFor = null },
+            )
+            return
+        }
 
         Scaffold(
             topBar = {
@@ -326,7 +336,7 @@ class MainActivity : ComponentActivity() {
                     ) { Text("Adicionar conta ou cartão") }
                 }
                 items(accounts, key = { "account-${it.id}" }) { account ->
-                    Card(onClick = { editingAccount = account }) {
+                    Card {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -351,6 +361,19 @@ class MainActivity : ComponentActivity() {
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                TextButton(onClick = { editingAccount = account }) {
+                                    Text("Editar")
+                                }
+                                if (account.type == FinancialAccountType.CREDIT_CARD) {
+                                    TextButton(onClick = { viewingInvoicesFor = account }) {
+                                        Text("Faturas")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -372,7 +395,7 @@ class MainActivity : ComponentActivity() {
                     editingAccount = null
                     creatingAccount = false
                 },
-                onSave = { name, type, closingDay, dueDay, isDefault ->
+                onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers ->
                     if (
                         store.saveFinancialAccount(
                             id = account.id.takeUnless { creatingAccount },
@@ -381,6 +404,7 @@ class MainActivity : ComponentActivity() {
                             closingDay = closingDay,
                             dueDay = dueDay,
                             isDefault = isDefault,
+                            cardIdentifiers = cardIdentifiers,
                         )
                     ) {
                         editingAccount = null
@@ -397,7 +421,7 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         isNew: Boolean,
         onDismiss: () -> Unit,
-        onSave: (String, FinancialAccountType, Int?, Int?, Boolean) -> Unit,
+        onSave: (String, FinancialAccountType, Int?, Int?, Boolean, String?) -> Unit,
     ) {
         var name by remember(account.id, isNew) { mutableStateOf(account.name) }
         var type by remember(account.id, isNew) { mutableStateOf(account.type) }
@@ -408,6 +432,9 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(account.dueDay?.toString().orEmpty())
         }
         var isDefault by remember(account.id, isNew) { mutableStateOf(account.isDefault) }
+        var cardIdentifiers by remember(account.id, isNew) {
+            mutableStateOf(account.cardIdentifiers.orEmpty())
+        }
         var typeMenuExpanded by remember { mutableStateOf(false) }
         val closingValue = closingDay.toIntOrNull()
         val dueValue = dueDay.toIntOrNull()
@@ -443,6 +470,7 @@ class MainActivity : ComponentActivity() {
                                             closingDay = ""
                                             dueDay = ""
                                             isDefault = false
+                                            cardIdentifiers = ""
                                         }
                                         typeMenuExpanded = false
                                     },
@@ -473,17 +501,113 @@ class MainActivity : ComponentActivity() {
                             Checkbox(checked = isDefault, onCheckedChange = { isDefault = it })
                             Text("Cartão padrão")
                         }
+                        OutlinedTextField(
+                            value = cardIdentifiers,
+                            onValueChange = {
+                                cardIdentifiers = it.filter { char ->
+                                    char.isDigit() || char in ",/; "
+                                }.take(40)
+                            },
+                            label = { Text("Finais do cartão") },
+                            supportingText = { Text("Ex.: 6426, 5253") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             },
             confirmButton = {
                 TextButton(
-                    onClick = { onSave(name, type, closingValue, dueValue, isDefault) },
+                    onClick = {
+                        onSave(
+                            name, type, closingValue, dueValue, isDefault,
+                            cardIdentifiers.ifBlank { null },
+                        )
+                    },
                     enabled = name.isNotBlank() && daysValid,
                 ) { Text("Salvar") }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
         )
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun CardInvoicesScreen(
+        store: DiagnosticStore,
+        account: FinancialAccountRecord,
+        onBack: () -> Unit,
+    ) {
+        val invoices = remember(account.id) { store.creditCardInvoices(account.id) }
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(account.name) },
+                    actions = { TextButton(onClick = onBack) { Text("Contas") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text("Faturas", style = MaterialTheme.typography.headlineSmall)
+                }
+                if (invoices.isEmpty()) {
+                    item {
+                        Card {
+                            Text(
+                                "Nenhuma fatura calculada. Informe o fechamento do cartão.",
+                                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                            )
+                        }
+                    }
+                }
+                items(invoices, key = { "invoice-${it.id}" }) { invoice ->
+                    Card {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                val referenceMonth = invoice.dueDate?.let(YearMonth::from)
+                                    ?: invoice.closingPeriod
+                                Text(
+                                    formatMonth(referenceMonth),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    formatCurrency(invoice.total.toPlainString()),
+                                    color = if (invoice.total.signum() < 0) {
+                                        Color(0xFF0A7D65)
+                                    } else {
+                                        Color(0xFFBA3B46)
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                            }
+                            Text(
+                                invoice.status.displayName + " · " +
+                                    "${invoice.transactionCount} movimentações",
+                            )
+                            Text(
+                                "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
+                                    (invoice.dueDate?.let {
+                                        " · vence em ${it.format(SHORT_DATE_FORMATTER)}"
+                                    } ?: " · vencimento não informado"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Composable
@@ -1031,6 +1155,8 @@ class MainActivity : ComponentActivity() {
             DateTimeFormatter.ofPattern("dd 'de' MMMM", PT_BR)
         val TIME_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("HH:mm", PT_BR)
+        val SHORT_DATE_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("dd/MM/yyyy", PT_BR)
         const val DESCRIPTION_MAX_LENGTH = 80
     }
 }

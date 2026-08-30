@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteOpenHelper
 import br.com.assistentefinanceiro.importing.ImportDisposition
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import java.time.LocalDateTime
+import java.time.LocalDate
+import java.time.YearMonth
 import java.util.Locale
 
 data class DiagnosticEvent(
@@ -52,6 +54,7 @@ class DiagnosticStore(context: Context) :
         createTransactionsTable(db)
         createCategoryRulesTable(db)
         createFinancialAccountsTable(db)
+        createCreditCardInvoicesTable(db)
         createIndexes(db)
     }
 
@@ -93,8 +96,19 @@ class DiagnosticStore(context: Context) :
             createFinancialAccountsTable(db)
             if (oldVersion >= 7) {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN account_id INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN invoice_id INTEGER")
             }
             initializeFinancialAccounts(db)
+        }
+        if (oldVersion < 10) {
+            createCreditCardInvoicesTable(db)
+            if (oldVersion >= 9) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN invoice_id INTEGER")
+                db.execSQL("ALTER TABLE financial_accounts ADD COLUMN card_identifiers TEXT")
+            }
+            initializeCardIdentifiers(db)
+            linkNotificationTransactionsToAccounts(db)
+            rebuildAllCreditCardInvoices(db)
         }
         createCategoryRulesTable(db)
 
@@ -172,6 +186,7 @@ class DiagnosticStore(context: Context) :
                     occurredAt = transaction.occurredAt.toString(),
                     description = transactionDescription(transaction.type, transaction.merchant),
                     merchant = transaction.merchant,
+                    cardLastFour = transaction.cardLastFour,
                 )
             }
 
@@ -223,7 +238,7 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status,account_id
+                      original_status,account_id,invoice_id
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -252,6 +267,7 @@ class DiagnosticStore(context: Context) :
                                 originalCategory = cursor.getString(14),
                                 originalStatus = cursor.getString(15),
                                 accountId = if (cursor.isNull(16)) null else cursor.getLong(16),
+                                invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
                             )
                         )
                     }
@@ -356,6 +372,7 @@ class DiagnosticStore(context: Context) :
         val db = writableDatabase
         db.beginTransaction()
         try {
+            val affectedAccounts = mutableSetOf<Long>()
             accepted.forEach { row ->
                 val direction = row.direction ?: return@forEach
                 val date = row.date ?: return@forEach
@@ -400,7 +417,9 @@ class DiagnosticStore(context: Context) :
                     SQLiteDatabase.CONFLICT_IGNORE,
                 )
                 if (result == -1L) alreadyImported++ else imported++
+                if (result != -1L) affectedAccounts += accountId
             }
+            affectedAccounts.forEach { rebuildCreditCardInvoices(db, it) }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -409,7 +428,7 @@ class DiagnosticStore(context: Context) :
     }
 
     fun financialAccounts(): List<FinancialAccountRecord> = readableDatabase.rawQuery(
-        """SELECT id,name,type,closing_day,due_day,is_default
+        """SELECT id,name,type,closing_day,due_day,is_default,card_identifiers
            FROM financial_accounts
            ORDER BY type DESC,is_default DESC,name COLLATE NOCASE""",
         null,
@@ -424,6 +443,7 @@ class DiagnosticStore(context: Context) :
                         closingDay = if (cursor.isNull(3)) null else cursor.getInt(3),
                         dueDay = if (cursor.isNull(4)) null else cursor.getInt(4),
                         isDefault = cursor.getInt(5) == 1,
+                        cardIdentifiers = cursor.getString(6),
                     )
                 )
             }
@@ -437,12 +457,14 @@ class DiagnosticStore(context: Context) :
         closingDay: Int?,
         dueDay: Int?,
         isDefault: Boolean,
+        cardIdentifiers: String?,
     ): Boolean {
         val normalizedName = name.trim()
         if (normalizedName.isBlank()) return false
         if (closingDay != null && closingDay !in 1..31) return false
         if (dueDay != null && dueDay !in 1..31) return false
         val normalizedKey = FinancialAccountIdentity.normalize(normalizedName)
+        val normalizedIdentifiers = FinancialAccountIdentity.normalizedIdentifiers(cardIdentifiers)
         if (normalizedKey.isBlank()) return false
         val db = writableDatabase
         db.beginTransaction()
@@ -462,6 +484,8 @@ class DiagnosticStore(context: Context) :
                 if (closingDay == null) putNull("closing_day") else put("closing_day", closingDay)
                 if (dueDay == null) putNull("due_day") else put("due_day", dueDay)
                 put("is_default", if (isDefault && type == FinancialAccountType.CREDIT_CARD) 1 else 0)
+                if (normalizedIdentifiers == null) putNull("card_identifiers")
+                else put("card_identifiers", normalizedIdentifiers)
             }
             val accountId = if (id == null) {
                 db.insertWithOnConflict(
@@ -474,12 +498,49 @@ class DiagnosticStore(context: Context) :
             }
             if (accountId == -1L) return false
             linkTransactionsToAccount(db, accountId, normalizedKey)
+            rebuildCreditCardInvoices(db, accountId)
             db.setTransactionSuccessful()
             true
         } catch (_: Exception) {
             false
         } finally {
             db.endTransaction()
+        }
+    }
+
+    fun creditCardInvoices(accountId: Long): List<CreditCardInvoiceRecord> {
+        val db = writableDatabase
+        refreshInvoiceStatuses(db, accountId, LocalDate.now())
+        return db.rawQuery(
+            """SELECT invoices.id,invoices.account_id,invoices.closing_period,
+                      invoices.closing_date,invoices.due_date,invoices.status,
+                      COALESCE(SUM(CASE
+                          WHEN transactions.direction = 'EXPENSE' THEN transactions.amount
+                          ELSE -transactions.amount
+                      END),0),COUNT(transactions.id)
+               FROM credit_card_invoices AS invoices
+               LEFT JOIN transactions ON transactions.invoice_id = invoices.id
+               WHERE invoices.account_id = ?
+               GROUP BY invoices.id
+               ORDER BY invoices.closing_period DESC""",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        CreditCardInvoiceRecord(
+                            id = cursor.getLong(0),
+                            accountId = cursor.getLong(1),
+                            closingPeriod = YearMonth.parse(cursor.getString(2)),
+                            closingDate = LocalDate.parse(cursor.getString(3)),
+                            dueDate = cursor.getString(4)?.let(LocalDate::parse),
+                            status = CreditCardInvoiceStatus.fromStored(cursor.getString(5)),
+                            total = cursor.getString(6).toBigDecimal(),
+                            transactionCount = cursor.getInt(7),
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -593,7 +654,7 @@ class DiagnosticStore(context: Context) :
 
     private fun rebuildTransactionsFromEvents(db: SQLiteDatabase) {
         db.rawQuery(
-            """SELECT id,package_name,transaction_type,amount,occurred_at,merchant
+            """SELECT id,package_name,transaction_type,amount,occurred_at,merchant,card_last_four
                FROM events
                WHERE classification = 'TRANSACTION'
                  AND transaction_type IS NOT NULL
@@ -613,6 +674,7 @@ class DiagnosticStore(context: Context) :
                     occurredAt = cursor.getString(4),
                     description = transactionDescription(type, merchant),
                     merchant = merchant,
+                    cardLastFour = cursor.getString(6),
                 )
             }
         }
@@ -627,6 +689,7 @@ class DiagnosticStore(context: Context) :
         occurredAt: String,
         description: String,
         merchant: String?,
+        cardLastFour: String? = null,
     ) {
         val ruleKey = if (type == FinancialTransactionType.CARD_PURCHASE) {
             TransactionCategoryRule.normalizeMerchant(merchant)
@@ -636,7 +699,10 @@ class DiagnosticStore(context: Context) :
         val ruleCategory = ruleKey?.let {
             findCategoryRule(db, it, type.direction)
         }
-        db.insertWithOnConflict(
+        val matchedAccount = if (type == FinancialTransactionType.CARD_PURCHASE) {
+            findAccountForCardLastFour(db, cardLastFour)
+        } else null
+        val transactionId = db.insertWithOnConflict(
             "transactions",
             null,
             ContentValues().apply {
@@ -647,6 +713,10 @@ class DiagnosticStore(context: Context) :
                 put("occurred_at", occurredAt)
                 put("description", description)
                 put("source_package", sourcePackage)
+                matchedAccount?.let { account ->
+                    put("account", account.name)
+                    put("account_id", account.id)
+                }
                 put(
                     "category",
                     (ruleCategory ?: TransactionCategory.UNCATEGORIZED).name,
@@ -663,6 +733,32 @@ class DiagnosticStore(context: Context) :
             },
             SQLiteDatabase.CONFLICT_IGNORE,
         )
+        if (transactionId != -1L && matchedAccount != null) {
+            rebuildCreditCardInvoices(db, matchedAccount.id)
+        }
+    }
+
+    private fun findAccountForCardLastFour(
+        db: SQLiteDatabase,
+        lastFour: String?,
+    ): FinancialAccountRecord? = db.rawQuery(
+        """SELECT id,name,type,closing_day,due_day,is_default,card_identifiers
+           FROM financial_accounts WHERE type = ?""",
+        arrayOf(FinancialAccountType.CREDIT_CARD.name),
+    ).use { cursor ->
+        while (cursor.moveToNext()) {
+            val account = FinancialAccountRecord(
+                id = cursor.getLong(0),
+                name = cursor.getString(1),
+                type = FinancialAccountType.fromStored(cursor.getString(2)),
+                closingDay = if (cursor.isNull(3)) null else cursor.getInt(3),
+                dueDay = if (cursor.isNull(4)) null else cursor.getInt(4),
+                isDefault = cursor.getInt(5) == 1,
+                cardIdentifiers = cursor.getString(6),
+            )
+            if (account.matchesCardLastFour(lastFour)) return@use account
+        }
+        null
     }
 
     private fun findCategoryRule(
@@ -750,6 +846,7 @@ class DiagnosticStore(context: Context) :
                 original_category TEXT,
                 original_status TEXT,
                 account_id INTEGER,
+                invoice_id INTEGER,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -776,7 +873,22 @@ class DiagnosticStore(context: Context) :
                 type TEXT NOT NULL,
                 closing_day INTEGER,
                 due_day INTEGER,
-                is_default INTEGER NOT NULL DEFAULT 0
+                is_default INTEGER NOT NULL DEFAULT 0,
+                card_identifiers TEXT
+            )"""
+        )
+    }
+
+    private fun createCreditCardInvoicesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS credit_card_invoices(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                closing_period TEXT NOT NULL,
+                closing_date TEXT NOT NULL,
+                due_date TEXT,
+                status TEXT NOT NULL,
+                UNIQUE(account_id,closing_period)
             )"""
         )
     }
@@ -814,8 +926,161 @@ class DiagnosticStore(context: Context) :
                 preset?.closingDay?.let { put("closing_day", it) }
                 preset?.dueDay?.let { put("due_day", it) }
                 put("is_default", if (preset?.isDefault == true) 1 else 0)
+                preset?.cardIdentifiers?.let { put("card_identifiers", it) }
             },
         )
+    }
+
+    private fun initializeCardIdentifiers(db: SQLiteDatabase) {
+        listOf(
+            "CINZA" to "6426,5253",
+            "PRETO" to "3409,6101",
+            "VERMELHO" to "7107,7691",
+        ).forEach { (normalizedName, identifiers) ->
+            db.update(
+                "financial_accounts",
+                ContentValues().apply { put("card_identifiers", identifiers) },
+                "normalized_name = ? AND card_identifiers IS NULL",
+                arrayOf(normalizedName),
+            )
+        }
+    }
+
+    private fun linkNotificationTransactionsToAccounts(db: SQLiteDatabase) {
+        db.rawQuery(
+            """SELECT transactions.id,events.card_last_four
+               FROM transactions
+               INNER JOIN events ON events.id = transactions.source_event_id
+               WHERE transactions.type = ? AND transactions.account_id IS NULL""",
+            arrayOf(FinancialTransactionType.CARD_PURCHASE.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val account = findAccountForCardLastFour(db, cursor.getString(1)) ?: continue
+                db.update(
+                    "transactions",
+                    ContentValues().apply {
+                        put("account", account.name)
+                        put("account_id", account.id)
+                    },
+                    "id = ?",
+                    arrayOf(cursor.getLong(0).toString()),
+                )
+            }
+        }
+    }
+
+    private fun rebuildAllCreditCardInvoices(db: SQLiteDatabase) {
+        db.rawQuery(
+            "SELECT id FROM financial_accounts WHERE type = ?",
+            arrayOf(FinancialAccountType.CREDIT_CARD.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) rebuildCreditCardInvoices(db, cursor.getLong(0))
+        }
+    }
+
+    private fun rebuildCreditCardInvoices(db: SQLiteDatabase, accountId: Long) {
+        val account = db.rawQuery(
+            "SELECT type,closing_day,due_day FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return
+            Triple(
+                FinancialAccountType.fromStored(cursor.getString(0)),
+                if (cursor.isNull(1)) null else cursor.getInt(1),
+                if (cursor.isNull(2)) null else cursor.getInt(2),
+            )
+        }
+        db.update(
+            "transactions",
+            ContentValues().apply { putNull("invoice_id") },
+            "account_id = ?",
+            arrayOf(accountId.toString()),
+        )
+        db.delete("credit_card_invoices", "account_id = ?", arrayOf(accountId.toString()))
+        if (account.first != FinancialAccountType.CREDIT_CARD || account.second == null) return
+
+        db.rawQuery(
+            """SELECT id,occurred_at,origin FROM transactions
+               WHERE account_id = ?""",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val purchaseDate = runCatching {
+                    LocalDateTime.parse(cursor.getString(1)).toLocalDate()
+                }.getOrNull() ?: continue
+                val origin = TransactionOrigin.fromStored(cursor.getString(2))
+                val dates = if (origin == TransactionOrigin.MOBILLS) {
+                    CreditCardBillingCycle.fromImportedInvoiceDate(
+                        invoiceDate = purchaseDate,
+                        closingDay = account.second!!,
+                        configuredDueDay = account.third,
+                    )
+                } else {
+                    CreditCardBillingCycle.calculate(
+                        purchaseDate = purchaseDate,
+                        closingDay = account.second!!,
+                        dueDay = account.third,
+                    )
+                }
+                val status = CreditCardBillingCycle.status(dates.closingDate, LocalDate.now())
+                val invoiceId = db.insertWithOnConflict(
+                    "credit_card_invoices",
+                    null,
+                    ContentValues().apply {
+                        put("account_id", accountId)
+                        put("closing_period", dates.closingPeriod.toString())
+                        put("closing_date", dates.closingDate.toString())
+                        put("due_date", dates.dueDate?.toString())
+                        put("status", status.name)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                ).takeIf { it != -1L } ?: db.rawQuery(
+                    """SELECT id FROM credit_card_invoices
+                       WHERE account_id = ? AND closing_period = ?""",
+                    arrayOf(accountId.toString(), dates.closingPeriod.toString()),
+                ).use { invoiceCursor ->
+                    check(invoiceCursor.moveToFirst())
+                    invoiceCursor.getLong(0)
+                }
+                if (dates.dueDate != null) {
+                    db.update(
+                        "credit_card_invoices",
+                        ContentValues().apply { put("due_date", dates.dueDate.toString()) },
+                        "id = ?",
+                        arrayOf(invoiceId.toString()),
+                    )
+                }
+                db.update(
+                    "transactions",
+                    ContentValues().apply { put("invoice_id", invoiceId) },
+                    "id = ?",
+                    arrayOf(cursor.getLong(0).toString()),
+                )
+            }
+        }
+    }
+
+    private fun refreshInvoiceStatuses(
+        db: SQLiteDatabase,
+        accountId: Long,
+        today: LocalDate,
+    ) {
+        db.rawQuery(
+            "SELECT id,closing_date FROM credit_card_invoices WHERE account_id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val closingDate = LocalDate.parse(cursor.getString(1))
+                db.update(
+                    "credit_card_invoices",
+                    ContentValues().apply {
+                        put("status", CreditCardBillingCycle.status(closingDate, today).name)
+                    },
+                    "id = ?",
+                    arrayOf(cursor.getLong(0).toString()),
+                )
+            }
+        }
     }
 
     private fun linkTransactionsToAccount(
@@ -841,10 +1106,10 @@ class DiagnosticStore(context: Context) :
     }
 
     private fun knownAccountPreset(normalizedName: String): KnownAccountPreset? = when (normalizedName) {
-        "CINZA" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 26, 5, true)
-        "VERMELHO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 11, null, false)
-        "PRETO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 8, null, false)
-        "CARREFOUR" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 20, null, false)
+        "CINZA" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 26, 5, true, "6426,5253")
+        "VERMELHO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 11, null, false, "7107,7691")
+        "PRETO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 8, null, false, "3409,6101")
+        "CARREFOUR" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 20, null, false, null)
         else -> null
     }
 
@@ -878,11 +1143,12 @@ class DiagnosticStore(context: Context) :
         val closingDay: Int?,
         val dueDay: Int?,
         val isDefault: Boolean,
+        val cardIdentifiers: String?,
     )
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 9
+        const val DATABASE_VERSION = 10
     }
 }
 
