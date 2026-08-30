@@ -114,6 +114,9 @@ class DiagnosticStore(context: Context) :
         if (oldVersion < 11) {
             createInvoicePaymentsTable(db)
         }
+        if (oldVersion == 11) {
+            db.execSQL("ALTER TABLE invoice_payments ADD COLUMN source_account_id INTEGER")
+        }
         createCategoryRulesTable(db)
 
         reclassifyExistingEvents(db)
@@ -559,9 +562,11 @@ class DiagnosticStore(context: Context) :
         invoice: CreditCardInvoiceRecord,
         amount: java.math.BigDecimal,
         paidAt: LocalDate,
+        sourceAccountId: Long?,
     ): Boolean {
         if (amount.signum() <= 0 || amount > invoice.outstandingAmount) return false
         val db = writableDatabase
+        if (sourceAccountId != null && !isBankAccount(db, sourceAccountId)) return false
         val inserted = db.insert(
             "invoice_payments",
             null,
@@ -571,6 +576,8 @@ class DiagnosticStore(context: Context) :
                 put("amount", amount.toPlainString())
                 put("paid_at", paidAt.toString())
                 put("created_at", System.currentTimeMillis())
+                if (sourceAccountId == null) putNull("source_account_id")
+                else put("source_account_id", sourceAccountId)
             },
         ) != -1L
         if (inserted) refreshInvoiceStatuses(db, invoice.accountId, LocalDate.now())
@@ -579,9 +586,13 @@ class DiagnosticStore(context: Context) :
 
     fun invoicePayments(invoice: CreditCardInvoiceRecord): List<InvoicePaymentRecord> =
         readableDatabase.rawQuery(
-            """SELECT id,amount,paid_at FROM invoice_payments
-               WHERE account_id = ? AND closing_period = ?
-               ORDER BY paid_at DESC,id DESC""",
+            """SELECT payments.id,payments.amount,payments.paid_at,
+                      payments.source_account_id,accounts.name
+               FROM invoice_payments AS payments
+               LEFT JOIN financial_accounts AS accounts
+                      ON accounts.id = payments.source_account_id
+               WHERE payments.account_id = ? AND payments.closing_period = ?
+               ORDER BY payments.paid_at DESC,payments.id DESC""",
             arrayOf(invoice.accountId.toString(), invoice.closingPeriod.toString()),
         ).use { cursor ->
             buildList {
@@ -591,6 +602,8 @@ class DiagnosticStore(context: Context) :
                             id = cursor.getLong(0),
                             amount = cursor.getString(1).toBigDecimal(),
                             paidAt = LocalDate.parse(cursor.getString(2)),
+                            sourceAccountId = if (cursor.isNull(3)) null else cursor.getLong(3),
+                            sourceAccountName = cursor.getString(4),
                         )
                     )
                 }
@@ -1012,9 +1025,18 @@ class DiagnosticStore(context: Context) :
                 closing_period TEXT NOT NULL,
                 amount TEXT NOT NULL,
                 paid_at TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                source_account_id INTEGER
             )"""
         )
+    }
+
+    private fun isBankAccount(db: SQLiteDatabase, accountId: Long): Boolean = db.rawQuery(
+        "SELECT type FROM financial_accounts WHERE id = ?",
+        arrayOf(accountId.toString()),
+    ).use { cursor ->
+        cursor.moveToFirst() &&
+            FinancialAccountType.fromStored(cursor.getString(0)) == FinancialAccountType.BANK_ACCOUNT
     }
 
     private fun initializeFinancialAccounts(db: SQLiteDatabase) {
@@ -1289,7 +1311,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 11
+        const val DATABASE_VERSION = 12
     }
 }
 
