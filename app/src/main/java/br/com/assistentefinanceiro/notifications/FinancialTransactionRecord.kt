@@ -16,6 +16,7 @@ data class FinancialTransactionRecord(
     val status: TransactionStatus = TransactionStatus.REALIZED,
     val account: String? = null,
     val originalCategory: String? = null,
+    val originalStatus: String? = null,
 )
 
 enum class TransactionOrigin {
@@ -30,7 +31,7 @@ enum class TransactionOrigin {
 
 enum class TransactionStatus {
     REALIZED,
-    PLANNED;
+    PENDING;
 
     companion object {
         fun fromStored(value: String?): TransactionStatus =
