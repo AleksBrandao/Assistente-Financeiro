@@ -986,7 +986,7 @@ class MainActivity : ComponentActivity() {
                             onValueChange = { openingBalanceDate = it.take(10) },
                             label = { Text("Data do saldo (AAAA-MM-DD)") },
                             supportingText = {
-                                Text("Movimentações posteriores a esta data alterarão o saldo")
+                                Text("Movimentações a partir desta data alterarão o saldo")
                             },
                             singleLine = true,
                         )
