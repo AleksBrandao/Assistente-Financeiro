@@ -40,6 +40,8 @@ data class InvoicePaymentRecord(
     val id: Long,
     val amount: BigDecimal,
     val paidAt: LocalDate,
+    val sourceAccountId: Long?,
+    val sourceAccountName: String?,
 )
 
 object CreditCardBillingCycle {
