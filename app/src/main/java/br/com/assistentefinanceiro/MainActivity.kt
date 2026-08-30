@@ -301,10 +301,15 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         val accounts = remember(refresh) { store.financialAccounts() }
+        val bankBalances = remember(accounts, refresh) {
+            accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
+                .associateWith(store::accountBalance)
+        }
         var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var creatingAccount by remember { mutableStateOf(false) }
         var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var viewingMovementsFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var creatingTransfer by remember { mutableStateOf(false) }
 
         viewingInvoicesFor?.let { account ->
             CardInvoicesScreen(
@@ -338,13 +343,47 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.padding(padding).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (bankBalances.isNotEmpty()) {
+                    item {
+                        val realized = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                                total, balance -> total + balance.realizedBalance
+                        }
+                        val projected = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                                total, balance -> total + balance.projectedBalance
+                        }
+                        Card {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text("Saldo consolidado", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    formatCurrency(realized.toPlainString()),
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = if (realized.signum() < 0) Color(0xFFBA3B46)
+                                    else Color(0xFF0A7D65),
+                                )
+                                Text("Previsto: ${formatCurrency(projected.toPlainString())}")
+                            }
+                        }
+                    }
+                }
                 item {
                     Button(
                         onClick = { creatingAccount = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Adicionar conta ou cartão") }
                 }
+                if (accounts.count { it.type == FinancialAccountType.BANK_ACCOUNT } >= 2) {
+                    item {
+                        OutlinedButton(
+                            onClick = { creatingTransfer = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Transferir entre contas") }
+                    }
+                }
                 items(accounts, key = { "account-${it.id}" }) { account ->
+                    val balance = bankBalances[account]
                     Card {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -369,6 +408,20 @@ class MainActivity : ComponentActivity() {
                                         "Vencimento: ${account.dueDay ?: "não informado"}",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                            } else if (balance != null) {
+                                Text(
+                                    "Saldo atual: ${formatCurrency(balance.realizedBalance.toPlainString())}",
+                                    color = if (balance.realizedBalance.signum() < 0) {
+                                        Color(0xFFBA3B46)
+                                    } else Color(0xFF0A7D65),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                if (balance.projectedBalance != balance.realizedBalance) {
+                                    Text(
+                                        "Previsto: ${formatCurrency(balance.projectedBalance.toPlainString())}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -408,7 +461,8 @@ class MainActivity : ComponentActivity() {
                     editingAccount = null
                     creatingAccount = false
                 },
-                onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers ->
+                onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers,
+                           openingBalance, openingBalanceDate ->
                     if (
                         store.saveFinancialAccount(
                             id = account.id.takeUnless { creatingAccount },
@@ -418,6 +472,8 @@ class MainActivity : ComponentActivity() {
                             dueDay = dueDay,
                             isDefault = isDefault,
                             cardIdentifiers = cardIdentifiers,
+                            openingBalance = openingBalance,
+                            openingBalanceDate = openingBalanceDate,
                         )
                     ) {
                         editingAccount = null
@@ -427,6 +483,103 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+        if (creatingTransfer) {
+            TransferDialog(
+                accounts = accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT },
+                onDismiss = { creatingTransfer = false },
+                onSave = { source, destination, amount, date, description ->
+                    if (store.recordTransfer(source, destination, amount, date, description)) {
+                        creatingTransfer = false
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun TransferDialog(
+        accounts: List<FinancialAccountRecord>,
+        onDismiss: () -> Unit,
+        onSave: (Long, Long, java.math.BigDecimal, LocalDate, String) -> Unit,
+    ) {
+        var sourceId by remember { mutableStateOf(accounts.first().id) }
+        var destinationId by remember { mutableStateOf(accounts[1].id) }
+        var amount by remember { mutableStateOf("") }
+        var date by remember { mutableStateOf(LocalDate.now().toString()) }
+        var description by remember { mutableStateOf("Transferência entre contas") }
+        var sourceExpanded by remember { mutableStateOf(false) }
+        var destinationExpanded by remember { mutableStateOf(false) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Transferir entre contas") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box {
+                        OutlinedButton(
+                            onClick = { sourceExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("De: ${accounts.first { it.id == sourceId }.name}") }
+                        DropdownMenu(sourceExpanded, { sourceExpanded = false }) {
+                            accounts.filter { it.id != destinationId }.forEach { account ->
+                                DropdownMenuItem(
+                                    text = { Text(account.name) },
+                                    onClick = { sourceId = account.id; sourceExpanded = false },
+                                )
+                            }
+                        }
+                    }
+                    Box {
+                        OutlinedButton(
+                            onClick = { destinationExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Para: ${accounts.first { it.id == destinationId }.name}") }
+                        DropdownMenu(destinationExpanded, { destinationExpanded = false }) {
+                            accounts.filter { it.id != sourceId }.forEach { account ->
+                                DropdownMenuItem(
+                                    text = { Text(account.name) },
+                                    onClick = {
+                                        destinationId = account.id
+                                        destinationExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { amount = it.filter { c -> c.isDigit() || c in ",." } },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    )
+                    OutlinedTextField(
+                        value = date,
+                        onValueChange = { date = it.take(10) },
+                        label = { Text("Data (AAAA-MM-DD)") },
+                    )
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(80) },
+                        label = { Text("Descrição") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSave(sourceId, destinationId, checkNotNull(amountValue),
+                            checkNotNull(dateValue), description)
+                    },
+                    enabled = sourceId != destinationId && amountValue?.signum() == 1 &&
+                        dateValue != null,
+                ) { Text("Transferir") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -436,7 +589,16 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         onBack: () -> Unit,
     ) {
-        val movements = remember(account.id) { store.accountMovements(account.id) }
+        var refresh by remember(account.id) { mutableIntStateOf(0) }
+        val movements = remember(account.id, refresh) { store.accountMovements(account.id) }
+        val transactions = remember(account.id, refresh) {
+            store.recentTransactions(10_000).filter { it.accountId == account.id }
+        }
+        val balance = remember(account.id, refresh) { store.accountBalance(account) }
+        var addingTransaction by remember { mutableStateOf(false) }
+        var editingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
+        var deletingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
+        var deletingTransfer by remember { mutableStateOf<AccountMovementRecord?>(null) }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -450,7 +612,41 @@ class MainActivity : ComponentActivity() {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item { Text("Movimentações da conta", style = MaterialTheme.typography.headlineSmall) }
-                if (movements.isEmpty()) {
+                item {
+                    Card {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Saldo atual", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                formatCurrency(balance.realizedBalance.toPlainString()),
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = if (balance.realizedBalance.signum() < 0) {
+                                    Color(0xFFBA3B46)
+                                } else Color(0xFF0A7D65),
+                            )
+                            Text(
+                                "Saldo previsto: " +
+                                    formatCurrency(balance.projectedBalance.toPlainString()),
+                            )
+                            account.openingBalanceDate?.let { date ->
+                                Text(
+                                    "Saldo inicial em ${date.format(SHORT_DATE_FORMATTER)}: " +
+                                        formatCurrency(account.openingBalance.toPlainString()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+                }
+                item {
+                    Button(
+                        onClick = { addingTransaction = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Adicionar receita ou despesa") }
+                }
+                if (movements.isEmpty() && transactions.isEmpty()) {
                     item {
                         Card {
                             Text(
@@ -458,6 +654,24 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                             )
                         }
+                    }
+                }
+                if (transactions.isNotEmpty()) {
+                    item { Text("Receitas e despesas", style = MaterialTheme.typography.titleLarge) }
+                    items(transactions, key = { "account-transaction-${it.id}" }) { transaction ->
+                        TransactionCard(
+                            transaction = transaction,
+                            onClick = {
+                                if (transaction.origin == TransactionOrigin.MANUAL) {
+                                    editingTransaction = transaction
+                                }
+                            },
+                        )
+                    }
+                }
+                if (movements.isNotEmpty()) {
+                    item {
+                        Text("Transferências e faturas", style = MaterialTheme.typography.titleLarge)
                     }
                 }
                 items(movements, key = { "account-movement-${it.id}" }) { movement ->
@@ -469,20 +683,179 @@ class MainActivity : ComponentActivity() {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(movement.description, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    movement.occurredAt.format(SHORT_DATE_FORMATTER),
+                                    listOfNotNull(
+                                        movement.occurredAt.format(SHORT_DATE_FORMATTER),
+                                        movement.relatedAccountName,
+                                    ).joinToString(" · "),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
                             Text(
-                                "- " + formatCurrency(movement.amount.toPlainString()),
-                                color = Color(0xFFBA3B46),
+                                (if (movement.direction == AccountMovementDirection.DEBIT) {
+                                    "- "
+                                } else "+ ") + formatCurrency(movement.amount.toPlainString()),
+                                color = if (movement.direction == AccountMovementDirection.DEBIT) {
+                                    Color(0xFFBA3B46)
+                                } else Color(0xFF0A7D65),
                                 style = MaterialTheme.typography.titleMedium,
                             )
+                            if (movement.type == AccountMovementType.TRANSFER) {
+                                TextButton(onClick = { deletingTransfer = movement }) {
+                                    Text("Excluir", color = Color(0xFFBA3B46))
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        if (addingTransaction) {
+            ManualTransactionDialog(
+                onDismiss = { addingTransaction = false },
+                onSave = { direction, amount, date, description, status ->
+                    if (
+                        store.recordManualTransaction(
+                            account.id, direction, amount, date, description, status,
+                        )
+                    ) {
+                        addingTransaction = false
+                        refresh++
+                    }
+                },
+            )
+        }
+        editingTransaction?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editingTransaction = null },
+                onSave = { description, category, status, applyToFuture ->
+                    if (
+                        store.updateTransactionDetails(
+                            transaction.id, description, category, status, applyToFuture,
+                        )
+                    ) {
+                        editingTransaction = null
+                        refresh++
+                    }
+                },
+                onDelete = {
+                    editingTransaction = null
+                    deletingTransaction = transaction
+                },
+            )
+        }
+        deletingTransaction?.let { transaction ->
+            AlertDialog(
+                onDismissRequest = { deletingTransaction = null },
+                title = { Text("Excluir movimentação manual?") },
+                text = { Text(transaction.description) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.deleteManualTransaction(transaction.id)) {
+                            deletingTransaction = null
+                            refresh++
+                        }
+                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingTransaction = null }) { Text("Cancelar") }
+                },
+            )
+        }
+        deletingTransfer?.let { movement ->
+            AlertDialog(
+                onDismissRequest = { deletingTransfer = null },
+                title = { Text("Excluir transferência?") },
+                text = { Text("Os lançamentos nas duas contas serão removidos.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.deleteTransfer(movement.id)) {
+                            deletingTransfer = null
+                            refresh++
+                        }
+                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingTransfer = null }) { Text("Cancelar") }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun ManualTransactionDialog(
+        onDismiss: () -> Unit,
+        onSave: (
+            FinancialTransactionDirection, java.math.BigDecimal, LocalDate, String,
+            TransactionStatus,
+        ) -> Unit,
+    ) {
+        var direction by remember { mutableStateOf(FinancialTransactionDirection.EXPENSE) }
+        var amount by remember { mutableStateOf("") }
+        var date by remember { mutableStateOf(LocalDate.now().toString()) }
+        var description by remember { mutableStateOf("") }
+        var status by remember { mutableStateOf(TransactionStatus.REALIZED) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Nova movimentação") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = direction == FinancialTransactionDirection.EXPENSE,
+                            onClick = { direction = FinancialTransactionDirection.EXPENSE },
+                        )
+                        Text("Despesa")
+                        RadioButton(
+                            selected = direction == FinancialTransactionDirection.INCOME,
+                            onClick = { direction = FinancialTransactionDirection.INCOME },
+                        )
+                        Text("Receita")
+                    }
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { amount = it.filter { c -> c.isDigit() || c in ",." } },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    )
+                    OutlinedTextField(
+                        value = date,
+                        onValueChange = { date = it.take(10) },
+                        label = { Text("Data (AAAA-MM-DD)") },
+                    )
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(100) },
+                        label = { Text("Descrição") },
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = status == TransactionStatus.REALIZED,
+                            onCheckedChange = {
+                                status = if (it) TransactionStatus.REALIZED
+                                else TransactionStatus.PENDING
+                            },
+                        )
+                        Text(if (status == TransactionStatus.REALIZED) "Realizada" else "Pendente")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSave(direction, checkNotNull(amountValue), checkNotNull(dateValue),
+                            description, status)
+                    },
+                    enabled = amountValue?.signum() == 1 && dateValue != null &&
+                        description.isNotBlank(),
+                ) { Text("Salvar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @Composable
@@ -490,7 +863,10 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         isNew: Boolean,
         onDismiss: () -> Unit,
-        onSave: (String, FinancialAccountType, Int?, Int?, Boolean, String?) -> Unit,
+        onSave: (
+            String, FinancialAccountType, Int?, Int?, Boolean, String?,
+            java.math.BigDecimal, LocalDate?,
+        ) -> Unit,
     ) {
         var name by remember(account.id, isNew) { mutableStateOf(account.name) }
         var type by remember(account.id, isNew) { mutableStateOf(account.type) }
@@ -504,11 +880,21 @@ class MainActivity : ComponentActivity() {
         var cardIdentifiers by remember(account.id, isNew) {
             mutableStateOf(account.cardIdentifiers.orEmpty())
         }
+        var openingBalance by remember(account.id, isNew) {
+            mutableStateOf(account.openingBalance.toPlainString().replace('.', ','))
+        }
+        var openingBalanceDate by remember(account.id, isNew) {
+            mutableStateOf(account.openingBalanceDate?.toString() ?: LocalDate.now().toString())
+        }
         var typeMenuExpanded by remember { mutableStateOf(false) }
         val closingValue = closingDay.toIntOrNull()
         val dueValue = dueDay.toIntOrNull()
         val daysValid = (closingDay.isBlank() || closingValue in 1..31) &&
             (dueDay.isBlank() || dueValue in 1..31)
+        val openingBalanceValue = if (',' in openingBalance) {
+            openingBalance.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else openingBalance.toBigDecimalOrNull()
+        val openingBalanceDateValue = runCatching { LocalDate.parse(openingBalanceDate) }.getOrNull()
 
         AlertDialog(
             onDismissRequest = onDismiss,
@@ -583,6 +969,27 @@ class MainActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                             modifier = Modifier.fillMaxWidth(),
                         )
+                    } else {
+                        OutlinedTextField(
+                            value = openingBalance,
+                            onValueChange = { value ->
+                                openingBalance = value.filter {
+                                    it.isDigit() || it in ",.-"
+                                }.take(18)
+                            },
+                            label = { Text("Saldo inicial") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = openingBalanceDate,
+                            onValueChange = { openingBalanceDate = it.take(10) },
+                            label = { Text("Data do saldo (AAAA-MM-DD)") },
+                            supportingText = {
+                                Text("Movimentações posteriores a esta data alterarão o saldo")
+                            },
+                            singleLine = true,
+                        )
                     }
                 }
             },
@@ -592,9 +999,15 @@ class MainActivity : ComponentActivity() {
                         onSave(
                             name, type, closingValue, dueValue, isDefault,
                             cardIdentifiers.ifBlank { null },
+                            openingBalanceValue ?: java.math.BigDecimal.ZERO,
+                            openingBalanceDateValue.takeIf {
+                                type == FinancialAccountType.BANK_ACCOUNT
+                            },
                         )
                     },
-                    enabled = name.isNotBlank() && daysValid,
+                    enabled = name.isNotBlank() && daysValid &&
+                        (type == FinancialAccountType.CREDIT_CARD ||
+                            (openingBalanceValue != null && openingBalanceDateValue != null)),
                 ) { Text("Salvar") }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
@@ -1206,6 +1619,7 @@ class MainActivity : ComponentActivity() {
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
         onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
+        onDelete: (() -> Unit)? = null,
     ) {
         var description by remember(transaction.id) {
             mutableStateOf(transaction.description)
@@ -1333,8 +1747,15 @@ class MainActivity : ComponentActivity() {
                 }
             },
             dismissButton = {
-                TextButton(onClick = onDismiss) {
-                    Text("Cancelar")
+                Row {
+                    onDelete?.let {
+                        TextButton(onClick = it) {
+                            Text("Excluir", color = Color(0xFFBA3B46))
+                        }
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancelar")
+                    }
                 }
             },
         )
@@ -1471,7 +1892,9 @@ class MainActivity : ComponentActivity() {
                                     FinancialTransactionType.PIX_RECEIVED ->
                                         "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
                                     FinancialTransactionType.IMPORTED_EXPENSE,
-                                    FinancialTransactionType.IMPORTED_INCOME ->
+                                    FinancialTransactionType.IMPORTED_INCOME,
+                                    FinancialTransactionType.MANUAL_EXPENSE,
+                                    FinancialTransactionType.MANUAL_INCOME ->
                                         "Movimentação importada"
                                     null -> "Transação reconhecida"
                                 }
@@ -1499,6 +1922,8 @@ class MainActivity : ComponentActivity() {
             FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
             FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
             FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
+            FinancialTransactionType.MANUAL_EXPENSE -> "Despesa manual"
+            FinancialTransactionType.MANUAL_INCOME -> "Receita manual"
         }
 
     private fun notificationAccessEnabled(): Boolean {
