@@ -99,13 +99,18 @@ class MainActivity : ComponentActivity() {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var pendingOnly by remember { mutableStateOf(false) }
-        var consolidateInvoices by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
-        val statementInvoiceItems = remember(refresh) {
+        val creditCardAccounts = remember(refresh) {
             store.financialAccounts()
                 .filter { it.type == FinancialAccountType.CREDIT_CARD }
-                .flatMap { account ->
-                    store.creditCardInvoices(account.id).mapNotNull { invoice ->
+        }
+        val invoicesByAccount = remember(creditCardAccounts, refresh) {
+            creditCardAccounts.flatMap { account ->
+                store.creditCardInvoices(account.id).map { account to it }
+            }
+        }
+        val statementInvoiceItems = remember(invoicesByAccount) {
+            invoicesByAccount.mapNotNull { (account, invoice) ->
                         val dueDate = invoice.dueDate ?: return@mapNotNull null
                         if (invoice.total.signum() == 0) return@mapNotNull null
                         val isCredit = invoice.total.signum() < 0
@@ -134,21 +139,37 @@ class MainActivity : ComponentActivity() {
                             ),
                         )
                     }
-                }
         }
         val invoiceItemByTransactionId = remember(statementInvoiceItems) {
             statementInvoiceItems.associateBy { it.transaction.id }
         }
-        val statementTransactions = remember(
-            transactions, statementInvoiceItems, consolidateInvoices,
+        val creditCardAccountIds = remember(creditCardAccounts) {
+            creditCardAccounts.map { it.id }.toSet()
+        }
+        val consolidatedInvoiceIds = remember(statementInvoiceItems) {
+            statementInvoiceItems.map { it.invoice.id }.toSet()
+        }
+        val unconsolidatedCardTransactionCount = remember(
+            transactions, creditCardAccountIds, consolidatedInvoiceIds,
         ) {
-            if (!consolidateInvoices) transactions else {
-                val consolidatedInvoiceIds = statementInvoiceItems.map { it.invoice.id }.toSet()
-                transactions.filterNot {
-                    it.invoiceId != null && it.invoiceId in consolidatedInvoiceIds
-                } +
-                    statementInvoiceItems.map { it.transaction }
+            transactions.count { transaction ->
+                val isCardPurchase = transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                    (transaction.accountId != null &&
+                        transaction.accountId in creditCardAccountIds)
+                isCardPurchase && (
+                    transaction.invoiceId == null ||
+                        transaction.invoiceId !in consolidatedInvoiceIds
+                    )
             }
+        }
+        val statementTransactions = remember(
+            transactions, statementInvoiceItems, creditCardAccountIds,
+        ) {
+            transactions.filterNot { transaction ->
+                transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                    (transaction.accountId != null &&
+                        transaction.accountId in creditCardAccountIds)
+            } + statementInvoiceItems.map { it.transaction }
         }
         val statement = remember(statementTransactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
@@ -268,36 +289,15 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Column {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(
-                                checked = pendingOnly,
-                                onCheckedChange = { pendingOnly = it },
-                            )
-                            Text("Mostrar somente pendentes")
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(
-                                checked = consolidateInvoices,
-                                onCheckedChange = { consolidateInvoices = it },
-                            )
-                            Text("Consolidar faturas por vencimento")
-                        }
-                        if (consolidateInvoices) {
-                            Text(
-                                "Os totais mensais passam a considerar a fatura inteira " +
-                                    "no mês em que ela vence.",
-                                modifier = Modifier.padding(start = 48.dp, end = 8.dp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = pendingOnly,
+                            onCheckedChange = { pendingOnly = it },
+                        )
+                        Text("Mostrar somente pendentes")
                     }
                 }
                 item {
@@ -306,8 +306,19 @@ class MainActivity : ComponentActivity() {
                         generalProjectedBalance = generalProjectedBalance,
                     )
                 }
-                if (!consolidateInvoices && statement.categoryExpenses.isNotEmpty()) {
-                    item { ExpenseByCategoryCard(statement.categoryExpenses) }
+                if (unconsolidatedCardTransactionCount > 0) {
+                    item {
+                        Card {
+                            Text(
+                                "$unconsolidatedCardTransactionCount compras de cartão ainda não " +
+                                    "foram vinculadas a uma fatura com vencimento. " +
+                                    "Revise o cadastro do cartão em Contas.",
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                 }
                 item {
                     OutlinedButton(
