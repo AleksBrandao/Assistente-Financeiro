@@ -2,6 +2,8 @@ package br.com.assistentefinanceiro.notifications
 
 import java.text.Normalizer
 import java.util.Locale
+import java.math.BigDecimal
+import java.time.LocalDate
 
 enum class FinancialAccountType(val displayName: String) {
     BANK_ACCOUNT("Conta bancária"),
@@ -21,6 +23,13 @@ data class FinancialAccountRecord(
     val dueDay: Int? = null,
     val isDefault: Boolean = false,
     val cardIdentifiers: String? = null,
+)
+
+data class AccountMovementRecord(
+    val id: Long,
+    val amount: BigDecimal,
+    val occurredAt: LocalDate,
+    val description: String,
 )
 
 fun FinancialAccountRecord.matchesCardLastFour(lastFour: String?): Boolean {
