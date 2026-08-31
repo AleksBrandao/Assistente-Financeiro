@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,7 +18,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -40,6 +43,23 @@ private enum class AppScreen {
     DIAGNOSTIC,
     ACCOUNTS,
 }
+
+private data class AccountLedgerItem(
+    val key: String,
+    val occurredAt: LocalDateTime,
+    val direction: FinancialTransactionDirection,
+    val amount: java.math.BigDecimal,
+    val description: String,
+    val detail: String,
+    val transaction: FinancialTransactionRecord? = null,
+    val movement: AccountMovementRecord? = null,
+)
+
+private data class StatementInvoiceItem(
+    val account: FinancialAccountRecord,
+    val invoice: CreditCardInvoiceRecord,
+    val transaction: FinancialTransactionRecord,
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,9 +98,93 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
+        var pendingOnly by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
-        val statement = remember(transactions, selectedMonth) {
-            MonthlyStatementCalculator.calculate(selectedMonth, transactions)
+        val creditCardAccounts = remember(refresh) {
+            store.financialAccounts()
+                .filter { it.type == FinancialAccountType.CREDIT_CARD }
+        }
+        val invoicesByAccount = remember(creditCardAccounts, refresh) {
+            creditCardAccounts.flatMap { account ->
+                store.creditCardInvoices(account.id).map { account to it }
+            }
+        }
+        val statementInvoiceItems = remember(invoicesByAccount) {
+            invoicesByAccount.mapNotNull { (account, invoice) ->
+                        val dueDate = invoice.dueDate ?: return@mapNotNull null
+                        if (invoice.total.signum() == 0) return@mapNotNull null
+                        val isCredit = invoice.total.signum() < 0
+                        StatementInvoiceItem(
+                            account = account,
+                            invoice = invoice,
+                            transaction = FinancialTransactionRecord(
+                                id = -invoice.id,
+                                sourceEventId = null,
+                                direction = if (isCredit) {
+                                    FinancialTransactionDirection.INCOME
+                                } else FinancialTransactionDirection.EXPENSE,
+                                type = if (isCredit) {
+                                    FinancialTransactionType.IMPORTED_INCOME
+                                } else FinancialTransactionType.IMPORTED_EXPENSE,
+                                amount = invoice.total.abs().toPlainString(),
+                                occurredAt = dueDate.atTime(23, 59, 59).toString(),
+                                description = "Fatura ${account.name}",
+                                sourcePackage = "credit-card-invoice",
+                                status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                                    TransactionStatus.REALIZED
+                                } else TransactionStatus.PENDING,
+                                account = account.name,
+                                accountId = account.id,
+                                invoiceId = invoice.id,
+                            ),
+                        )
+                    }
+        }
+        val invoiceItemByTransactionId = remember(statementInvoiceItems) {
+            statementInvoiceItems.associateBy { it.transaction.id }
+        }
+        val creditCardAccountIds = remember(creditCardAccounts) {
+            creditCardAccounts.map { it.id }.toSet()
+        }
+        val consolidatedInvoiceIds = remember(statementInvoiceItems) {
+            statementInvoiceItems.map { it.invoice.id }.toSet()
+        }
+        val unconsolidatedCardTransactionCount = remember(
+            transactions, creditCardAccountIds, consolidatedInvoiceIds,
+        ) {
+            transactions.count { transaction ->
+                val isCardPurchase = transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                    (transaction.accountId != null &&
+                        transaction.accountId in creditCardAccountIds)
+                isCardPurchase && (
+                    transaction.invoiceId == null ||
+                        transaction.invoiceId !in consolidatedInvoiceIds
+                    )
+            }
+        }
+        val statementTransactions = remember(
+            transactions, statementInvoiceItems, creditCardAccountIds,
+        ) {
+            transactions.filterNot { transaction ->
+                transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                    (transaction.accountId != null &&
+                        transaction.accountId in creditCardAccountIds)
+            } + statementInvoiceItems.map { it.transaction }
+        }
+        val statement = remember(statementTransactions, selectedMonth) {
+            MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
+        }
+        val generalProjectedBalance = remember(refresh, selectedMonth) {
+            store.generalProjectedBalance(selectedMonth.atEndOfMonth())
+        }
+        val visibleGroups = remember(statement.groups, pendingOnly) {
+            if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
+                group.copy(
+                    transactions = group.transactions.filter {
+                        it.status == TransactionStatus.PENDING
+                    },
+                ).takeIf { it.transactions.isNotEmpty() }
+            }
         }
         var editingTransaction by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
@@ -90,6 +194,9 @@ class MainActivity : ComponentActivity() {
         var importMessage by remember { mutableStateOf<String?>(null) }
         var importError by remember { mutableStateOf<String?>(null) }
         var readingImport by remember { mutableStateOf(false) }
+        var selectedStatementInvoice by remember {
+            mutableStateOf<StatementInvoiceItem?>(null)
+        }
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
         val importLauncher = rememberLauncherForActivityResult(
@@ -118,6 +225,32 @@ class MainActivity : ComponentActivity() {
                     readingImport = false
                 }
             }
+        }
+
+        selectedStatementInvoice?.let { selected ->
+            InvoiceDetailScreen(
+                store = store,
+                account = selected.account,
+                invoice = selected.invoice,
+                onBack = { selectedStatementInvoice = null },
+                onPayment = { amount, paidAt, sourceAccountId ->
+                    if (store.recordInvoicePayment(
+                            selected.invoice, amount, paidAt, sourceAccountId,
+                        )) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+                onDeletePayment = { paymentId ->
+                    if (store.deleteInvoicePayment(selected.invoice, paymentId)) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+            )
+            return
         }
 
         Scaffold(
@@ -155,9 +288,37 @@ class MainActivity : ComponentActivity() {
                         onNext = { selectedMonth = selectedMonth.plusMonths(1) },
                     )
                 }
-                item { StatementSummary(statement) }
-                if (statement.categoryExpenses.isNotEmpty()) {
-                    item { ExpenseByCategoryCard(statement.categoryExpenses) }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = pendingOnly,
+                            onCheckedChange = { pendingOnly = it },
+                        )
+                        Text("Mostrar somente pendentes")
+                    }
+                }
+                item {
+                    StatementSummary(
+                        statement = statement,
+                        generalProjectedBalance = generalProjectedBalance,
+                    )
+                }
+                if (unconsolidatedCardTransactionCount > 0) {
+                    item {
+                        Card {
+                            Text(
+                                "$unconsolidatedCardTransactionCount compras de cartão ainda não " +
+                                    "foram vinculadas a uma fatura com vencimento. " +
+                                    "Revise o cadastro do cartão em Contas.",
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                 }
                 item {
                     OutlinedButton(
@@ -167,18 +328,22 @@ class MainActivity : ComponentActivity() {
                         Text("Atualizar movimentações")
                     }
                 }
-                if (statement.groups.isEmpty()) {
+                if (visibleGroups.isEmpty()) {
                     item {
                         Card {
                             Text(
-                                text = "Nenhuma movimentação reconhecida neste mês.",
+                                text = if (pendingOnly) {
+                                    "Nenhuma movimentação pendente neste mês."
+                                } else {
+                                    "Nenhuma movimentação reconhecida neste mês."
+                                },
                                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                                 textAlign = TextAlign.Center,
                             )
                         }
                     }
                 }
-                statement.groups.forEach { group ->
+                visibleGroups.forEach { group ->
                     item(key = "date-${group.date}") {
                         Text(
                             text = formatDate(group.date),
@@ -189,10 +354,18 @@ class MainActivity : ComponentActivity() {
                         items = group.transactions,
                         key = { "statement-${it.id}" },
                     ) { transaction ->
-                        TransactionCard(
-                            transaction = transaction,
-                            onClick = { editingTransaction = transaction },
-                        )
+                        val invoiceItem = invoiceItemByTransactionId[transaction.id]
+                        if (invoiceItem != null) {
+                            StatementInvoiceCard(
+                                item = invoiceItem,
+                                onClick = { selectedStatementInvoice = invoiceItem },
+                            )
+                        } else {
+                            TransactionCard(
+                                transaction = transaction,
+                                onClick = { editingTransaction = transaction },
+                            )
+                        }
                     }
                 }
             }
@@ -301,16 +474,24 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         val accounts = remember(refresh) { store.financialAccounts() }
+        val bankBalances = remember(accounts, refresh) {
+            accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
+                .associateWith(store::accountBalance)
+        }
         var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var creatingAccount by remember { mutableStateOf(false) }
         var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var viewingMovementsFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var creatingTransfer by remember { mutableStateOf(false) }
 
         viewingInvoicesFor?.let { account ->
             CardInvoicesScreen(
                 store = store,
                 account = account,
-                onBack = { viewingInvoicesFor = null },
+                onBack = {
+                    viewingInvoicesFor = null
+                    refresh++
+                },
             )
             return
         }
@@ -318,7 +499,11 @@ class MainActivity : ComponentActivity() {
             AccountMovementsScreen(
                 store = store,
                 account = account,
-                onBack = { viewingMovementsFor = null },
+                onBack = {
+                    viewingMovementsFor = null
+                    refresh++
+                },
+                onChanged = { refresh++ },
             )
             return
         }
@@ -338,13 +523,47 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.padding(padding).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (bankBalances.isNotEmpty()) {
+                    item {
+                        val realized = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                                total, balance -> total + balance.realizedBalance
+                        }
+                        val projected = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                                total, balance -> total + balance.projectedBalance
+                        }
+                        Card {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text("Saldo consolidado", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    formatCurrency(realized.toPlainString()),
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = if (realized.signum() < 0) Color(0xFFBA3B46)
+                                    else Color(0xFF0A7D65),
+                                )
+                                Text("Previsto: ${formatCurrency(projected.toPlainString())}")
+                            }
+                        }
+                    }
+                }
                 item {
                     Button(
                         onClick = { creatingAccount = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Adicionar conta ou cartão") }
                 }
+                if (accounts.count { it.type == FinancialAccountType.BANK_ACCOUNT } >= 2) {
+                    item {
+                        OutlinedButton(
+                            onClick = { creatingTransfer = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Transferir entre contas") }
+                    }
+                }
                 items(accounts, key = { "account-${it.id}" }) { account ->
+                    val balance = bankBalances[account]
                     Card {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -369,6 +588,20 @@ class MainActivity : ComponentActivity() {
                                         "Vencimento: ${account.dueDay ?: "não informado"}",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
+                            } else if (balance != null) {
+                                Text(
+                                    "Saldo atual: ${formatCurrency(balance.realizedBalance.toPlainString())}",
+                                    color = if (balance.realizedBalance.signum() < 0) {
+                                        Color(0xFFBA3B46)
+                                    } else Color(0xFF0A7D65),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                if (balance.projectedBalance != balance.realizedBalance) {
+                                    Text(
+                                        "Previsto: ${formatCurrency(balance.projectedBalance.toPlainString())}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -408,7 +641,8 @@ class MainActivity : ComponentActivity() {
                     editingAccount = null
                     creatingAccount = false
                 },
-                onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers ->
+                onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers,
+                           openingBalance, openingBalanceDate ->
                     if (
                         store.saveFinancialAccount(
                             id = account.id.takeUnless { creatingAccount },
@@ -418,6 +652,8 @@ class MainActivity : ComponentActivity() {
                             dueDay = dueDay,
                             isDefault = isDefault,
                             cardIdentifiers = cardIdentifiers,
+                            openingBalance = openingBalance,
+                            openingBalanceDate = openingBalanceDate,
                         )
                     ) {
                         editingAccount = null
@@ -427,6 +663,103 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+        if (creatingTransfer) {
+            TransferDialog(
+                accounts = accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT },
+                onDismiss = { creatingTransfer = false },
+                onSave = { source, destination, amount, date, description ->
+                    if (store.recordTransfer(source, destination, amount, date, description)) {
+                        creatingTransfer = false
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun TransferDialog(
+        accounts: List<FinancialAccountRecord>,
+        onDismiss: () -> Unit,
+        onSave: (Long, Long, java.math.BigDecimal, LocalDate, String) -> Unit,
+    ) {
+        var sourceId by remember { mutableStateOf(accounts.first().id) }
+        var destinationId by remember { mutableStateOf(accounts[1].id) }
+        var amount by remember { mutableStateOf("") }
+        var date by remember { mutableStateOf(LocalDate.now().toString()) }
+        var description by remember { mutableStateOf("Transferência entre contas") }
+        var sourceExpanded by remember { mutableStateOf(false) }
+        var destinationExpanded by remember { mutableStateOf(false) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Transferir entre contas") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box {
+                        OutlinedButton(
+                            onClick = { sourceExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("De: ${accounts.first { it.id == sourceId }.name}") }
+                        DropdownMenu(sourceExpanded, { sourceExpanded = false }) {
+                            accounts.filter { it.id != destinationId }.forEach { account ->
+                                DropdownMenuItem(
+                                    text = { Text(account.name) },
+                                    onClick = { sourceId = account.id; sourceExpanded = false },
+                                )
+                            }
+                        }
+                    }
+                    Box {
+                        OutlinedButton(
+                            onClick = { destinationExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Para: ${accounts.first { it.id == destinationId }.name}") }
+                        DropdownMenu(destinationExpanded, { destinationExpanded = false }) {
+                            accounts.filter { it.id != sourceId }.forEach { account ->
+                                DropdownMenuItem(
+                                    text = { Text(account.name) },
+                                    onClick = {
+                                        destinationId = account.id
+                                        destinationExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { amount = it.filter { c -> c.isDigit() || c in ",." } },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    )
+                    OutlinedTextField(
+                        value = date,
+                        onValueChange = { date = it.take(10) },
+                        label = { Text("Data (AAAA-MM-DD)") },
+                    )
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(80) },
+                        label = { Text("Descrição") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSave(sourceId, destinationId, checkNotNull(amountValue),
+                            checkNotNull(dateValue), description)
+                    },
+                    enabled = sourceId != destinationId && amountValue?.signum() == 1 &&
+                        dateValue != null,
+                ) { Text("Transferir") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -435,8 +768,64 @@ class MainActivity : ComponentActivity() {
         store: DiagnosticStore,
         account: FinancialAccountRecord,
         onBack: () -> Unit,
+        onChanged: () -> Unit,
     ) {
-        val movements = remember(account.id) { store.accountMovements(account.id) }
+        var refresh by remember(account.id) { mutableIntStateOf(0) }
+        var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
+        val movements = remember(account.id, refresh) { store.accountMovements(account.id) }
+        val transactions = remember(account.id, refresh) {
+            store.recentTransactions(10_000).filter { it.accountId == account.id }
+        }
+        val balance = remember(account.id, refresh) { store.accountBalance(account) }
+        val ledgerItems = remember(transactions, movements) {
+            val transactionItems = transactions.mapNotNull { transaction ->
+                val occurredAt = runCatching {
+                    LocalDateTime.parse(transaction.occurredAt)
+                }.getOrNull() ?: return@mapNotNull null
+                AccountLedgerItem(
+                    key = "transaction-${transaction.id}",
+                    occurredAt = occurredAt,
+                    direction = transaction.direction,
+                    amount = transaction.amount.toBigDecimalOrNull() ?: return@mapNotNull null,
+                    description = transaction.description,
+                    detail = listOf(
+                        transaction.category.displayName,
+                        if (transaction.status == TransactionStatus.PENDING) "Pendente"
+                        else "Realizada",
+                    ).joinToString(" · "),
+                    transaction = transaction,
+                )
+            }
+            val movementItems = movements.map { movement ->
+                AccountLedgerItem(
+                    key = "movement-${movement.id}",
+                    // Movimentações criadas no app aparecem antes das importadas no mesmo dia.
+                    occurredAt = movement.occurredAt.atTime(23, 59, 59),
+                    direction = if (movement.direction == AccountMovementDirection.CREDIT) {
+                        FinancialTransactionDirection.INCOME
+                    } else FinancialTransactionDirection.EXPENSE,
+                    amount = movement.amount,
+                    description = movement.description,
+                    detail = listOfNotNull(
+                        movement.relatedAccountName,
+                        if (movement.type == AccountMovementType.TRANSFER) "Transferência"
+                        else "Pagamento de fatura",
+                    ).joinToString(" · "),
+                    movement = movement,
+                )
+            }
+            (transactionItems + movementItems).sortedWith(
+                compareByDescending<AccountLedgerItem> { it.occurredAt }
+                    .thenByDescending { it.transaction?.id ?: it.movement?.id ?: 0L },
+            )
+        }
+        val visibleLedgerItems = remember(ledgerItems, selectedMonth) {
+            ledgerItems.filter { YearMonth.from(it.occurredAt) == selectedMonth }
+        }
+        var addingTransaction by remember { mutableStateOf(false) }
+        var editingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
+        var deletingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
+        var deletingTransfer by remember { mutableStateOf<AccountMovementRecord?>(null) }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -450,39 +839,246 @@ class MainActivity : ComponentActivity() {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item { Text("Movimentações da conta", style = MaterialTheme.typography.headlineSmall) }
-                if (movements.isEmpty()) {
+                item {
+                    Card {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Saldo atual", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                formatCurrency(balance.realizedBalance.toPlainString()),
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = if (balance.realizedBalance.signum() < 0) {
+                                    Color(0xFFBA3B46)
+                                } else Color(0xFF0A7D65),
+                            )
+                            Text(
+                                "Saldo previsto: " +
+                                    formatCurrency(balance.projectedBalance.toPlainString()),
+                            )
+                            account.openingBalanceDate?.let { date ->
+                                Text(
+                                    "Saldo inicial em ${date.format(SHORT_DATE_FORMATTER)}: " +
+                                        formatCurrency(account.openingBalance.toPlainString()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+                }
+                item {
+                    Button(
+                        onClick = { addingTransaction = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Adicionar receita ou despesa") }
+                }
+                item {
+                    MonthSelector(
+                        selectedMonth = selectedMonth,
+                        onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
+                        onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    )
+                }
+                if (visibleLedgerItems.isEmpty()) {
                     item {
                         Card {
                             Text(
-                                "Nenhuma movimentação de conta registrada.",
+                                "Nenhuma movimentação nesta conta em ${formatMonth(selectedMonth)}.",
                                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                             )
                         }
                     }
                 }
-                items(movements, key = { "account-movement-${it.id}" }) { movement ->
-                    Card {
+                items(visibleLedgerItems, key = { it.key }) { ledgerItem ->
+                    Card(onClick = {
+                        ledgerItem.transaction?.takeIf {
+                            it.origin == TransactionOrigin.MANUAL
+                        }?.let { editingTransaction = it }
+                    }) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(movement.description, style = MaterialTheme.typography.titleMedium)
+                                Text(ledgerItem.description, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    movement.occurredAt.format(SHORT_DATE_FORMATTER),
+                                    ledgerItem.occurredAt.toLocalDate().format(SHORT_DATE_FORMATTER) +
+                                        (ledgerItem.detail.takeIf { it.isNotBlank() }
+                                            ?.let { " · $it" } ?: ""),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
                             Text(
-                                "- " + formatCurrency(movement.amount.toPlainString()),
-                                color = Color(0xFFBA3B46),
+                                (if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
+                                    "- "
+                                } else "+ ") + formatCurrency(ledgerItem.amount.toPlainString()),
+                                color = if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
+                                    Color(0xFFBA3B46)
+                                } else Color(0xFF0A7D65),
                                 style = MaterialTheme.typography.titleMedium,
                             )
+                            if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
+                                TextButton(onClick = { deletingTransfer = ledgerItem.movement }) {
+                                    Text("Excluir", color = Color(0xFFBA3B46))
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        if (addingTransaction) {
+            ManualTransactionDialog(
+                onDismiss = { addingTransaction = false },
+                onSave = { direction, amount, date, description, status ->
+                    if (
+                        store.recordManualTransaction(
+                            account.id, direction, amount, date, description, status,
+                        )
+                    ) {
+                        addingTransaction = false
+                        refresh++
+                        onChanged()
+                    }
+                },
+            )
+        }
+        editingTransaction?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editingTransaction = null },
+                onSave = { description, category, status, applyToFuture ->
+                    if (
+                        store.updateTransactionDetails(
+                            transaction.id, description, category, status, applyToFuture,
+                        )
+                    ) {
+                        editingTransaction = null
+                        refresh++
+                        onChanged()
+                    }
+                },
+                onDelete = {
+                    editingTransaction = null
+                    deletingTransaction = transaction
+                },
+            )
+        }
+        deletingTransaction?.let { transaction ->
+            AlertDialog(
+                onDismissRequest = { deletingTransaction = null },
+                title = { Text("Excluir movimentação manual?") },
+                text = { Text(transaction.description) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.deleteManualTransaction(transaction.id)) {
+                            deletingTransaction = null
+                            refresh++
+                            onChanged()
+                        }
+                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingTransaction = null }) { Text("Cancelar") }
+                },
+            )
+        }
+        deletingTransfer?.let { movement ->
+            AlertDialog(
+                onDismissRequest = { deletingTransfer = null },
+                title = { Text("Excluir transferência?") },
+                text = { Text("Os lançamentos nas duas contas serão removidos.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.deleteTransfer(movement.id)) {
+                            deletingTransfer = null
+                            refresh++
+                            onChanged()
+                        }
+                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingTransfer = null }) { Text("Cancelar") }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun ManualTransactionDialog(
+        onDismiss: () -> Unit,
+        onSave: (
+            FinancialTransactionDirection, java.math.BigDecimal, LocalDate, String,
+            TransactionStatus,
+        ) -> Unit,
+    ) {
+        var direction by remember { mutableStateOf(FinancialTransactionDirection.EXPENSE) }
+        var amount by remember { mutableStateOf("") }
+        var date by remember { mutableStateOf(LocalDate.now().toString()) }
+        var description by remember { mutableStateOf("") }
+        var status by remember { mutableStateOf(TransactionStatus.REALIZED) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Nova movimentação") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = direction == FinancialTransactionDirection.EXPENSE,
+                            onClick = { direction = FinancialTransactionDirection.EXPENSE },
+                        )
+                        Text("Despesa")
+                        RadioButton(
+                            selected = direction == FinancialTransactionDirection.INCOME,
+                            onClick = { direction = FinancialTransactionDirection.INCOME },
+                        )
+                        Text("Receita")
+                    }
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { amount = it.filter { c -> c.isDigit() || c in ",." } },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    )
+                    OutlinedTextField(
+                        value = date,
+                        onValueChange = { date = it.take(10) },
+                        label = { Text("Data (AAAA-MM-DD)") },
+                    )
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(100) },
+                        label = { Text("Descrição") },
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = status == TransactionStatus.REALIZED,
+                            onCheckedChange = {
+                                status = if (it) TransactionStatus.REALIZED
+                                else TransactionStatus.PENDING
+                            },
+                        )
+                        Text(if (status == TransactionStatus.REALIZED) "Realizada" else "Pendente")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSave(direction, checkNotNull(amountValue), checkNotNull(dateValue),
+                            description, status)
+                    },
+                    enabled = amountValue?.signum() == 1 && dateValue != null &&
+                        description.isNotBlank(),
+                ) { Text("Salvar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @Composable
@@ -490,7 +1086,10 @@ class MainActivity : ComponentActivity() {
         account: FinancialAccountRecord,
         isNew: Boolean,
         onDismiss: () -> Unit,
-        onSave: (String, FinancialAccountType, Int?, Int?, Boolean, String?) -> Unit,
+        onSave: (
+            String, FinancialAccountType, Int?, Int?, Boolean, String?,
+            java.math.BigDecimal, LocalDate?,
+        ) -> Unit,
     ) {
         var name by remember(account.id, isNew) { mutableStateOf(account.name) }
         var type by remember(account.id, isNew) { mutableStateOf(account.type) }
@@ -504,11 +1103,21 @@ class MainActivity : ComponentActivity() {
         var cardIdentifiers by remember(account.id, isNew) {
             mutableStateOf(account.cardIdentifiers.orEmpty())
         }
+        var openingBalance by remember(account.id, isNew) {
+            mutableStateOf(account.openingBalance.toPlainString().replace('.', ','))
+        }
+        var openingBalanceDate by remember(account.id, isNew) {
+            mutableStateOf(account.openingBalanceDate?.toString() ?: LocalDate.now().toString())
+        }
         var typeMenuExpanded by remember { mutableStateOf(false) }
         val closingValue = closingDay.toIntOrNull()
         val dueValue = dueDay.toIntOrNull()
         val daysValid = (closingDay.isBlank() || closingValue in 1..31) &&
             (dueDay.isBlank() || dueValue in 1..31)
+        val openingBalanceValue = if (',' in openingBalance) {
+            openingBalance.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else openingBalance.toBigDecimalOrNull()
+        val openingBalanceDateValue = runCatching { LocalDate.parse(openingBalanceDate) }.getOrNull()
 
         AlertDialog(
             onDismissRequest = onDismiss,
@@ -583,6 +1192,27 @@ class MainActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                             modifier = Modifier.fillMaxWidth(),
                         )
+                    } else {
+                        OutlinedTextField(
+                            value = openingBalance,
+                            onValueChange = { value ->
+                                openingBalance = value.filter {
+                                    it.isDigit() || it in ",.-"
+                                }.take(18)
+                            },
+                            label = { Text("Saldo inicial") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = openingBalanceDate,
+                            onValueChange = { openingBalanceDate = it.take(10) },
+                            label = { Text("Data do saldo (AAAA-MM-DD)") },
+                            supportingText = {
+                                Text("Movimentações a partir desta data alterarão o saldo")
+                            },
+                            singleLine = true,
+                        )
                     }
                 }
             },
@@ -592,9 +1222,15 @@ class MainActivity : ComponentActivity() {
                         onSave(
                             name, type, closingValue, dueValue, isDefault,
                             cardIdentifiers.ifBlank { null },
+                            openingBalanceValue ?: java.math.BigDecimal.ZERO,
+                            openingBalanceDateValue.takeIf {
+                                type == FinancialAccountType.BANK_ACCOUNT
+                            },
                         )
                     },
-                    enabled = name.isNotBlank() && daysValid,
+                    enabled = name.isNotBlank() && daysValid &&
+                        (type == FinancialAccountType.CREDIT_CARD ||
+                            (openingBalanceValue != null && openingBalanceDateValue != null)),
                 ) { Text("Salvar") }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
@@ -609,7 +1245,13 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
     ) {
         var refresh by remember(account.id) { mutableIntStateOf(0) }
+        var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
         val invoices = remember(account.id, refresh) { store.creditCardInvoices(account.id) }
+        val visibleInvoice = remember(invoices, selectedMonth) {
+            invoices.firstOrNull { invoice ->
+                (invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod) == selectedMonth
+            }
+        }
         var selectedInvoice by remember(account.id) {
             mutableStateOf<CreditCardInvoiceRecord?>(null)
         }
@@ -653,17 +1295,25 @@ class MainActivity : ComponentActivity() {
                 item {
                     Text("Faturas", style = MaterialTheme.typography.headlineSmall)
                 }
-                if (invoices.isEmpty()) {
+                item {
+                    MonthSelector(
+                        selectedMonth = selectedMonth,
+                        onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
+                        onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    )
+                }
+                if (visibleInvoice == null) {
                     item {
                         Card {
                             Text(
-                                "Nenhuma fatura calculada. Informe o fechamento do cartão.",
+                                "Nenhuma fatura em ${formatMonth(selectedMonth)}.",
                                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                             )
                         }
                     }
                 }
-                items(invoices, key = { "invoice-${it.id}" }) { invoice ->
+                visibleInvoice?.let { invoice ->
+                item(key = "invoice-${invoice.id}") {
                     Card(onClick = { selectedInvoice = invoice }) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -703,6 +1353,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                }
                 }
             }
         }
@@ -995,9 +1646,27 @@ class MainActivity : ComponentActivity() {
         onPrevious: () -> Unit,
         onNext: () -> Unit,
     ) {
+        val swipeThreshold = with(LocalDensity.current) { 72.dp.toPx() }
         Card {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(selectedMonth, swipeThreshold) {
+                        var horizontalDistance = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { horizontalDistance = 0f },
+                            onHorizontalDrag = { _, dragAmount ->
+                                horizontalDistance += dragAmount
+                            },
+                            onDragEnd = {
+                                when {
+                                    horizontalDistance > swipeThreshold -> onPrevious()
+                                    horizontalDistance < -swipeThreshold -> onNext()
+                                }
+                            },
+                        )
+                    }
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = onPrevious) { Text("‹") }
@@ -1013,7 +1682,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun StatementSummary(statement: MonthlyStatement) {
+    private fun StatementSummary(
+        statement: MonthlyStatement,
+        generalProjectedBalance: java.math.BigDecimal,
+    ) {
         val balanceColor = if (statement.balance.signum() < 0) {
             Color(0xFFBA3B46)
         } else {
@@ -1066,6 +1738,21 @@ class MainActivity : ComponentActivity() {
                     text = "Inclui pendências: + " +
                         formatCurrency(statement.pendingIncome.toPlainString()) +
                         " / - " + formatCurrency(statement.pendingExpense.toPlainString()),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                HorizontalDivider()
+                Text("Saldo geral projetado", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = formatCurrency(generalProjectedBalance.toPlainString()),
+                    color = if (generalProjectedBalance.signum() < 0) {
+                        Color(0xFFBA3B46)
+                    } else Color(0xFF0A7D65),
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    "Saldo acumulado das contas bancárias até o fim de " +
+                        formatMonth(statement.period),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1148,6 +1835,51 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun StatementInvoiceCard(
+        item: StatementInvoiceItem,
+        onClick: () -> Unit,
+    ) {
+        val invoice = item.invoice
+        val transaction = item.transaction
+        val isCredit = transaction.direction == FinancialTransactionDirection.INCOME
+        Card(onClick = onClick) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        transaction.description,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        (if (isCredit) "+ " else "- ") +
+                            formatCurrency(transaction.amount),
+                        color = if (isCredit) Color(0xFF0A7D65) else Color(0xFFBA3B46),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Text(
+                    "${invoice.status.displayName} · ${invoice.transactionCount} compras" +
+                        if (invoice.paidAmount.signum() > 0) {
+                            " · pago ${formatCurrency(invoice.paidAmount.toPlainString())}"
+                        } else "",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Vencimento ${invoice.dueDate?.format(SHORT_DATE_FORMATTER)} · toque para detalhes",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+
+    @Composable
     private fun TransactionCard(
         transaction: FinancialTransactionRecord,
         onClick: () -> Unit,
@@ -1206,6 +1938,7 @@ class MainActivity : ComponentActivity() {
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
         onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
+        onDelete: (() -> Unit)? = null,
     ) {
         var description by remember(transaction.id) {
             mutableStateOf(transaction.description)
@@ -1333,8 +2066,15 @@ class MainActivity : ComponentActivity() {
                 }
             },
             dismissButton = {
-                TextButton(onClick = onDismiss) {
-                    Text("Cancelar")
+                Row {
+                    onDelete?.let {
+                        TextButton(onClick = it) {
+                            Text("Excluir", color = Color(0xFFBA3B46))
+                        }
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancelar")
+                    }
                 }
             },
         )
@@ -1471,7 +2211,9 @@ class MainActivity : ComponentActivity() {
                                     FinancialTransactionType.PIX_RECEIVED ->
                                         "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
                                     FinancialTransactionType.IMPORTED_EXPENSE,
-                                    FinancialTransactionType.IMPORTED_INCOME ->
+                                    FinancialTransactionType.IMPORTED_INCOME,
+                                    FinancialTransactionType.MANUAL_EXPENSE,
+                                    FinancialTransactionType.MANUAL_INCOME ->
                                         "Movimentação importada"
                                     null -> "Transação reconhecida"
                                 }
@@ -1499,6 +2241,8 @@ class MainActivity : ComponentActivity() {
             FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
             FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
             FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
+            FinancialTransactionType.MANUAL_EXPENSE -> "Despesa manual"
+            FinancialTransactionType.MANUAL_INCOME -> "Receita manual"
         }
 
     private fun notificationAccessEnabled(): Boolean {

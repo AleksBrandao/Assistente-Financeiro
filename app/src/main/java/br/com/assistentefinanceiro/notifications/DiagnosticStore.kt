@@ -10,6 +10,7 @@ import java.time.LocalDateTime
 import java.time.LocalDate
 import java.time.YearMonth
 import java.util.Locale
+import java.util.UUID
 
 data class DiagnosticEvent(
     val id: Long,
@@ -121,6 +122,21 @@ class DiagnosticStore(context: Context) :
         if (oldVersion < 13) {
             createAccountMovementsTable(db)
             rebuildPaymentAccountMovements(db)
+        }
+        if (oldVersion < 14) {
+            if (oldVersion >= 9) {
+                db.execSQL(
+                    "ALTER TABLE financial_accounts ADD COLUMN opening_balance TEXT NOT NULL DEFAULT '0'"
+                )
+                db.execSQL("ALTER TABLE financial_accounts ADD COLUMN opening_balance_date TEXT")
+            }
+            if (oldVersion >= 13) {
+                db.execSQL(
+                    "ALTER TABLE account_movements ADD COLUMN direction TEXT NOT NULL DEFAULT 'DEBIT'"
+                )
+                db.execSQL("ALTER TABLE account_movements ADD COLUMN related_account_id INTEGER")
+                db.execSQL("ALTER TABLE account_movements ADD COLUMN transfer_group TEXT")
+            }
         }
         createCategoryRulesTable(db)
 
@@ -440,7 +456,8 @@ class DiagnosticStore(context: Context) :
     }
 
     fun financialAccounts(): List<FinancialAccountRecord> = readableDatabase.rawQuery(
-        """SELECT id,name,type,closing_day,due_day,is_default,card_identifiers
+        """SELECT id,name,type,closing_day,due_day,is_default,card_identifiers,
+                  opening_balance,opening_balance_date
            FROM financial_accounts
            ORDER BY type DESC,is_default DESC,name COLLATE NOCASE""",
         null,
@@ -456,6 +473,9 @@ class DiagnosticStore(context: Context) :
                         dueDay = if (cursor.isNull(4)) null else cursor.getInt(4),
                         isDefault = cursor.getInt(5) == 1,
                         cardIdentifiers = cursor.getString(6),
+                        openingBalance = cursor.getString(7).toBigDecimalOrNull()
+                            ?: java.math.BigDecimal.ZERO,
+                        openingBalanceDate = cursor.getString(8)?.let(LocalDate::parse),
                     )
                 )
             }
@@ -470,6 +490,8 @@ class DiagnosticStore(context: Context) :
         dueDay: Int?,
         isDefault: Boolean,
         cardIdentifiers: String?,
+        openingBalance: java.math.BigDecimal,
+        openingBalanceDate: LocalDate?,
     ): Boolean {
         val normalizedName = name.trim()
         if (normalizedName.isBlank()) return false
@@ -478,6 +500,7 @@ class DiagnosticStore(context: Context) :
         val normalizedKey = FinancialAccountIdentity.normalize(normalizedName)
         val normalizedIdentifiers = FinancialAccountIdentity.normalizedIdentifiers(cardIdentifiers)
         if (normalizedKey.isBlank()) return false
+        if (type == FinancialAccountType.BANK_ACCOUNT && openingBalanceDate == null) return false
         val db = writableDatabase
         db.beginTransaction()
         return try {
@@ -498,6 +521,16 @@ class DiagnosticStore(context: Context) :
                 put("is_default", if (isDefault && type == FinancialAccountType.CREDIT_CARD) 1 else 0)
                 if (normalizedIdentifiers == null) putNull("card_identifiers")
                 else put("card_identifiers", normalizedIdentifiers)
+                put(
+                    "opening_balance",
+                    if (type == FinancialAccountType.BANK_ACCOUNT) openingBalance.toPlainString()
+                    else "0",
+                )
+                if (type == FinancialAccountType.BANK_ACCOUNT) {
+                    put("opening_balance_date", openingBalanceDate?.toString())
+                } else {
+                    putNull("opening_balance_date")
+                }
             }
             val accountId = if (id == null) {
                 db.insertWithOnConflict(
@@ -650,8 +683,11 @@ class DiagnosticStore(context: Context) :
     }
 
     fun accountMovements(accountId: Long): List<AccountMovementRecord> = readableDatabase.rawQuery(
-        """SELECT id,amount,occurred_at,description FROM account_movements
-           WHERE account_id = ? ORDER BY occurred_at DESC,id DESC""",
+        """SELECT movements.id,movements.direction,movements.type,movements.amount,
+                  movements.occurred_at,movements.description,related.name
+           FROM account_movements AS movements
+           LEFT JOIN financial_accounts AS related ON related.id = movements.related_account_id
+           WHERE movements.account_id = ? ORDER BY movements.occurred_at DESC,movements.id DESC""",
         arrayOf(accountId.toString()),
     ).use { cursor ->
         buildList {
@@ -659,12 +695,199 @@ class DiagnosticStore(context: Context) :
                 add(
                     AccountMovementRecord(
                         id = cursor.getLong(0),
-                        amount = cursor.getString(1).toBigDecimal(),
-                        occurredAt = LocalDate.parse(cursor.getString(2)),
-                        description = cursor.getString(3),
+                        direction = runCatching {
+                            AccountMovementDirection.valueOf(cursor.getString(1))
+                        }.getOrDefault(AccountMovementDirection.DEBIT),
+                        type = runCatching { AccountMovementType.valueOf(cursor.getString(2)) }
+                            .getOrDefault(AccountMovementType.CARD_PAYMENT),
+                        amount = cursor.getString(3).toBigDecimal(),
+                        occurredAt = LocalDate.parse(cursor.getString(4)),
+                        description = cursor.getString(5),
+                        relatedAccountName = cursor.getString(6),
                     )
                 )
             }
+        }
+    }
+
+    fun accountBalance(
+        account: FinancialAccountRecord,
+        throughDate: LocalDate? = null,
+    ): AccountBalanceSummary {
+        val fromDate = account.openingBalanceDate
+        val transactions = readableDatabase.rawQuery(
+            "SELECT direction,amount,occurred_at,status FROM transactions WHERE account_id = ?",
+            arrayOf(account.id.toString()),
+        ).use { cursor ->
+            buildList {
+            while (cursor.moveToNext()) {
+                val date = runCatching {
+                    LocalDateTime.parse(cursor.getString(2)).toLocalDate()
+                }.getOrNull() ?: continue
+                if (fromDate != null && date.isBefore(fromDate)) continue
+                if (throughDate != null && date.isAfter(throughDate)) continue
+                val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
+                val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
+                    ?: continue
+                val status = TransactionStatus.fromStored(cursor.getString(3))
+                    add(AccountBalanceEntry(direction, amount, status))
+                }
+            }
+        }
+        val movements = accountMovements(account.id).filter { movement ->
+            (fromDate == null || !movement.occurredAt.isBefore(fromDate)) &&
+                (throughDate == null || !movement.occurredAt.isAfter(throughDate))
+        }
+        return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
+    }
+
+    fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal {
+        val accounts = financialAccounts()
+        val bankBalance = accounts
+            .filter {
+                it.type == FinancialAccountType.BANK_ACCOUNT &&
+                    (it.openingBalanceDate == null || !it.openingBalanceDate.isAfter(throughDate))
+            }
+            .fold(java.math.BigDecimal.ZERO) { total, account ->
+                total + accountBalance(account, throughDate).projectedBalance
+            }
+        val invoiceAdjustment = accounts
+            .filter { it.type == FinancialAccountType.CREDIT_CARD }
+            .flatMap { creditCardInvoices(it.id) }
+            .fold(java.math.BigDecimal.ZERO) { total, invoice ->
+                val payments = invoicePayments(invoice).filter { !it.paidAt.isAfter(throughDate) }
+                val paidThroughDate = payments.fold(java.math.BigDecimal.ZERO) { sum, payment ->
+                    sum + payment.amount
+                }
+                val outstandingAtDate = (invoice.total - paidThroughDate)
+                    .max(java.math.BigDecimal.ZERO)
+                val dueOutstanding = if (
+                    invoice.dueDate != null && !invoice.dueDate.isAfter(throughDate)
+                ) outstandingAtDate else java.math.BigDecimal.ZERO
+                val paymentsWithoutAccount = payments
+                    .filter { it.sourceAccountId == null }
+                    .fold(java.math.BigDecimal.ZERO) { sum, payment -> sum + payment.amount }
+                total + dueOutstanding + paymentsWithoutAccount
+            }
+        return bankBalance - invoiceAdjustment
+    }
+
+    fun recordTransfer(
+        sourceAccountId: Long,
+        destinationAccountId: Long,
+        amount: java.math.BigDecimal,
+        occurredAt: LocalDate,
+        description: String,
+    ): Boolean {
+        if (sourceAccountId == destinationAccountId || amount.signum() <= 0) return false
+        val db = writableDatabase
+        if (!isBankAccount(db, sourceAccountId) || !isBankAccount(db, destinationAccountId)) {
+            return false
+        }
+        val normalizedDescription = description.trim().ifBlank { "Transferência entre contas" }
+        val transferGroup = UUID.randomUUID().toString()
+        db.beginTransaction()
+        return try {
+            fun insert(
+                accountId: Long,
+                relatedAccountId: Long,
+                direction: AccountMovementDirection,
+            ) = db.insertOrThrow(
+                "account_movements",
+                null,
+                ContentValues().apply {
+                    put("account_id", accountId)
+                    put("type", AccountMovementType.TRANSFER.name)
+                    put("direction", direction.name)
+                    put("amount", amount.toPlainString())
+                    put("occurred_at", occurredAt.toString())
+                    put("description", normalizedDescription)
+                    putNull("invoice_payment_id")
+                    put("related_account_id", relatedAccountId)
+                    put("transfer_group", transferGroup)
+                },
+            )
+            insert(sourceAccountId, destinationAccountId, AccountMovementDirection.DEBIT)
+            insert(destinationAccountId, sourceAccountId, AccountMovementDirection.CREDIT)
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun recordManualTransaction(
+        accountId: Long,
+        direction: FinancialTransactionDirection,
+        amount: java.math.BigDecimal,
+        occurredAt: LocalDate,
+        description: String,
+        status: TransactionStatus,
+    ): Boolean {
+        if (amount.signum() <= 0 || description.isBlank()) return false
+        val db = writableDatabase
+        if (!isBankAccount(db, accountId)) return false
+        val account = db.rawQuery(
+            "SELECT name FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else return false }
+        return db.insert(
+            "transactions",
+            null,
+            ContentValues().apply {
+                putNull("source_event_id")
+                put("direction", direction.name)
+                put(
+                    "type",
+                    if (direction == FinancialTransactionDirection.INCOME) {
+                        FinancialTransactionType.MANUAL_INCOME.name
+                    } else FinancialTransactionType.MANUAL_EXPENSE.name,
+                )
+                put("amount", amount.toPlainString())
+                put("occurred_at", occurredAt.atStartOfDay().toString())
+                put("description", description.trim())
+                put("source_package", "MANUAL")
+                put("category", TransactionCategory.UNCATEGORIZED.name)
+                put("category_source", TransactionCategorySource.DEFAULT.name)
+                putNull("rule_key")
+                put("origin", TransactionOrigin.MANUAL.name)
+                put("status", status.name)
+                put("account", account)
+                put("account_id", accountId)
+                putNull("invoice_id")
+                put("import_key", "MANUAL:${UUID.randomUUID()}")
+            },
+        ) != -1L
+    }
+
+    fun deleteManualTransaction(transactionId: Long): Boolean = writableDatabase.delete(
+        "transactions",
+        "id = ? AND origin = ?",
+        arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name),
+    ) == 1
+
+    fun deleteTransfer(movementId: Long): Boolean {
+        val db = writableDatabase
+        val transferGroup = db.rawQuery(
+            "SELECT transfer_group FROM account_movements WHERE id = ? AND type = ?",
+            arrayOf(movementId.toString(), AccountMovementType.TRANSFER.name),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            cursor.getString(0) ?: return false
+        }
+        db.beginTransaction()
+        return try {
+            val deleted = db.delete(
+                "account_movements",
+                "transfer_group = ?",
+                arrayOf(transferGroup),
+            )
+            if (deleted == 2) db.setTransactionSuccessful()
+            deleted == 2
+        } finally {
+            db.endTransaction()
         }
     }
 
@@ -972,6 +1195,8 @@ class DiagnosticStore(context: Context) :
         FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
         FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
         FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
+        FinancialTransactionType.MANUAL_EXPENSE -> "Despesa manual"
+        FinancialTransactionType.MANUAL_INCOME -> "Receita manual"
     }
 
     private fun migrateTransactionsForImports(db: SQLiteDatabase) {
@@ -1038,7 +1263,9 @@ class DiagnosticStore(context: Context) :
                 closing_day INTEGER,
                 due_day INTEGER,
                 is_default INTEGER NOT NULL DEFAULT 0,
-                card_identifiers TEXT
+                card_identifiers TEXT,
+                opening_balance TEXT NOT NULL DEFAULT '0',
+                opening_balance_date TEXT
             )"""
         )
     }
@@ -1080,7 +1307,10 @@ class DiagnosticStore(context: Context) :
                 amount TEXT NOT NULL,
                 occurred_at TEXT NOT NULL,
                 description TEXT NOT NULL,
-                invoice_payment_id INTEGER UNIQUE
+                invoice_payment_id INTEGER UNIQUE,
+                direction TEXT NOT NULL DEFAULT 'DEBIT',
+                related_account_id INTEGER,
+                transfer_group TEXT
             )"""
         )
     }
@@ -1103,10 +1333,12 @@ class DiagnosticStore(context: Context) :
             ContentValues().apply {
                 put("account_id", sourceAccountId)
                 put("type", "CARD_PAYMENT")
+                put("direction", AccountMovementDirection.DEBIT.name)
                 put("amount", amount.toPlainString())
                 put("occurred_at", paidAt.toString())
                 put("description", "Pagamento da fatura $cardName")
                 put("invoice_payment_id", paymentId)
+                put("related_account_id", cardAccountId)
             },
         )
     }
@@ -1135,10 +1367,12 @@ class DiagnosticStore(context: Context) :
                         }
                         put("account_id", sourceAccountId)
                         put("type", "CARD_PAYMENT")
+                        put("direction", AccountMovementDirection.DEBIT.name)
                         put("amount", amount)
                         put("occurred_at", paidAt)
                         put("description", "Pagamento da fatura $cardName")
                         put("invoice_payment_id", paymentId)
+                        put("related_account_id", cardAccountId)
                     },
                     SQLiteDatabase.CONFLICT_IGNORE,
                 )
@@ -1426,7 +1660,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 13
+        const val DATABASE_VERSION = 14
     }
 }
 

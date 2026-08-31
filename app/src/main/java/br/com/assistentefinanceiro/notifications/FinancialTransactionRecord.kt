@@ -23,7 +23,8 @@ data class FinancialTransactionRecord(
 
 enum class TransactionOrigin {
     NOTIFICATION,
-    MOBILLS;
+    MOBILLS,
+    MANUAL;
 
     companion object {
         fun fromStored(value: String?): TransactionOrigin =
