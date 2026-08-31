@@ -32,6 +32,8 @@ import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
+import java.time.Instant
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -750,11 +752,7 @@ class MainActivity : ComponentActivity() {
                         label = { Text("Valor") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     )
-                    OutlinedTextField(
-                        value = date,
-                        onValueChange = { date = it.take(10) },
-                        label = { Text("Data (AAAA-MM-DD)") },
-                    )
+                    DatePickerField(date, "Data", onValueChange = { date = it })
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(80) },
@@ -1060,11 +1058,7 @@ class MainActivity : ComponentActivity() {
                         label = { Text("Valor") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     )
-                    OutlinedTextField(
-                        value = date,
-                        onValueChange = { date = it.take(10) },
-                        label = { Text("Data (AAAA-MM-DD)") },
-                    )
+                    DatePickerField(date, "Data", onValueChange = { date = it })
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(100) },
@@ -1219,14 +1213,14 @@ class MainActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                         )
-                        OutlinedTextField(
-                            value = openingBalanceDate,
-                            onValueChange = { openingBalanceDate = it.take(10) },
-                            label = { Text("Data do saldo (AAAA-MM-DD)") },
-                            supportingText = {
-                                Text("Movimentações a partir desta data alterarão o saldo")
-                            },
-                            singleLine = true,
+                        DatePickerField(
+                            openingBalanceDate,
+                            "Data do saldo",
+                            onValueChange = { openingBalanceDate = it },
+                        )
+                        Text(
+                            "Movimentações a partir desta data alterarão o saldo",
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
@@ -1700,11 +1694,10 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        OutlinedTextField(
-                            value = paymentDate,
-                            onValueChange = { paymentDate = it.take(10) },
-                            label = { Text("Data (AAAA-MM-DD)") },
-                            singleLine = true,
+                        DatePickerField(
+                            paymentDate,
+                            "Data do pagamento",
+                            onValueChange = { paymentDate = it },
                         )
                     }
                 },
@@ -1750,6 +1743,64 @@ class MainActivity : ComponentActivity() {
                     TextButton(onClick = { deletingPayment = null }) { Text("Cancelar") }
                 },
             )
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun DatePickerField(
+        value: String,
+        label: String,
+        allowClear: Boolean = false,
+        onValueChange: (String) -> Unit,
+    ) {
+        var showingPicker by remember { mutableStateOf(false) }
+        val selectedDate = value.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            OutlinedButton(
+                onClick = { showingPicker = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "$label: " + (selectedDate?.format(SHORT_DATE_FORMATTER)
+                        ?: "Selecionar data")
+                )
+            }
+            if (allowClear && value.isNotBlank()) {
+                TextButton(onClick = { onValueChange("") }) { Text("Limpar $label") }
+            }
+        }
+        if (showingPicker) {
+            val initialMillis = selectedDate
+                ?.atStartOfDay(ZoneOffset.UTC)
+                ?.toInstant()
+                ?.toEpochMilli()
+            val pickerState = rememberDatePickerState(
+                initialSelectedDateMillis = initialMillis,
+            )
+            DatePickerDialog(
+                onDismissRequest = { showingPicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pickerState.selectedDateMillis?.let { millis ->
+                            onValueChange(
+                                Instant.ofEpochMilli(millis)
+                                    .atZone(ZoneOffset.UTC)
+                                    .toLocalDate()
+                                    .toString()
+                            )
+                        }
+                        showingPicker = false
+                    }) { Text("Confirmar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showingPicker = false }) { Text("Cancelar") }
+                },
+            ) {
+                DatePicker(state = pickerState)
+            }
         }
     }
 
@@ -2130,19 +2181,13 @@ class MainActivity : ComponentActivity() {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
-                        value = dueDate,
-                        onValueChange = { dueDate = it.take(10) },
-                        label = { Text("Vencimento (AAAA-MM-DD)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                    DatePickerField(
+                        dueDate, "Vencimento", allowClear = true,
+                        onValueChange = { dueDate = it },
                     )
-                    OutlinedTextField(
-                        value = paidAt,
-                        onValueChange = { paidAt = it.take(10) },
-                        label = { Text("Pagamento (AAAA-MM-DD)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                    DatePickerField(
+                        paidAt, "Pagamento", allowClear = true,
+                        onValueChange = { paidAt = it },
                     )
                     transaction.originalAmount?.let {
                         Text(
