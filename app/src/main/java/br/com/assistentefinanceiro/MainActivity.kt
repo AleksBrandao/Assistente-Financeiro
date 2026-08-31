@@ -249,6 +249,17 @@ class MainActivity : ComponentActivity() {
                         true
                     } else false
                 },
+                onInvoiceAdjustment = { officialTotal ->
+                    if (store.adjustInvoiceTotal(selected.invoice, officialTotal)) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+                onTransactionChanged = {
+                    selectedStatementInvoice = null
+                    refresh++
+                },
             )
             return
         }
@@ -375,13 +386,16 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
                             status = status,
+                            amount = amount,
+                            dueDate = dueDate,
+                            paidAt = paidAt,
                             applyToFuture = applyToFuture,
                         )
                     ) {
@@ -948,10 +962,11 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
-                            transaction.id, description, category, status, applyToFuture,
+                            transaction.id, description, category, status,
+                            amount, dueDate, paidAt, applyToFuture,
                         )
                     ) {
                         editingTransaction = null
@@ -1277,6 +1292,17 @@ class MainActivity : ComponentActivity() {
                         true
                     } else false
                 },
+                onInvoiceAdjustment = { officialTotal ->
+                    if (store.adjustInvoiceTotal(invoice, officialTotal)) {
+                        refresh++
+                        selectedInvoice = null
+                        true
+                    } else false
+                },
+                onTransactionChanged = {
+                    refresh++
+                    selectedInvoice = null
+                },
             )
             return
         }
@@ -1368,6 +1394,8 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
         onPayment: (java.math.BigDecimal, LocalDate, Long?) -> Boolean,
         onDeletePayment: (Long) -> Boolean,
+        onInvoiceAdjustment: (java.math.BigDecimal) -> Boolean,
+        onTransactionChanged: () -> Unit,
     ) {
         val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
         val payments = remember(invoice.id, invoice.paidAmount) { store.invoicePayments(invoice) }
@@ -1386,6 +1414,13 @@ class MainActivity : ComponentActivity() {
         var sourceAccountMenuExpanded by remember { mutableStateOf(false) }
         var deletingPayment by remember(invoice.id) {
             mutableStateOf<InvoicePaymentRecord?>(null)
+        }
+        var adjustingInvoice by remember(invoice.id) { mutableStateOf(false) }
+        var editingInvoiceTransaction by remember(invoice.id) {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var officialTotal by remember(invoice.id, invoice.total) {
+            mutableStateOf(invoice.total.toPlainString().replace('.', ','))
         }
         Scaffold(
             topBar = {
@@ -1416,6 +1451,14 @@ class MainActivity : ComponentActivity() {
                                 style = MaterialTheme.typography.headlineSmall,
                             )
                             Text("${invoice.status.displayName} · ${transactions.size} movimentações")
+                            if (invoice.adjustmentAmount.signum() != 0) {
+                                Text(
+                                    (if (invoice.adjustmentAmount.signum() > 0) "Débito" else "Crédito") +
+                                        " de ajuste: " +
+                                        formatCurrency(invoice.adjustmentAmount.abs().toPlainString()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                             if (invoice.paidAmount.signum() > 0) {
                                 Text("Pago: ${formatCurrency(invoice.paidAmount.toPlainString())}")
                             }
@@ -1425,6 +1468,10 @@ class MainActivity : ComponentActivity() {
                                     color = Color(0xFFBA3B46),
                                 )
                             }
+                            OutlinedButton(
+                                onClick = { adjustingInvoice = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Ajustar valor da fatura") }
                             Text(
                                 "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
                                     (invoice.dueDate?.let {
@@ -1475,7 +1522,7 @@ class MainActivity : ComponentActivity() {
                 }
                 item { Text("Lançamentos", style = MaterialTheme.typography.titleLarge) }
                 items(transactions, key = { "invoice-transaction-${it.id}" }) { transaction ->
-                    Card {
+                    Card(onClick = { editingInvoiceTransaction = transaction }) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1533,6 +1580,72 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+
+        if (adjustingInvoice) {
+            val officialValue = if (',' in officialTotal) {
+                officialTotal.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+            } else officialTotal.toBigDecimalOrNull()
+            AlertDialog(
+                onDismissRequest = { adjustingInvoice = false },
+                title = { Text("Ajustar valor da fatura") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Compras: ${formatCurrency(invoice.baseTotal.toPlainString())}")
+                        OutlinedTextField(
+                            value = officialTotal,
+                            onValueChange = { value ->
+                                officialTotal = value.filter {
+                                    it.isDigit() || it == ',' || it == '.'
+                                }
+                            },
+                            label = { Text("Total oficial da fatura") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                        )
+                        officialValue?.let { value ->
+                            val difference = value - invoice.baseTotal
+                            Text(
+                                when {
+                                    difference.signum() > 0 -> "Será lançado débito de " +
+                                        formatCurrency(difference.toPlainString())
+                                    difference.signum() < 0 -> "Será lançado crédito de " +
+                                        formatCurrency(difference.abs().toPlainString())
+                                    else -> "O ajuste existente será removido."
+                                }
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (onInvoiceAdjustment(checkNotNull(officialValue))) {
+                                adjustingInvoice = false
+                            }
+                        },
+                        enabled = officialValue?.signum()?.let { it >= 0 } == true,
+                    ) { Text("Salvar ajuste") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { adjustingInvoice = false }) { Text("Cancelar") }
+                },
+            )
+        }
+        editingInvoiceTransaction?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editingInvoiceTransaction = null },
+                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
+                    if (store.updateTransactionDetails(
+                            transaction.id, description, category, status,
+                            amount, dueDate, paidAt, applyToFuture,
+                        )) {
+                        editingInvoiceTransaction = null
+                        onTransactionChanged()
+                    }
+                },
+            )
         }
         if (addingPayment) {
             val normalizedPaymentAmount = if (',' in paymentAmount) {
@@ -1929,6 +2042,16 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                if (transaction.dueDate != null || transaction.paidAt != null) {
+                    Text(
+                        listOfNotNull(
+                            transaction.dueDate?.let { "Vence $it" },
+                            transaction.paidAt?.let { "Pago em $it" },
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -1937,7 +2060,10 @@ class MainActivity : ComponentActivity() {
     private fun EditTransactionDialog(
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
-        onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
+        onSave: (
+            String, TransactionCategory, TransactionStatus, java.math.BigDecimal,
+            LocalDate?, LocalDate?, Boolean,
+        ) -> Unit,
         onDelete: (() -> Unit)? = null,
     ) {
         var description by remember(transaction.id) {
@@ -1955,6 +2081,22 @@ class MainActivity : ComponentActivity() {
         var selectedStatus by remember(transaction.id) {
             mutableStateOf(transaction.status)
         }
+        var amount by remember(transaction.id) {
+            mutableStateOf(transaction.amount.replace('.', ','))
+        }
+        var dueDate by remember(transaction.id) { mutableStateOf(transaction.dueDate.orEmpty()) }
+        var paidAt by remember(transaction.id) { mutableStateOf(transaction.paidAt.orEmpty()) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dueDateValue = dueDate.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        val paidAtValue = paidAt.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        val datesValid = (dueDate.isBlank() || dueDateValue != null) &&
+            (paidAt.isBlank() || paidAtValue != null)
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
         }
@@ -1978,6 +2120,37 @@ class MainActivity : ComponentActivity() {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { value ->
+                            amount = value.filter { it.isDigit() || it == ',' || it == '.' }
+                        },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = dueDate,
+                        onValueChange = { dueDate = it.take(10) },
+                        label = { Text("Vencimento (AAAA-MM-DD)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = paidAt,
+                        onValueChange = { paidAt = it.take(10) },
+                        label = { Text("Pagamento (AAAA-MM-DD)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    transaction.originalAmount?.let {
+                        Text(
+                            "Valor original: ${formatCurrency(it)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(
                         text = "Categoria",
                         style = MaterialTheme.typography.labelLarge,
@@ -2058,9 +2231,12 @@ class MainActivity : ComponentActivity() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onSave(description, selectedCategory, selectedStatus, applyToFuture)
+                        onSave(
+                            description, selectedCategory, selectedStatus,
+                            checkNotNull(amountValue), dueDateValue, paidAtValue, applyToFuture,
+                        )
                     },
-                    enabled = description.isNotBlank(),
+                    enabled = description.isNotBlank() && amountValue?.signum() == 1 && datesValid,
                 ) {
                     Text("Salvar")
                 }
