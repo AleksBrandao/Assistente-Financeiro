@@ -57,6 +57,7 @@ class DiagnosticStore(context: Context) :
         createFinancialAccountsTable(db)
         createCreditCardInvoicesTable(db)
         createInvoicePaymentsTable(db)
+        createInvoiceAdjustmentsTable(db)
         createAccountMovementsTable(db)
         createIndexes(db)
     }
@@ -138,6 +139,12 @@ class DiagnosticStore(context: Context) :
                 db.execSQL("ALTER TABLE account_movements ADD COLUMN transfer_group TEXT")
             }
         }
+        if (oldVersion in 7..14) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN original_amount TEXT")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN due_date TEXT")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN paid_at TEXT")
+        }
+        if (oldVersion < 15) createInvoiceAdjustmentsTable(db)
         createCategoryRulesTable(db)
 
         reclassifyExistingEvents(db)
@@ -266,7 +273,7 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status,account_id,invoice_id
+                      original_status,account_id,invoice_id,original_amount,due_date,paid_at
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -296,6 +303,9 @@ class DiagnosticStore(context: Context) :
                                 originalStatus = cursor.getString(15),
                                 accountId = if (cursor.isNull(16)) null else cursor.getLong(16),
                                 invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
+                                originalAmount = cursor.getString(18),
+                                dueDate = cursor.getString(19),
+                                paidAt = cursor.getString(20),
                             )
                         )
                     }
@@ -308,6 +318,9 @@ class DiagnosticStore(context: Context) :
         description: String,
         category: TransactionCategory,
         status: TransactionStatus,
+        amount: java.math.BigDecimal,
+        dueDate: LocalDate?,
+        paidAt: LocalDate?,
         applyToFuture: Boolean = false,
     ): Boolean {
         val normalizedDescription = description.trim()
@@ -326,7 +339,7 @@ class DiagnosticStore(context: Context) :
             StoredTransactionMetadata(direction, type, cursor.getString(2))
         } ?: return false
 
-        if (!category.supports(metadata.direction)) return false
+        if (!category.supports(metadata.direction) || amount.signum() <= 0) return false
         val shouldSaveRule = applyToFuture && TransactionCategoryRule.canApplyToFuture(
             type = metadata.type,
             category = category,
@@ -336,13 +349,23 @@ class DiagnosticStore(context: Context) :
         var updated = false
         db.beginTransaction()
         try {
+            db.execSQL(
+                "UPDATE transactions SET original_amount = amount WHERE id = ? AND original_amount IS NULL",
+                arrayOf(transactionId),
+            )
             updated = db.update(
                 "transactions",
                 ContentValues().apply {
                     put("description", normalizedDescription)
                     put("category", category.name)
                     put("category_source", TransactionCategorySource.MANUAL.name)
-                    put("status", status.name)
+                    put(
+                        "status",
+                        if (paidAt != null) TransactionStatus.REALIZED.name else status.name,
+                    )
+                    put("amount", amount.toPlainString())
+                    if (dueDate == null) putNull("due_date") else put("due_date", dueDate.toString())
+                    if (paidAt == null) putNull("paid_at") else put("paid_at", paidAt.toString())
                 },
                 "id = ?",
                 arrayOf(transactionId.toString()),
@@ -563,6 +586,9 @@ class DiagnosticStore(context: Context) :
                           WHEN transactions.direction = 'EXPENSE' THEN transactions.amount
                           ELSE -transactions.amount
                       END),0),
+                      COALESCE((SELECT adjustments.amount FROM invoice_adjustments AS adjustments
+                                WHERE adjustments.account_id = invoices.account_id
+                                  AND adjustments.closing_period = invoices.closing_period),0),
                       COALESCE((SELECT SUM(payments.amount) FROM invoice_payments AS payments
                                 WHERE payments.account_id = invoices.account_id
                                   AND payments.closing_period = invoices.closing_period),0),
@@ -576,6 +602,10 @@ class DiagnosticStore(context: Context) :
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
+                    val baseTotal = cursor.getString(6).toBigDecimal()
+                    val adjustment = cursor.getString(7).toBigDecimal()
+                    val total = baseTotal + adjustment
+                    val paid = cursor.getString(8).toBigDecimal()
                     add(
                         CreditCardInvoiceRecord(
                             id = cursor.getLong(0),
@@ -584,15 +614,44 @@ class DiagnosticStore(context: Context) :
                             closingDate = LocalDate.parse(cursor.getString(3)),
                             dueDate = cursor.getString(4)?.let(LocalDate::parse),
                             status = CreditCardInvoiceStatus.fromStored(cursor.getString(5)),
-                            total = cursor.getString(6).toBigDecimal(),
-                            paidAmount = cursor.getString(7).toBigDecimal(),
-                            outstandingAmount = (cursor.getString(6).toBigDecimal() -
-                                cursor.getString(7).toBigDecimal()).max(java.math.BigDecimal.ZERO),
-                            transactionCount = cursor.getInt(8),
+                            total = total,
+                            paidAmount = paid,
+                            outstandingAmount = (total - paid).max(java.math.BigDecimal.ZERO),
+                            transactionCount = cursor.getInt(9),
+                            baseTotal = baseTotal,
+                            adjustmentAmount = adjustment,
                         )
                     )
                 }
             }
+        }
+    }
+
+    fun adjustInvoiceTotal(
+        invoice: CreditCardInvoiceRecord,
+        officialTotal: java.math.BigDecimal,
+    ): Boolean {
+        if (officialTotal.signum() < 0) return false
+        val adjustment = InvoiceAdjustmentCalculator.difference(invoice.baseTotal, officialTotal)
+        val db = writableDatabase
+        return if (adjustment.signum() == 0) {
+            db.delete(
+                "invoice_adjustments",
+                "account_id = ? AND closing_period = ?",
+                arrayOf(invoice.accountId.toString(), invoice.closingPeriod.toString()),
+            ) >= 0
+        } else {
+            db.insertWithOnConflict(
+                "invoice_adjustments",
+                null,
+                ContentValues().apply {
+                    put("account_id", invoice.accountId)
+                    put("closing_period", invoice.closingPeriod.toString())
+                    put("amount", adjustment.toPlainString())
+                    put("updated_at", System.currentTimeMillis())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            ) != -1L
         }
     }
 
@@ -716,20 +775,26 @@ class DiagnosticStore(context: Context) :
     ): AccountBalanceSummary {
         val fromDate = account.openingBalanceDate
         val transactions = readableDatabase.rawQuery(
-            "SELECT direction,amount,occurred_at,status FROM transactions WHERE account_id = ?",
+            "SELECT direction,amount,occurred_at,status,due_date,paid_at FROM transactions WHERE account_id = ?",
             arrayOf(account.id.toString()),
         ).use { cursor ->
             buildList {
             while (cursor.moveToNext()) {
-                val date = runCatching {
+                val originalDate = runCatching {
                     LocalDateTime.parse(cursor.getString(2)).toLocalDate()
                 }.getOrNull() ?: continue
+                val status = TransactionStatus.fromStored(cursor.getString(3))
+                val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
+                    cursor.getString(5)
+                } else cursor.getString(4)
+                val date = effectiveStoredDate?.let {
+                    runCatching { LocalDate.parse(it) }.getOrNull()
+                } ?: originalDate
                 if (fromDate != null && date.isBefore(fromDate)) continue
                 if (throughDate != null && date.isAfter(throughDate)) continue
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
                 val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
                     ?: continue
-                val status = TransactionStatus.fromStored(cursor.getString(3))
                     add(AccountBalanceEntry(direction, amount, status))
                 }
             }
@@ -895,7 +960,7 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status,account_id,invoice_id
+                      original_status,account_id,invoice_id,original_amount,due_date,paid_at
                FROM transactions WHERE invoice_id = ?
                ORDER BY occurred_at DESC,id DESC""",
             arrayOf(invoiceId.toString()),
@@ -925,6 +990,9 @@ class DiagnosticStore(context: Context) :
                             originalStatus = cursor.getString(15),
                             accountId = if (cursor.isNull(16)) null else cursor.getLong(16),
                             invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
+                            originalAmount = cursor.getString(18),
+                            dueDate = cursor.getString(19),
+                            paidAt = cursor.getString(20),
                         )
                     )
                 }
@@ -1236,6 +1304,9 @@ class DiagnosticStore(context: Context) :
                 original_status TEXT,
                 account_id INTEGER,
                 invoice_id INTEGER,
+                original_amount TEXT,
+                due_date TEXT,
+                paid_at TEXT,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -1294,6 +1365,18 @@ class DiagnosticStore(context: Context) :
                 paid_at TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 source_account_id INTEGER
+            )"""
+        )
+    }
+
+    private fun createInvoiceAdjustmentsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS invoice_adjustments(
+                account_id INTEGER NOT NULL,
+                closing_period TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(account_id,closing_period)
             )"""
         )
     }
@@ -1564,6 +1647,9 @@ class DiagnosticStore(context: Context) :
             """SELECT invoices.id,invoices.closing_date,invoices.due_date,
                       COALESCE(SUM(CASE WHEN transactions.direction = 'EXPENSE'
                            THEN transactions.amount ELSE -transactions.amount END),0),
+                      COALESCE((SELECT adjustments.amount FROM invoice_adjustments AS adjustments
+                                WHERE adjustments.account_id = invoices.account_id
+                                  AND adjustments.closing_period = invoices.closing_period),0),
                       COALESCE((SELECT SUM(payments.amount) FROM invoice_payments AS payments
                                 WHERE payments.account_id = invoices.account_id
                                   AND payments.closing_period = invoices.closing_period),0)
@@ -1576,8 +1662,8 @@ class DiagnosticStore(context: Context) :
             while (cursor.moveToNext()) {
                 val closingDate = LocalDate.parse(cursor.getString(1))
                 val dueDate = cursor.getString(2)?.let(LocalDate::parse)
-                val total = cursor.getString(3).toBigDecimal()
-                val paidAmount = cursor.getString(4).toBigDecimal()
+                val total = cursor.getString(3).toBigDecimal() + cursor.getString(4).toBigDecimal()
+                val paidAmount = cursor.getString(5).toBigDecimal()
                 db.update(
                     "credit_card_invoices",
                     ContentValues().apply {
@@ -1660,7 +1746,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 14
+        const val DATABASE_VERSION = 15
     }
 }
 
