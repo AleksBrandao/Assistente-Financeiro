@@ -152,6 +152,7 @@ class DiagnosticStore(context: Context) :
             db.execSQL("ALTER TABLE transactions ADD COLUMN series_id TEXT")
             db.execSQL("ALTER TABLE transactions ADD COLUMN series_index INTEGER")
             db.execSQL("ALTER TABLE transactions ADD COLUMN series_total INTEGER")
+            initializeImportedInstallmentSeries(db)
         }
         createIndexes(db)
         createCategoryRulesTable(db)
@@ -1838,6 +1839,58 @@ class DiagnosticStore(context: Context) :
             """CREATE INDEX IF NOT EXISTS idx_transactions_series
                ON transactions(series_id,series_index) WHERE series_id IS NOT NULL"""
         )
+    }
+
+    private fun initializeImportedInstallmentSeries(db: SQLiteDatabase) {
+        data class Candidate(
+            val id: Long,
+            val key: String,
+            val index: Int,
+            val total: Int,
+        )
+
+        val candidates = db.rawQuery(
+            """SELECT id,description,direction,amount,account_id,account
+               FROM transactions
+               WHERE origin = ? AND series_id IS NULL""",
+            arrayOf(TransactionOrigin.MOBILLS.name),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val installment = ImportedInstallmentParser.parse(cursor.getString(1))
+                        ?: continue
+                    val accountKey = if (cursor.isNull(4)) cursor.getString(5).orEmpty()
+                    else cursor.getLong(4).toString()
+                    val key = listOf(
+                        accountKey,
+                        cursor.getString(2),
+                        cursor.getString(3),
+                        installment.baseDescription.lowercase(Locale.ROOT),
+                        installment.total.toString(),
+                    ).joinToString("|")
+                    add(Candidate(cursor.getLong(0), key, installment.index, installment.total))
+                }
+            }
+        }
+
+        candidates.groupBy { it.key }.values.forEach { group ->
+            if (group.size < 2 || group.map { it.index }.distinct().size != group.size) {
+                return@forEach
+            }
+            val seriesId = UUID.randomUUID().toString()
+            group.forEach { candidate ->
+                db.update(
+                    "transactions",
+                    ContentValues().apply {
+                        put("series_id", seriesId)
+                        put("series_index", candidate.index)
+                        put("series_total", candidate.total)
+                    },
+                    "id = ?",
+                    arrayOf(candidate.id.toString()),
+                )
+            }
+        }
     }
 
     private data class StoredEvent(
