@@ -416,7 +416,7 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
@@ -425,6 +425,7 @@ class MainActivity : ComponentActivity() {
                             status = status,
                             amount = amount,
                             dueDate = dueDate,
+                            plannedPaymentDate = plannedDate,
                             paidAt = paidAt,
                             applyToFuture = applyToFuture,
                         )
@@ -988,11 +989,11 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transaction.id, description, category, status,
-                            amount, dueDate, paidAt, applyToFuture,
+                            amount, dueDate, plannedDate, paidAt, applyToFuture,
                         )
                     ) {
                         editingTransaction = null
@@ -1659,10 +1660,10 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingInvoiceTransaction = null },
-                onSave = { description, category, status, amount, dueDate, paidAt, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
                     if (store.updateTransactionDetails(
                             transaction.id, description, category, status,
-                            amount, dueDate, paidAt, applyToFuture,
+                            amount, dueDate, plannedDate, paidAt, applyToFuture,
                         )) {
                         editingInvoiceTransaction = null
                         onTransactionChanged()
@@ -2122,11 +2123,15 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                if (transaction.dueDate != null || transaction.paidAt != null) {
+                if (
+                    transaction.dueDate != null || transaction.plannedPaymentDate != null ||
+                    transaction.paidAt != null
+                ) {
                     Text(
                         listOfNotNull(
                             transaction.dueDate?.let { "Vence $it" },
-                            transaction.paidAt?.let { "Pago em $it" },
+                            transaction.plannedPaymentDate?.let { "Previsto $it" },
+                            transaction.paidAt?.let { "Pago $it" },
                         ).joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2142,7 +2147,7 @@ class MainActivity : ComponentActivity() {
         onDismiss: () -> Unit,
         onSave: (
             String, TransactionCategory, TransactionStatus, java.math.BigDecimal,
-            LocalDate?, LocalDate?, Boolean,
+            LocalDate?, LocalDate?, LocalDate?, Boolean,
         ) -> Unit,
         onDelete: (() -> Unit)? = null,
     ) {
@@ -2165,6 +2170,9 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(transaction.amount.replace('.', ','))
         }
         var dueDate by remember(transaction.id) { mutableStateOf(transaction.dueDate.orEmpty()) }
+        var plannedPaymentDate by remember(transaction.id) {
+            mutableStateOf(transaction.plannedPaymentDate.orEmpty())
+        }
         var paidAt by remember(transaction.id) { mutableStateOf(transaction.paidAt.orEmpty()) }
         val amountValue = if (',' in amount) {
             amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
@@ -2175,7 +2183,11 @@ class MainActivity : ComponentActivity() {
         val paidAtValue = paidAt.takeIf(String::isNotBlank)?.let {
             runCatching { LocalDate.parse(it) }.getOrNull()
         }
+        val plannedPaymentDateValue = plannedPaymentDate.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
         val datesValid = (dueDate.isBlank() || dueDateValue != null) &&
+            (plannedPaymentDate.isBlank() || plannedPaymentDateValue != null) &&
             (paidAt.isBlank() || paidAtValue != null)
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
@@ -2213,6 +2225,10 @@ class MainActivity : ComponentActivity() {
                     DatePickerField(
                         dueDate, "Vencimento", allowClear = true,
                         onValueChange = { dueDate = it },
+                    )
+                    DatePickerField(
+                        plannedPaymentDate, "Pagamento previsto", allowClear = true,
+                        onValueChange = { plannedPaymentDate = it },
                     )
                     DatePickerField(
                         paidAt, "Pagamento", allowClear = true,
@@ -2313,7 +2329,8 @@ class MainActivity : ComponentActivity() {
                     onClick = {
                         onSave(
                             description, selectedCategory, selectedStatus,
-                            checkNotNull(amountValue), dueDateValue, paidAtValue, applyToFuture,
+                            checkNotNull(amountValue), dueDateValue, plannedPaymentDateValue,
+                            paidAtValue, applyToFuture,
                         )
                     },
                     enabled = description.isNotBlank() && amountValue?.signum() == 1 && datesValid,
@@ -2429,10 +2446,10 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editing = null },
-                onSave = { description, category, status, amount, dueDate, paidAt, apply ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, apply ->
                     if (store.updateTransactionDetails(
                             transaction.id, description, category, status,
-                            amount, dueDate, paidAt, apply,
+                            amount, dueDate, plannedDate, paidAt, apply,
                         )) {
                         editing = null
                         refresh++
@@ -2547,7 +2564,7 @@ class MainActivity : ComponentActivity() {
     private fun transactionEffectiveDate(transaction: FinancialTransactionRecord): LocalDate? {
         val stored = if (transaction.status == TransactionStatus.REALIZED) {
             transaction.paidAt
-        } else transaction.dueDate
+        } else transaction.plannedPaymentDate ?: transaction.dueDate
         return stored?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
             ?: runCatching { LocalDateTime.parse(transaction.occurredAt).toLocalDate() }.getOrNull()
     }
