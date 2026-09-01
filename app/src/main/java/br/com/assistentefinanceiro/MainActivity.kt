@@ -219,6 +219,12 @@ class MainActivity : ComponentActivity() {
         var editingTransaction by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
         }
+        var deletingStatementTransaction by remember {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var deletingStatementScope by remember {
+            mutableStateOf(TransactionSeriesScope.ONLY_THIS)
+        }
         var importPreview by remember { mutableStateOf<MobillsImportPreview?>(null) }
         var includePossibleDuplicates by remember { mutableStateOf(false) }
         var importMessage by remember { mutableStateOf<String?>(null) }
@@ -454,6 +460,41 @@ class MainActivity : ComponentActivity() {
                     ) {
                         editingTransaction = null
                         refresh++
+                    }
+                },
+                onDelete = if (transaction.origin == TransactionOrigin.MANUAL) {
+                    { selectedScope ->
+                        editingTransaction = null
+                        deletingStatementTransaction = transaction
+                        deletingStatementScope = selectedScope
+                    }
+                } else null,
+            )
+        }
+
+        deletingStatementTransaction?.let { transaction ->
+            val scopeDescription = when (deletingStatementScope) {
+                TransactionSeriesScope.ONLY_THIS -> "somente esta movimentação"
+                TransactionSeriesScope.THIS_AND_FUTURE -> "esta e as próximas movimentações"
+                TransactionSeriesScope.ALL -> "todas as movimentações da série"
+            }
+            AlertDialog(
+                onDismissRequest = { deletingStatementTransaction = null },
+                title = { Text("Excluir movimentação?") },
+                text = { Text("Será excluída $scopeDescription: ${transaction.description}.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.deleteManualTransaction(transaction.id, deletingStatementScope)) {
+                            deletingStatementTransaction = null
+                            refresh++
+                        }
+                    }) {
+                        Text("Excluir", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingStatementTransaction = null }) {
+                        Text("Cancelar")
                     }
                 },
             )
