@@ -54,7 +54,8 @@ object MonthlyStatementCalculator {
                 TransactionStatus.REALIZED -> transaction.paidAt?.let {
                     runCatching { LocalDate.parse(it) }.getOrNull()
                 }
-                TransactionStatus.PENDING -> transaction.dueDate?.let {
+                TransactionStatus.PENDING ->
+                    (transaction.plannedPaymentDate ?: transaction.dueDate)?.let {
                     runCatching { LocalDate.parse(it) }.getOrNull()
                 }
             }
