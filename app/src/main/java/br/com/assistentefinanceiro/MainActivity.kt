@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -2215,7 +2216,12 @@ class MainActivity : ComponentActivity() {
                     )
                     DatePickerField(
                         paidAt, "Pagamento", allowClear = true,
-                        onValueChange = { paidAt = it },
+                        onValueChange = {
+                            paidAt = it
+                            selectedStatus = if (it.isNotBlank()) {
+                                TransactionStatus.REALIZED
+                            } else TransactionStatus.PENDING
+                        },
                     )
                     transaction.originalAmount?.let {
                         Text(
@@ -2260,6 +2266,7 @@ class MainActivity : ComponentActivity() {
                                 selectedStatus = if (checked) {
                                     TransactionStatus.REALIZED
                                 } else {
+                                    paidAt = ""
                                     TransactionStatus.PENDING
                                 }
                             },
@@ -2481,26 +2488,60 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                items(rows, key = { it.first.toString() }) { (period, statement, balance) ->
+                item {
                     Card {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(10.dp),
                         ) {
-                            Text(formatMonth(period), style = MaterialTheme.typography.titleMedium)
-                            Text("Entradas: ${formatCurrency(statement.projectedIncome.toPlainString())}")
-                            Text("Saídas: ${formatCurrency(statement.projectedExpense.toPlainString())}")
-                            Text("Resultado: ${formatCurrency(statement.projectedBalance.toPlainString())}")
-                            Text(
-                                "Saldo geral projetado: ${formatCurrency(balance.toPlainString())}",
-                                color = if (balance.signum() < 0) Color(0xFFBA3B46)
-                                else Color(0xFF0A7D65),
+                            Row {
+                                AnnualSummaryCell("Descrição", true, true)
+                                rows.forEach { (period, _, _) ->
+                                    AnnualSummaryCell(
+                                        formatMonth(period).substringBefore(" de ").take(3),
+                                        header = true,
+                                    )
+                                }
+                            }
+                            HorizontalDivider()
+                            val tableRows = listOf(
+                                "Entradas" to rows.map { it.second.projectedIncome },
+                                "Saídas" to rows.map { it.second.projectedExpense },
+                                "Resultado" to rows.map { it.second.projectedBalance },
+                                "Saldo projetado" to rows.map { it.third },
                             )
+                            tableRows.forEachIndexed { index, (label, values) ->
+                                Row {
+                                    AnnualSummaryCell(label, firstColumn = true)
+                                    values.forEach { value ->
+                                        AnnualSummaryCell(formatCurrency(value.toPlainString()))
+                                    }
+                                }
+                                if (index < tableRows.lastIndex) HorizontalDivider()
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    @Composable
+    private fun AnnualSummaryCell(
+        text: String,
+        header: Boolean = false,
+        firstColumn: Boolean = false,
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier
+                .width(if (firstColumn) 130.dp else 112.dp)
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            style = if (header) MaterialTheme.typography.labelLarge
+            else MaterialTheme.typography.bodySmall,
+            textAlign = if (firstColumn) TextAlign.Start else TextAlign.End,
+        )
     }
 
     private fun transactionEffectiveDate(transaction: FinancialTransactionRecord): LocalDate? {
