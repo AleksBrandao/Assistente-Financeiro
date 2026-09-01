@@ -145,6 +145,9 @@ class DiagnosticStore(context: Context) :
             db.execSQL("ALTER TABLE transactions ADD COLUMN paid_at TEXT")
         }
         if (oldVersion < 15) createInvoiceAdjustmentsTable(db)
+        if (oldVersion in 7..15) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN planned_payment_date TEXT")
+        }
         createCategoryRulesTable(db)
 
         reclassifyExistingEvents(db)
@@ -273,7 +276,8 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status,account_id,invoice_id,original_amount,due_date,paid_at
+                      original_status,account_id,invoice_id,original_amount,due_date,
+                      planned_payment_date,paid_at
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -305,7 +309,8 @@ class DiagnosticStore(context: Context) :
                                 invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
                                 originalAmount = cursor.getString(18),
                                 dueDate = cursor.getString(19),
-                                paidAt = cursor.getString(20),
+                                plannedPaymentDate = cursor.getString(20),
+                                paidAt = cursor.getString(21),
                             )
                         )
                     }
@@ -320,6 +325,7 @@ class DiagnosticStore(context: Context) :
         status: TransactionStatus,
         amount: java.math.BigDecimal,
         dueDate: LocalDate?,
+        plannedPaymentDate: LocalDate?,
         paidAt: LocalDate?,
         applyToFuture: Boolean = false,
     ): Boolean {
@@ -365,6 +371,8 @@ class DiagnosticStore(context: Context) :
                     )
                     put("amount", amount.toPlainString())
                     if (dueDate == null) putNull("due_date") else put("due_date", dueDate.toString())
+                    if (plannedPaymentDate == null) putNull("planned_payment_date")
+                    else put("planned_payment_date", plannedPaymentDate.toString())
                     if (paidAt == null) putNull("paid_at") else put("paid_at", paidAt.toString())
                 },
                 "id = ?",
@@ -775,7 +783,8 @@ class DiagnosticStore(context: Context) :
     ): AccountBalanceSummary {
         val fromDate = account.openingBalanceDate
         val transactions = readableDatabase.rawQuery(
-            "SELECT direction,amount,occurred_at,status,due_date,paid_at FROM transactions WHERE account_id = ?",
+            "SELECT direction,amount,occurred_at,status,due_date,planned_payment_date,paid_at " +
+                "FROM transactions WHERE account_id = ?",
             arrayOf(account.id.toString()),
         ).use { cursor ->
             buildList {
@@ -785,8 +794,8 @@ class DiagnosticStore(context: Context) :
                 }.getOrNull() ?: continue
                 val status = TransactionStatus.fromStored(cursor.getString(3))
                 val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
-                    cursor.getString(5)
-                } else cursor.getString(4)
+                    cursor.getString(6)
+                } else cursor.getString(5) ?: cursor.getString(4)
                 val date = effectiveStoredDate?.let {
                     runCatching { LocalDate.parse(it) }.getOrNull()
                 } ?: originalDate
@@ -961,7 +970,8 @@ class DiagnosticStore(context: Context) :
         readableDatabase.rawQuery(
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
-                      original_status,account_id,invoice_id,original_amount,due_date,paid_at
+                      original_status,account_id,invoice_id,original_amount,due_date,
+                      planned_payment_date,paid_at
                FROM transactions WHERE invoice_id = ?
                ORDER BY occurred_at DESC,id DESC""",
             arrayOf(invoiceId.toString()),
@@ -993,7 +1003,8 @@ class DiagnosticStore(context: Context) :
                             invoiceId = if (cursor.isNull(17)) null else cursor.getLong(17),
                             originalAmount = cursor.getString(18),
                             dueDate = cursor.getString(19),
-                            paidAt = cursor.getString(20),
+                            plannedPaymentDate = cursor.getString(20),
+                            paidAt = cursor.getString(21),
                         )
                     )
                 }
@@ -1307,6 +1318,7 @@ class DiagnosticStore(context: Context) :
                 invoice_id INTEGER,
                 original_amount TEXT,
                 due_date TEXT,
+                planned_payment_date TEXT,
                 paid_at TEXT,
                 import_key TEXT UNIQUE
             )"""
@@ -1747,7 +1759,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 15
+        const val DATABASE_VERSION = 16
     }
 }
 
