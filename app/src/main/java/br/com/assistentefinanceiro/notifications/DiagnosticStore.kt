@@ -790,7 +790,8 @@ class DiagnosticStore(context: Context) :
                 val date = effectiveStoredDate?.let {
                     runCatching { LocalDate.parse(it) }.getOrNull()
                 } ?: originalDate
-                if (fromDate != null && date.isBefore(fromDate)) continue
+                // O saldo informado representa o fechamento da data escolhida.
+                if (fromDate != null && !date.isAfter(fromDate)) continue
                 if (throughDate != null && date.isAfter(throughDate)) continue
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
                 val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
@@ -800,7 +801,7 @@ class DiagnosticStore(context: Context) :
             }
         }
         val movements = accountMovements(account.id).filter { movement ->
-            (fromDate == null || !movement.occurredAt.isBefore(fromDate)) &&
+            (fromDate == null || movement.occurredAt.isAfter(fromDate)) &&
                 (throughDate == null || !movement.occurredAt.isAfter(throughDate))
         }
         return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
