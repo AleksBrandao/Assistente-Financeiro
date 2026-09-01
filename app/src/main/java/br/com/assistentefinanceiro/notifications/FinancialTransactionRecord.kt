@@ -21,6 +21,7 @@ data class FinancialTransactionRecord(
     val invoiceId: Long? = null,
     val originalAmount: String? = null,
     val dueDate: String? = null,
+    val plannedPaymentDate: String? = null,
     val paidAt: String? = null,
 )
 
