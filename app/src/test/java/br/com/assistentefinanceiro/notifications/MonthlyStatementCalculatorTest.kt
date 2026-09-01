@@ -82,12 +82,63 @@ class MonthlyStatementCalculatorTest {
         assertEquals(0, statement.transactionCount)
     }
 
+    @Test
+    fun usesDueDateForPendingAndPaidDateForRealizedTransactions() {
+        val transactions = listOf(
+            transaction(
+                id = 1, direction = FinancialTransactionDirection.EXPENSE,
+                status = TransactionStatus.PENDING, dueDate = "2026-09-10",
+            ),
+            transaction(
+                id = 2, direction = FinancialTransactionDirection.EXPENSE,
+                status = TransactionStatus.REALIZED, paidAt = "2026-09-12",
+            ),
+        )
+
+        assertEquals(
+            0,
+            MonthlyStatementCalculator.calculate(YearMonth.of(2026, 8), transactions)
+                .transactionCount,
+        )
+        assertEquals(
+            2,
+            MonthlyStatementCalculator.calculate(YearMonth.of(2026, 9), transactions)
+                .transactionCount,
+        )
+    }
+
+    @Test
+    fun `pagamento previsto substitui vencimento sem marcar como pago`() {
+        val transaction = transaction(
+            id = 10,
+            direction = FinancialTransactionDirection.EXPENSE,
+            status = TransactionStatus.PENDING,
+            dueDate = "2026-09-05",
+            plannedPaymentDate = "2026-10-05",
+        )
+
+        assertEquals(
+            0,
+            MonthlyStatementCalculator.calculate(YearMonth.of(2026, 9), listOf(transaction))
+                .transactionCount,
+        )
+        assertEquals(
+            1,
+            MonthlyStatementCalculator.calculate(YearMonth.of(2026, 10), listOf(transaction))
+                .transactionCount,
+        )
+    }
+
     private fun transaction(
         id: Long,
         direction: FinancialTransactionDirection = FinancialTransactionDirection.INCOME,
         type: FinancialTransactionType = FinancialTransactionType.PIX_RECEIVED,
         amount: String = "1.00",
         occurredAt: String = "2026-08-29T12:00",
+        status: TransactionStatus = TransactionStatus.REALIZED,
+        dueDate: String? = null,
+        plannedPaymentDate: String? = null,
+        paidAt: String? = null,
     ): FinancialTransactionRecord = FinancialTransactionRecord(
         id = id,
         sourceEventId = id,
@@ -101,5 +152,9 @@ class MonthlyStatementCalculatorTest {
             "Compra no cartão"
         },
         sourcePackage = "com.santander.app",
+        status = status,
+        dueDate = dueDate,
+        plannedPaymentDate = plannedPaymentDate,
+        paidAt = paidAt,
     )
 }

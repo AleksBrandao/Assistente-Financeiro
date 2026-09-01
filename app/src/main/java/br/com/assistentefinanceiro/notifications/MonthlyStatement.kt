@@ -47,9 +47,19 @@ object MonthlyStatementCalculator {
         transactions: List<FinancialTransactionRecord>,
     ): MonthlyStatement {
         val normalized = transactions.mapNotNull { transaction ->
-            val occurredAt = runCatching {
+            val originalOccurredAt = runCatching {
                 LocalDateTime.parse(transaction.occurredAt)
             }.getOrNull() ?: return@mapNotNull null
+            val effectiveDate = when (transaction.status) {
+                TransactionStatus.REALIZED -> transaction.paidAt?.let {
+                    runCatching { LocalDate.parse(it) }.getOrNull()
+                }
+                TransactionStatus.PENDING ->
+                    (transaction.plannedPaymentDate ?: transaction.dueDate)?.let {
+                    runCatching { LocalDate.parse(it) }.getOrNull()
+                }
+            }
+            val occurredAt = effectiveDate?.atStartOfDay() ?: originalOccurredAt
             val amount = transaction.amount.toBigDecimalOrNull()
                 ?.takeIf { it.signum() >= 0 }
                 ?: return@mapNotNull null

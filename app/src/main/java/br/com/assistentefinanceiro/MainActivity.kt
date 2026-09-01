@@ -10,6 +10,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -32,6 +34,8 @@ import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
+import java.time.Instant
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +46,8 @@ private enum class AppScreen {
     STATEMENT,
     DIAGNOSTIC,
     ACCOUNTS,
+    SEARCH,
+    SUMMARY,
 }
 
 private data class AccountLedgerItem(
@@ -74,6 +80,8 @@ class MainActivity : ComponentActivity() {
                     AppScreen.STATEMENT -> MonthlyStatementScreen(
                         store = store,
                         onOpenAccounts = { screen = AppScreen.ACCOUNTS },
+                        onOpenSearch = { screen = AppScreen.SEARCH },
+                        onOpenSummary = { screen = AppScreen.SUMMARY },
                     )
                     AppScreen.DIAGNOSTIC -> DiagnosticScreen(
                         store = store,
@@ -85,6 +93,14 @@ class MainActivity : ComponentActivity() {
                         onOpenStatement = { screen = AppScreen.STATEMENT },
                         onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
                     )
+                    AppScreen.SEARCH -> TransactionSearchScreen(
+                        store = store,
+                        onBack = { screen = AppScreen.STATEMENT },
+                    )
+                    AppScreen.SUMMARY -> AnnualSummaryScreen(
+                        store = store,
+                        onBack = { screen = AppScreen.STATEMENT },
+                    )
                 }
             }
         }
@@ -95,6 +111,8 @@ class MainActivity : ComponentActivity() {
     private fun MonthlyStatementScreen(
         store: DiagnosticStore,
         onOpenAccounts: () -> Unit,
+        onOpenSearch: () -> Unit,
+        onOpenSummary: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -249,6 +267,17 @@ class MainActivity : ComponentActivity() {
                         true
                     } else false
                 },
+                onInvoiceAdjustment = { officialTotal ->
+                    if (store.adjustInvoiceTotal(selected.invoice, officialTotal)) {
+                        selectedStatementInvoice = null
+                        refresh++
+                        true
+                    } else false
+                },
+                onTransactionChanged = {
+                    selectedStatementInvoice = null
+                    refresh++
+                },
             )
             return
         }
@@ -287,6 +316,19 @@ class MainActivity : ComponentActivity() {
                         onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
                         onNext = { selectedMonth = selectedMonth.plusMonths(1) },
                     )
+                }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(onClick = onOpenSearch, modifier = Modifier.weight(1f)) {
+                            Text("Pesquisar")
+                        }
+                        OutlinedButton(onClick = onOpenSummary, modifier = Modifier.weight(1f)) {
+                            Text("Resumo anual")
+                        }
+                    }
                 }
                 item {
                     Row(
@@ -375,13 +417,17 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
                             status = status,
+                            amount = amount,
+                            dueDate = dueDate,
+                            plannedPaymentDate = plannedDate,
+                            paidAt = paidAt,
                             applyToFuture = applyToFuture,
                         )
                     ) {
@@ -736,11 +782,7 @@ class MainActivity : ComponentActivity() {
                         label = { Text("Valor") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     )
-                    OutlinedTextField(
-                        value = date,
-                        onValueChange = { date = it.take(10) },
-                        label = { Text("Data (AAAA-MM-DD)") },
-                    )
+                    DatePickerField(date, "Data", onValueChange = { date = it })
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(80) },
@@ -948,10 +990,11 @@ class MainActivity : ComponentActivity() {
             EditTransactionDialog(
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, applyToFuture ->
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
                     if (
                         store.updateTransactionDetails(
-                            transaction.id, description, category, status, applyToFuture,
+                            transaction.id, description, category, status,
+                            amount, dueDate, plannedDate, paidAt, applyToFuture,
                         )
                     ) {
                         editingTransaction = null
@@ -1045,11 +1088,7 @@ class MainActivity : ComponentActivity() {
                         label = { Text("Valor") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     )
-                    OutlinedTextField(
-                        value = date,
-                        onValueChange = { date = it.take(10) },
-                        label = { Text("Data (AAAA-MM-DD)") },
-                    )
+                    DatePickerField(date, "Data", onValueChange = { date = it })
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(100) },
@@ -1204,14 +1243,15 @@ class MainActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                         )
-                        OutlinedTextField(
-                            value = openingBalanceDate,
-                            onValueChange = { openingBalanceDate = it.take(10) },
-                            label = { Text("Data do saldo (AAAA-MM-DD)") },
-                            supportingText = {
-                                Text("Movimentações a partir desta data alterarão o saldo")
-                            },
-                            singleLine = true,
+                        DatePickerField(
+                            openingBalanceDate,
+                            "Data do saldo",
+                            onValueChange = { openingBalanceDate = it },
+                        )
+                        Text(
+                            "Este saldo será o fechamento do dia; movimentações posteriores " +
+                                "alterarão o valor",
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
@@ -1276,6 +1316,17 @@ class MainActivity : ComponentActivity() {
                             .firstOrNull { it.id == invoice.id }
                         true
                     } else false
+                },
+                onInvoiceAdjustment = { officialTotal ->
+                    if (store.adjustInvoiceTotal(invoice, officialTotal)) {
+                        refresh++
+                        selectedInvoice = null
+                        true
+                    } else false
+                },
+                onTransactionChanged = {
+                    refresh++
+                    selectedInvoice = null
                 },
             )
             return
@@ -1368,6 +1419,8 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
         onPayment: (java.math.BigDecimal, LocalDate, Long?) -> Boolean,
         onDeletePayment: (Long) -> Boolean,
+        onInvoiceAdjustment: (java.math.BigDecimal) -> Boolean,
+        onTransactionChanged: () -> Unit,
     ) {
         val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
         val payments = remember(invoice.id, invoice.paidAmount) { store.invoicePayments(invoice) }
@@ -1386,6 +1439,13 @@ class MainActivity : ComponentActivity() {
         var sourceAccountMenuExpanded by remember { mutableStateOf(false) }
         var deletingPayment by remember(invoice.id) {
             mutableStateOf<InvoicePaymentRecord?>(null)
+        }
+        var adjustingInvoice by remember(invoice.id) { mutableStateOf(false) }
+        var editingInvoiceTransaction by remember(invoice.id) {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var officialTotal by remember(invoice.id, invoice.total) {
+            mutableStateOf(invoice.total.toPlainString().replace('.', ','))
         }
         Scaffold(
             topBar = {
@@ -1416,6 +1476,14 @@ class MainActivity : ComponentActivity() {
                                 style = MaterialTheme.typography.headlineSmall,
                             )
                             Text("${invoice.status.displayName} · ${transactions.size} movimentações")
+                            if (invoice.adjustmentAmount.signum() != 0) {
+                                Text(
+                                    (if (invoice.adjustmentAmount.signum() > 0) "Débito" else "Crédito") +
+                                        " de ajuste: " +
+                                        formatCurrency(invoice.adjustmentAmount.abs().toPlainString()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                             if (invoice.paidAmount.signum() > 0) {
                                 Text("Pago: ${formatCurrency(invoice.paidAmount.toPlainString())}")
                             }
@@ -1425,6 +1493,10 @@ class MainActivity : ComponentActivity() {
                                     color = Color(0xFFBA3B46),
                                 )
                             }
+                            OutlinedButton(
+                                onClick = { adjustingInvoice = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Ajustar valor da fatura") }
                             Text(
                                 "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
                                     (invoice.dueDate?.let {
@@ -1475,7 +1547,7 @@ class MainActivity : ComponentActivity() {
                 }
                 item { Text("Lançamentos", style = MaterialTheme.typography.titleLarge) }
                 items(transactions, key = { "invoice-transaction-${it.id}" }) { transaction ->
-                    Card {
+                    Card(onClick = { editingInvoiceTransaction = transaction }) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1534,6 +1606,72 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        if (adjustingInvoice) {
+            val officialValue = if (',' in officialTotal) {
+                officialTotal.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+            } else officialTotal.toBigDecimalOrNull()
+            AlertDialog(
+                onDismissRequest = { adjustingInvoice = false },
+                title = { Text("Ajustar valor da fatura") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Compras: ${formatCurrency(invoice.baseTotal.toPlainString())}")
+                        OutlinedTextField(
+                            value = officialTotal,
+                            onValueChange = { value ->
+                                officialTotal = value.filter {
+                                    it.isDigit() || it == ',' || it == '.'
+                                }
+                            },
+                            label = { Text("Total oficial da fatura") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                        )
+                        officialValue?.let { value ->
+                            val difference = value - invoice.baseTotal
+                            Text(
+                                when {
+                                    difference.signum() > 0 -> "Será lançado débito de " +
+                                        formatCurrency(difference.toPlainString())
+                                    difference.signum() < 0 -> "Será lançado crédito de " +
+                                        formatCurrency(difference.abs().toPlainString())
+                                    else -> "O ajuste existente será removido."
+                                }
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (onInvoiceAdjustment(checkNotNull(officialValue))) {
+                                adjustingInvoice = false
+                            }
+                        },
+                        enabled = officialValue?.signum()?.let { it >= 0 } == true,
+                    ) { Text("Salvar ajuste") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { adjustingInvoice = false }) { Text("Cancelar") }
+                },
+            )
+        }
+        editingInvoiceTransaction?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editingInvoiceTransaction = null },
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture ->
+                    if (store.updateTransactionDetails(
+                            transaction.id, description, category, status,
+                            amount, dueDate, plannedDate, paidAt, applyToFuture,
+                        )) {
+                        editingInvoiceTransaction = null
+                        onTransactionChanged()
+                    }
+                },
+            )
+        }
         if (addingPayment) {
             val normalizedPaymentAmount = if (',' in paymentAmount) {
                 paymentAmount.replace(".", "").replace(',', '.')
@@ -1587,11 +1725,10 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        OutlinedTextField(
-                            value = paymentDate,
-                            onValueChange = { paymentDate = it.take(10) },
-                            label = { Text("Data (AAAA-MM-DD)") },
-                            singleLine = true,
+                        DatePickerField(
+                            paymentDate,
+                            "Data do pagamento",
+                            onValueChange = { paymentDate = it },
                         )
                     }
                 },
@@ -1637,6 +1774,64 @@ class MainActivity : ComponentActivity() {
                     TextButton(onClick = { deletingPayment = null }) { Text("Cancelar") }
                 },
             )
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun DatePickerField(
+        value: String,
+        label: String,
+        allowClear: Boolean = false,
+        onValueChange: (String) -> Unit,
+    ) {
+        var showingPicker by remember { mutableStateOf(false) }
+        val selectedDate = value.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            OutlinedButton(
+                onClick = { showingPicker = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "$label: " + (selectedDate?.format(SHORT_DATE_FORMATTER)
+                        ?: "Selecionar data")
+                )
+            }
+            if (allowClear && value.isNotBlank()) {
+                TextButton(onClick = { onValueChange("") }) { Text("Limpar $label") }
+            }
+        }
+        if (showingPicker) {
+            val initialMillis = selectedDate
+                ?.atStartOfDay(ZoneOffset.UTC)
+                ?.toInstant()
+                ?.toEpochMilli()
+            val pickerState = rememberDatePickerState(
+                initialSelectedDateMillis = initialMillis,
+            )
+            DatePickerDialog(
+                onDismissRequest = { showingPicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pickerState.selectedDateMillis?.let { millis ->
+                            onValueChange(
+                                Instant.ofEpochMilli(millis)
+                                    .atZone(ZoneOffset.UTC)
+                                    .toLocalDate()
+                                    .toString()
+                            )
+                        }
+                        showingPicker = false
+                    }) { Text("Confirmar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showingPicker = false }) { Text("Cancelar") }
+                },
+            ) {
+                DatePicker(state = pickerState)
+            }
         }
     }
 
@@ -1929,6 +2124,20 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                if (
+                    transaction.dueDate != null || transaction.plannedPaymentDate != null ||
+                    transaction.paidAt != null
+                ) {
+                    Text(
+                        listOfNotNull(
+                            transaction.dueDate?.let { "Vence $it" },
+                            transaction.plannedPaymentDate?.let { "Previsto $it" },
+                            transaction.paidAt?.let { "Pago $it" },
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -1937,7 +2146,10 @@ class MainActivity : ComponentActivity() {
     private fun EditTransactionDialog(
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
-        onSave: (String, TransactionCategory, TransactionStatus, Boolean) -> Unit,
+        onSave: (
+            String, TransactionCategory, TransactionStatus, java.math.BigDecimal,
+            LocalDate?, LocalDate?, LocalDate?, Boolean,
+        ) -> Unit,
         onDelete: (() -> Unit)? = null,
     ) {
         var description by remember(transaction.id) {
@@ -1955,6 +2167,29 @@ class MainActivity : ComponentActivity() {
         var selectedStatus by remember(transaction.id) {
             mutableStateOf(transaction.status)
         }
+        var amount by remember(transaction.id) {
+            mutableStateOf(transaction.amount.replace('.', ','))
+        }
+        var dueDate by remember(transaction.id) { mutableStateOf(transaction.dueDate.orEmpty()) }
+        var plannedPaymentDate by remember(transaction.id) {
+            mutableStateOf(transaction.plannedPaymentDate.orEmpty())
+        }
+        var paidAt by remember(transaction.id) { mutableStateOf(transaction.paidAt.orEmpty()) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dueDateValue = dueDate.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        val paidAtValue = paidAt.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        val plannedPaymentDateValue = plannedPaymentDate.takeIf(String::isNotBlank)?.let {
+            runCatching { LocalDate.parse(it) }.getOrNull()
+        }
+        val datesValid = (dueDate.isBlank() || dueDateValue != null) &&
+            (plannedPaymentDate.isBlank() || plannedPaymentDateValue != null) &&
+            (paidAt.isBlank() || paidAtValue != null)
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
         }
@@ -1978,6 +2213,40 @@ class MainActivity : ComponentActivity() {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { value ->
+                            amount = value.filter { it.isDigit() || it == ',' || it == '.' }
+                        },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    DatePickerField(
+                        dueDate, "Vencimento", allowClear = true,
+                        onValueChange = { dueDate = it },
+                    )
+                    DatePickerField(
+                        plannedPaymentDate, "Pagamento previsto", allowClear = true,
+                        onValueChange = { plannedPaymentDate = it },
+                    )
+                    DatePickerField(
+                        paidAt, "Pagamento", allowClear = true,
+                        onValueChange = {
+                            paidAt = it
+                            selectedStatus = if (it.isNotBlank()) {
+                                TransactionStatus.REALIZED
+                            } else TransactionStatus.PENDING
+                        },
+                    )
+                    transaction.originalAmount?.let {
+                        Text(
+                            "Valor original: ${formatCurrency(it)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(
                         text = "Categoria",
                         style = MaterialTheme.typography.labelLarge,
@@ -2014,6 +2283,7 @@ class MainActivity : ComponentActivity() {
                                 selectedStatus = if (checked) {
                                     TransactionStatus.REALIZED
                                 } else {
+                                    paidAt = ""
                                     TransactionStatus.PENDING
                                 }
                             },
@@ -2058,9 +2328,13 @@ class MainActivity : ComponentActivity() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onSave(description, selectedCategory, selectedStatus, applyToFuture)
+                        onSave(
+                            description, selectedCategory, selectedStatus,
+                            checkNotNull(amountValue), dueDateValue, plannedPaymentDateValue,
+                            paidAtValue, applyToFuture,
+                        )
                     },
-                    enabled = description.isNotBlank(),
+                    enabled = description.isNotBlank() && amountValue?.signum() == 1 && datesValid,
                 ) {
                     Text("Salvar")
                 }
@@ -2078,6 +2352,284 @@ class MainActivity : ComponentActivity() {
                 }
             },
         )
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun TransactionSearchScreen(
+        store: DiagnosticStore,
+        onBack: () -> Unit,
+    ) {
+        var refresh by remember { mutableIntStateOf(0) }
+        var query by remember { mutableStateOf("") }
+        var fromDate by remember { mutableStateOf("") }
+        var toDate by remember { mutableStateOf("") }
+        var statusFilter by remember { mutableStateOf<TransactionStatus?>(null) }
+        var editing by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
+        val results = remember(refresh, query, fromDate, toDate, statusFilter) {
+            val from = fromDate.takeIf(String::isNotBlank)?.let {
+                runCatching { LocalDate.parse(it) }.getOrNull()
+            }
+            val to = toDate.takeIf(String::isNotBlank)?.let {
+                runCatching { LocalDate.parse(it) }.getOrNull()
+            }
+            store.recentTransactions(10_000).filter { transaction ->
+                val date = transactionEffectiveDate(transaction)
+                transaction.description.contains(query.trim(), ignoreCase = true) &&
+                    (statusFilter == null || transaction.status == statusFilter) &&
+                    (from == null || (date != null && !date.isBefore(from))) &&
+                    (to == null || (date != null && !date.isAfter(to)))
+            }.sortedByDescending { transactionEffectiveDate(it) }
+        }
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Pesquisar movimentações") },
+                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = { Text("Nome ou descrição") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.weight(1f)) {
+                            DatePickerField(
+                                fromDate, "De", allowClear = true,
+                                onValueChange = { fromDate = it },
+                            )
+                        }
+                        Box(Modifier.weight(1f)) {
+                            DatePickerField(
+                                toDate, "Até", allowClear = true,
+                                onValueChange = { toDate = it },
+                            )
+                        }
+                    }
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = statusFilter == null,
+                            onClick = { statusFilter = null },
+                            label = { Text("Todas") },
+                        )
+                        FilterChip(
+                            selected = statusFilter == TransactionStatus.REALIZED,
+                            onClick = { statusFilter = TransactionStatus.REALIZED },
+                            label = { Text("Pagas") },
+                        )
+                        FilterChip(
+                            selected = statusFilter == TransactionStatus.PENDING,
+                            onClick = { statusFilter = TransactionStatus.PENDING },
+                            label = { Text("Não pagas") },
+                        )
+                    }
+                }
+                item { Text("${results.size} resultados", style = MaterialTheme.typography.labelLarge) }
+                items(results, key = { "search-${it.id}" }) { transaction ->
+                    TransactionCard(transaction) { editing = transaction }
+                }
+            }
+        }
+        editing?.let { transaction ->
+            EditTransactionDialog(
+                transaction = transaction,
+                onDismiss = { editing = null },
+                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, apply ->
+                    if (store.updateTransactionDetails(
+                            transaction.id, description, category, status,
+                            amount, dueDate, plannedDate, paidAt, apply,
+                        )) {
+                        editing = null
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AnnualSummaryScreen(
+        store: DiagnosticStore,
+        onBack: () -> Unit,
+    ) {
+        var selectedYear by remember { mutableIntStateOf(LocalDate.now().year) }
+        val transactions = remember(selectedYear) { consolidatedTransactions(store) }
+        val rows = remember(selectedYear, transactions) {
+            (1..12).map { month ->
+                val period = YearMonth.of(selectedYear, month)
+                Triple(
+                    period,
+                    MonthlyStatementCalculator.calculate(period, transactions),
+                    store.generalProjectedBalance(period.atEndOfMonth()),
+                )
+            }
+        }
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Resumo anual") },
+                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    Card {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(onClick = { selectedYear-- }) { Text("‹") }
+                            Text(
+                                selectedYear.toString(), Modifier.weight(1f),
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            TextButton(onClick = { selectedYear++ }) { Text("›") }
+                        }
+                    }
+                }
+                item {
+                    Card {
+                        Column(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(10.dp),
+                        ) {
+                            Row {
+                                AnnualSummaryCell("Mês", header = true, firstColumn = true)
+                                AnnualSummaryCell("Entradas", header = true)
+                                AnnualSummaryCell("Saídas", header = true)
+                                AnnualSummaryCell("Resultado", header = true)
+                                AnnualSummaryCell("Saldo projetado", header = true)
+                            }
+                            HorizontalDivider()
+                            rows.forEachIndexed { index, (period, statement, projectedBalance) ->
+                                val income = statement.projectedIncome
+                                val expense = statement.projectedExpense
+                                val result = statement.projectedBalance
+                                Row {
+                                    AnnualSummaryCell(
+                                        formatMonth(period).substringBefore(" de "),
+                                        firstColumn = true,
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(income.toPlainString()),
+                                        valueColor = financialValueColor(income.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        if (expense.signum() > 0) {
+                                            "- ${formatCurrency(expense.toPlainString())}"
+                                        } else formatCurrency(expense.toPlainString()),
+                                        valueColor = financialValueColor(-expense.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(result.toPlainString()),
+                                        valueColor = financialValueColor(result.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(projectedBalance.toPlainString()),
+                                        valueColor = financialValueColor(projectedBalance.signum()),
+                                    )
+                                }
+                                if (index < rows.lastIndex) HorizontalDivider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun AnnualSummaryCell(
+        text: String,
+        header: Boolean = false,
+        firstColumn: Boolean = false,
+        valueColor: Color = Color.Unspecified,
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier
+                .width(if (firstColumn) 130.dp else 112.dp)
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            style = if (header) MaterialTheme.typography.labelLarge
+            else MaterialTheme.typography.bodySmall,
+            textAlign = if (firstColumn) TextAlign.Start else TextAlign.End,
+            color = valueColor,
+        )
+    }
+
+    @Composable
+    private fun financialValueColor(sign: Int): Color = when {
+        sign > 0 -> Color(0xFF087F67)
+        sign < 0 -> MaterialTheme.colorScheme.error
+        else -> Color.Unspecified
+    }
+
+    private fun transactionEffectiveDate(transaction: FinancialTransactionRecord): LocalDate? {
+        val stored = if (transaction.status == TransactionStatus.REALIZED) {
+            transaction.paidAt
+        } else transaction.plannedPaymentDate ?: transaction.dueDate
+        return stored?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            ?: runCatching { LocalDateTime.parse(transaction.occurredAt).toLocalDate() }.getOrNull()
+    }
+
+    private fun consolidatedTransactions(store: DiagnosticStore): List<FinancialTransactionRecord> {
+        val transactions = store.recentTransactions(10_000)
+        val cards = store.financialAccounts().filter {
+            it.type == FinancialAccountType.CREDIT_CARD
+        }
+        val cardIds = cards.map { it.id }.toSet()
+        val invoices = cards.flatMap { account ->
+            store.creditCardInvoices(account.id).mapNotNull { invoice ->
+                val due = invoice.dueDate ?: return@mapNotNull null
+                if (invoice.total.signum() == 0) return@mapNotNull null
+                val paidAt = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                    store.invoicePayments(invoice).maxOfOrNull { it.paidAt }
+                } else null
+                FinancialTransactionRecord(
+                    id = -invoice.id,
+                    sourceEventId = null,
+                    direction = if (invoice.total.signum() < 0) {
+                        FinancialTransactionDirection.INCOME
+                    } else FinancialTransactionDirection.EXPENSE,
+                    type = if (invoice.total.signum() < 0) {
+                        FinancialTransactionType.IMPORTED_INCOME
+                    } else FinancialTransactionType.IMPORTED_EXPENSE,
+                    amount = invoice.total.abs().toPlainString(),
+                    occurredAt = due.atStartOfDay().toString(),
+                    description = "Fatura ${account.name}",
+                    sourcePackage = "credit-card-invoice",
+                    status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                        TransactionStatus.REALIZED
+                    } else TransactionStatus.PENDING,
+                    dueDate = due.toString(),
+                    paidAt = paidAt?.toString(),
+                )
+            }
+        }
+        return transactions.filterNot { transaction ->
+            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                (transaction.accountId != null && transaction.accountId in cardIds)
+        } + invoices
     }
 
     @OptIn(ExperimentalMaterial3Api::class)

@@ -34,6 +34,8 @@ data class CreditCardInvoiceRecord(
     val paidAmount: BigDecimal,
     val outstandingAmount: BigDecimal,
     val transactionCount: Int,
+    val baseTotal: BigDecimal = total,
+    val adjustmentAmount: BigDecimal = BigDecimal.ZERO,
 )
 
 data class InvoicePaymentRecord(
@@ -43,6 +45,14 @@ data class InvoicePaymentRecord(
     val sourceAccountId: Long?,
     val sourceAccountName: String?,
 )
+
+object InvoiceAdjustmentCalculator {
+    fun difference(baseTotal: BigDecimal, officialTotal: BigDecimal): BigDecimal {
+        require(baseTotal.signum() >= 0)
+        require(officialTotal.signum() >= 0)
+        return officialTotal - baseTotal
+    }
+}
 
 object CreditCardBillingCycle {
     fun calculate(
