@@ -2514,29 +2514,42 @@ class MainActivity : ComponentActivity() {
                                 .padding(10.dp),
                         ) {
                             Row {
-                                AnnualSummaryCell("Descrição", true, true)
-                                rows.forEach { (period, _, _) ->
-                                    AnnualSummaryCell(
-                                        formatMonth(period).substringBefore(" de ").take(3),
-                                        header = true,
-                                    )
-                                }
+                                AnnualSummaryCell("Mês", header = true, firstColumn = true)
+                                AnnualSummaryCell("Entradas", header = true)
+                                AnnualSummaryCell("Saídas", header = true)
+                                AnnualSummaryCell("Resultado", header = true)
+                                AnnualSummaryCell("Saldo projetado", header = true)
                             }
                             HorizontalDivider()
-                            val tableRows = listOf(
-                                "Entradas" to rows.map { it.second.projectedIncome },
-                                "Saídas" to rows.map { it.second.projectedExpense },
-                                "Resultado" to rows.map { it.second.projectedBalance },
-                                "Saldo projetado" to rows.map { it.third },
-                            )
-                            tableRows.forEachIndexed { index, (label, values) ->
+                            rows.forEachIndexed { index, (period, statement, projectedBalance) ->
+                                val income = statement.projectedIncome
+                                val expense = statement.projectedExpense
+                                val result = statement.projectedBalance
                                 Row {
-                                    AnnualSummaryCell(label, firstColumn = true)
-                                    values.forEach { value ->
-                                        AnnualSummaryCell(formatCurrency(value.toPlainString()))
-                                    }
+                                    AnnualSummaryCell(
+                                        formatMonth(period).substringBefore(" de "),
+                                        firstColumn = true,
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(income.toPlainString()),
+                                        valueColor = financialValueColor(income.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        if (expense.signum() > 0) {
+                                            "- ${formatCurrency(expense.toPlainString())}"
+                                        } else formatCurrency(expense.toPlainString()),
+                                        valueColor = financialValueColor(-expense.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(result.toPlainString()),
+                                        valueColor = financialValueColor(result.signum()),
+                                    )
+                                    AnnualSummaryCell(
+                                        formatCurrency(projectedBalance.toPlainString()),
+                                        valueColor = financialValueColor(projectedBalance.signum()),
+                                    )
                                 }
-                                if (index < tableRows.lastIndex) HorizontalDivider()
+                                if (index < rows.lastIndex) HorizontalDivider()
                             }
                         }
                     }
@@ -2550,6 +2563,7 @@ class MainActivity : ComponentActivity() {
         text: String,
         header: Boolean = false,
         firstColumn: Boolean = false,
+        valueColor: Color = Color.Unspecified,
     ) {
         Text(
             text = text,
@@ -2559,7 +2573,15 @@ class MainActivity : ComponentActivity() {
             style = if (header) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.bodySmall,
             textAlign = if (firstColumn) TextAlign.Start else TextAlign.End,
+            color = valueColor,
         )
+    }
+
+    @Composable
+    private fun financialValueColor(sign: Int): Color = when {
+        sign > 0 -> Color(0xFF087F67)
+        sign < 0 -> MaterialTheme.colorScheme.error
+        else -> Color.Unspecified
     }
 
     private fun transactionEffectiveDate(transaction: FinancialTransactionRecord): LocalDate? {
