@@ -148,6 +148,13 @@ class DiagnosticStore(context: Context) :
         if (oldVersion in 7..15) {
             db.execSQL("ALTER TABLE transactions ADD COLUMN planned_payment_date TEXT")
         }
+        if (oldVersion in 7..16) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN series_id TEXT")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN series_index INTEGER")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN series_total INTEGER")
+            initializeImportedInstallmentSeries(db)
+        }
+        createIndexes(db)
         createCategoryRulesTable(db)
 
         reclassifyExistingEvents(db)
@@ -277,7 +284,7 @@ class DiagnosticStore(context: Context) :
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
-                      planned_payment_date,paid_at
+                      planned_payment_date,paid_at,series_id,series_index,series_total
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -311,6 +318,9 @@ class DiagnosticStore(context: Context) :
                                 dueDate = cursor.getString(19),
                                 plannedPaymentDate = cursor.getString(20),
                                 paidAt = cursor.getString(21),
+                                seriesId = cursor.getString(22),
+                                seriesIndex = if (cursor.isNull(23)) null else cursor.getInt(23),
+                                seriesTotal = if (cursor.isNull(24)) null else cursor.getInt(24),
                             )
                         )
                     }
@@ -328,13 +338,14 @@ class DiagnosticStore(context: Context) :
         plannedPaymentDate: LocalDate?,
         paidAt: LocalDate?,
         applyToFuture: Boolean = false,
+        seriesScope: TransactionSeriesScope = TransactionSeriesScope.ONLY_THIS,
     ): Boolean {
         val normalizedDescription = description.trim()
         if (normalizedDescription.isBlank()) return false
 
         val db = writableDatabase
         val metadata = db.rawQuery(
-            "SELECT direction,type,rule_key FROM transactions WHERE id = ?",
+            "SELECT direction,type,rule_key,series_id,series_index FROM transactions WHERE id = ?",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
             if (!cursor.moveToFirst()) return@use null
@@ -342,7 +353,13 @@ class DiagnosticStore(context: Context) :
                 ?: return@use null
             val type = FinancialTransactionType.fromStored(cursor.getString(1))
                 ?: return@use null
-            StoredTransactionMetadata(direction, type, cursor.getString(2))
+            StoredTransactionMetadata(
+                direction = direction,
+                type = type,
+                ruleKey = cursor.getString(2),
+                seriesId = cursor.getString(3),
+                seriesIndex = if (cursor.isNull(4)) null else cursor.getInt(4),
+            )
         } ?: return false
 
         if (!category.supports(metadata.direction) || amount.signum() <= 0) return false
@@ -378,6 +395,36 @@ class DiagnosticStore(context: Context) :
                 "id = ?",
                 arrayOf(transactionId.toString()),
             ) == 1
+
+            if (
+                updated && metadata.seriesId != null &&
+                seriesScope != TransactionSeriesScope.ONLY_THIS
+            ) {
+                val selection: String
+                val selectionArgs: Array<String>
+                if (seriesScope == TransactionSeriesScope.ALL) {
+                    selection = "series_id = ? AND id != ?"
+                    selectionArgs = arrayOf(metadata.seriesId, transactionId.toString())
+                } else {
+                    selection = "series_id = ? AND series_index >= ? AND id != ?"
+                    selectionArgs = arrayOf(
+                        metadata.seriesId,
+                        checkNotNull(metadata.seriesIndex).toString(),
+                        transactionId.toString(),
+                    )
+                }
+                db.update(
+                    "transactions",
+                    ContentValues().apply {
+                        put("description", normalizedDescription)
+                        put("category", category.name)
+                        put("category_source", TransactionCategorySource.MANUAL.name)
+                        put("amount", amount.toPlainString())
+                    },
+                    selection,
+                    selectionArgs,
+                )
+            }
 
             if (updated && shouldSaveRule) {
                 val ruleKey = checkNotNull(metadata.ruleKey)
@@ -900,48 +947,100 @@ class DiagnosticStore(context: Context) :
         occurredAt: LocalDate,
         description: String,
         status: TransactionStatus,
+        occurrences: Int = 1,
     ): Boolean {
-        if (amount.signum() <= 0 || description.isBlank()) return false
+        if (amount.signum() <= 0 || description.isBlank() || occurrences !in 1..120) return false
         val db = writableDatabase
         if (!isBankAccount(db, accountId)) return false
         val account = db.rawQuery(
             "SELECT name FROM financial_accounts WHERE id = ?",
             arrayOf(accountId.toString()),
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else return false }
-        return db.insert(
-            "transactions",
-            null,
-            ContentValues().apply {
-                putNull("source_event_id")
-                put("direction", direction.name)
-                put(
-                    "type",
-                    if (direction == FinancialTransactionDirection.INCOME) {
-                        FinancialTransactionType.MANUAL_INCOME.name
-                    } else FinancialTransactionType.MANUAL_EXPENSE.name,
+        val seriesId = if (occurrences > 1) UUID.randomUUID().toString() else null
+        db.beginTransaction()
+        return try {
+            MonthlyRecurrencePlanner.plan(occurredAt, occurrences, status).forEach { occurrence ->
+                val occurrenceDate = occurrence.date
+                val occurrenceStatus = occurrence.status
+                val inserted = db.insert(
+                    "transactions",
+                    null,
+                    ContentValues().apply {
+                        putNull("source_event_id")
+                        put("direction", direction.name)
+                        put(
+                            "type",
+                            if (direction == FinancialTransactionDirection.INCOME) {
+                                FinancialTransactionType.MANUAL_INCOME.name
+                            } else FinancialTransactionType.MANUAL_EXPENSE.name,
+                        )
+                        put("amount", amount.toPlainString())
+                        put("occurred_at", occurrenceDate.atStartOfDay().toString())
+                        put("description", description.trim())
+                        put("source_package", "MANUAL")
+                        put("category", TransactionCategory.UNCATEGORIZED.name)
+                        put("category_source", TransactionCategorySource.DEFAULT.name)
+                        putNull("rule_key")
+                        put("origin", TransactionOrigin.MANUAL.name)
+                        put("status", occurrenceStatus.name)
+                        put("account", account)
+                        put("account_id", accountId)
+                        putNull("invoice_id")
+                        put("due_date", occurrenceDate.toString())
+                        if (occurrenceStatus == TransactionStatus.REALIZED) {
+                            put("paid_at", occurrenceDate.toString())
+                        }
+                        if (seriesId != null) {
+                            put("series_id", seriesId)
+                            put("series_index", occurrence.index)
+                            put("series_total", occurrences)
+                        }
+                        put("import_key", "MANUAL:${UUID.randomUUID()}")
+                    },
                 )
-                put("amount", amount.toPlainString())
-                put("occurred_at", occurredAt.atStartOfDay().toString())
-                put("description", description.trim())
-                put("source_package", "MANUAL")
-                put("category", TransactionCategory.UNCATEGORIZED.name)
-                put("category_source", TransactionCategorySource.DEFAULT.name)
-                putNull("rule_key")
-                put("origin", TransactionOrigin.MANUAL.name)
-                put("status", status.name)
-                put("account", account)
-                put("account_id", accountId)
-                putNull("invoice_id")
-                put("import_key", "MANUAL:${UUID.randomUUID()}")
-            },
-        ) != -1L
+                if (inserted == -1L) error("Could not insert manual transaction series")
+            }
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
     }
 
-    fun deleteManualTransaction(transactionId: Long): Boolean = writableDatabase.delete(
-        "transactions",
-        "id = ? AND origin = ?",
-        arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name),
-    ) == 1
+    fun deleteManualTransaction(
+        transactionId: Long,
+        seriesScope: TransactionSeriesScope = TransactionSeriesScope.ONLY_THIS,
+    ): Boolean {
+        val db = writableDatabase
+        val series = db.rawQuery(
+            "SELECT series_id,series_index FROM transactions WHERE id = ? AND origin = ?",
+            arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            cursor.getString(0) to if (cursor.isNull(1)) null else cursor.getInt(1)
+        }
+        val seriesId = series.first
+        return when {
+            seriesId == null || seriesScope == TransactionSeriesScope.ONLY_THIS -> db.delete(
+                "transactions", "id = ? AND origin = ?",
+                arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name),
+            ) == 1
+            seriesScope == TransactionSeriesScope.ALL -> db.delete(
+                "transactions", "series_id = ? AND origin = ?",
+                arrayOf(seriesId, TransactionOrigin.MANUAL.name),
+            ) > 0
+            else -> db.delete(
+                "transactions", "series_id = ? AND series_index >= ? AND origin = ?",
+                arrayOf(
+                    seriesId,
+                    checkNotNull(series.second).toString(),
+                    TransactionOrigin.MANUAL.name,
+                ),
+            ) > 0
+        }
+    }
 
     fun deleteTransfer(movementId: Long): Boolean {
         val db = writableDatabase
@@ -1320,6 +1419,9 @@ class DiagnosticStore(context: Context) :
                 due_date TEXT,
                 planned_payment_date TEXT,
                 paid_at TEXT,
+                series_id TEXT,
+                series_index INTEGER,
+                series_total INTEGER,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -1733,6 +1835,62 @@ class DiagnosticStore(context: Context) :
             """CREATE INDEX IF NOT EXISTS idx_transactions_occurred_at
                ON transactions(occurred_at DESC)"""
         )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_series
+               ON transactions(series_id,series_index) WHERE series_id IS NOT NULL"""
+        )
+    }
+
+    private fun initializeImportedInstallmentSeries(db: SQLiteDatabase) {
+        data class Candidate(
+            val id: Long,
+            val key: String,
+            val index: Int,
+            val total: Int,
+        )
+
+        val candidates = db.rawQuery(
+            """SELECT id,description,direction,amount,account_id,account
+               FROM transactions
+               WHERE origin = ? AND series_id IS NULL""",
+            arrayOf(TransactionOrigin.MOBILLS.name),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val installment = ImportedInstallmentParser.parse(cursor.getString(1))
+                        ?: continue
+                    val accountKey = if (cursor.isNull(4)) cursor.getString(5).orEmpty()
+                    else cursor.getLong(4).toString()
+                    val key = listOf(
+                        accountKey,
+                        cursor.getString(2),
+                        cursor.getString(3),
+                        installment.baseDescription.lowercase(Locale.ROOT),
+                        installment.total.toString(),
+                    ).joinToString("|")
+                    add(Candidate(cursor.getLong(0), key, installment.index, installment.total))
+                }
+            }
+        }
+
+        candidates.groupBy { it.key }.values.forEach { group ->
+            if (group.size < 2 || group.map { it.index }.distinct().size != group.size) {
+                return@forEach
+            }
+            val seriesId = UUID.randomUUID().toString()
+            group.forEach { candidate ->
+                db.update(
+                    "transactions",
+                    ContentValues().apply {
+                        put("series_id", seriesId)
+                        put("series_index", candidate.index)
+                        put("series_total", candidate.total)
+                    },
+                    "id = ?",
+                    arrayOf(candidate.id.toString()),
+                )
+            }
+        }
     }
 
     private data class StoredEvent(
@@ -1747,6 +1905,8 @@ class DiagnosticStore(context: Context) :
         val direction: FinancialTransactionDirection,
         val type: FinancialTransactionType,
         val ruleKey: String?,
+        val seriesId: String?,
+        val seriesIndex: Int?,
     )
 
     private data class KnownAccountPreset(
@@ -1759,7 +1919,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 16
+        const val DATABASE_VERSION = 17
     }
 }
 

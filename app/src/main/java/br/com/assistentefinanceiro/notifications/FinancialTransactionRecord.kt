@@ -23,7 +23,16 @@ data class FinancialTransactionRecord(
     val dueDate: String? = null,
     val plannedPaymentDate: String? = null,
     val paidAt: String? = null,
+    val seriesId: String? = null,
+    val seriesIndex: Int? = null,
+    val seriesTotal: Int? = null,
 )
+
+enum class TransactionSeriesScope {
+    ONLY_THIS,
+    THIS_AND_FUTURE,
+    ALL,
+}
 
 enum class TransactionOrigin {
     NOTIFICATION,
