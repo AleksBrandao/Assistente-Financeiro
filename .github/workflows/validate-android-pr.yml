@@ -1,0 +1,79 @@
+name: Validar APK do PR
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-android-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código do PR
+        uses: actions/checkout@v4
+
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Validar segredos de assinatura
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+      - name: Restaurar chave de assinatura
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/assistente-financeiro.jks"
+
+      - name: Executar testes e gerar APK assinado
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/assistente-financeiro.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew test assembleRelease
+
+      - name: Preparar APK de teste
+        id: apk
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          test -n "$VERSION"
+          PR_NUMBER="${{ github.event.pull_request.number || 'manual' }}"
+          FILE_NAME="AssistenteFinanceiro-$VERSION-PR-$PR_NUMBER.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$FILE_NAME"
+          sha256sum "$FILE_NAME" > "$FILE_NAME.sha256"
+          echo "file=$FILE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Disponibilizar APK para teste
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-teste-${{ github.event.pull_request.number || 'manual' }}
+          path: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+          if-no-files-found: error
+          retention-days: 14

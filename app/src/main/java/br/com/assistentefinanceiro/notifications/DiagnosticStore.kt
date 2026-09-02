@@ -11,6 +11,10 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.util.Locale
 import java.util.UUID
+import android.database.Cursor
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class DiagnosticEvent(
     val id: Long,
@@ -59,6 +63,7 @@ class DiagnosticStore(context: Context) :
         createInvoicePaymentsTable(db)
         createInvoiceAdjustmentsTable(db)
         createAccountMovementsTable(db)
+        createDeletedTransactionsTables(db)
         createIndexes(db)
     }
 
@@ -154,6 +159,7 @@ class DiagnosticStore(context: Context) :
             db.execSQL("ALTER TABLE transactions ADD COLUMN series_total INTEGER")
             initializeImportedInstallmentSeries(db)
         }
+        if (oldVersion < 18) createDeletedTransactionsTables(db)
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -1022,25 +1028,209 @@ class DiagnosticStore(context: Context) :
             cursor.getString(0) to if (cursor.isNull(1)) null else cursor.getInt(1)
         }
         val seriesId = series.first
-        return when {
-            seriesId == null || seriesScope == TransactionSeriesScope.ONLY_THIS -> db.delete(
-                "transactions", "id = ? AND origin = ?",
-                arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name),
-            ) == 1
-            seriesScope == TransactionSeriesScope.ALL -> db.delete(
-                "transactions", "series_id = ? AND origin = ?",
-                arrayOf(seriesId, TransactionOrigin.MANUAL.name),
-            ) > 0
-            else -> db.delete(
-                "transactions", "series_id = ? AND series_index >= ? AND origin = ?",
-                arrayOf(
+        val selection: String
+        val selectionArgs: Array<String>
+        when {
+            seriesId == null || seriesScope == TransactionSeriesScope.ONLY_THIS -> {
+                selection = "id = ? AND origin = ?"
+                selectionArgs = arrayOf(transactionId.toString(), TransactionOrigin.MANUAL.name)
+            }
+            seriesScope == TransactionSeriesScope.ALL -> {
+                selection = "series_id = ? AND origin = ?"
+                selectionArgs = arrayOf(seriesId, TransactionOrigin.MANUAL.name)
+            }
+            else -> {
+                selection = "series_id = ? AND series_index >= ? AND origin = ?"
+                selectionArgs = arrayOf(
                     seriesId,
                     checkNotNull(series.second).toString(),
                     TransactionOrigin.MANUAL.name,
-                ),
-            ) > 0
+                )
+            }
+        }
+        val rows = db.query(
+            "transactions", null, selection, selectionArgs, null, null, "id",
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursorRowToJson(cursor).toString())
+            }
+        }
+        if (rows.isEmpty()) return false
+        val description = JSONObject(rows.first()).optString("description", "Movimentação")
+        val groupId = UUID.randomUUID().toString()
+        db.beginTransaction()
+        return try {
+            db.insertOrThrow(
+                "deleted_transaction_groups", null,
+                ContentValues().apply {
+                    put("group_id", groupId)
+                    put("description", description)
+                    put("item_count", rows.size)
+                    put("deleted_at", System.currentTimeMillis())
+                },
+            )
+            rows.forEach { row ->
+                db.insertOrThrow(
+                    "deleted_transactions", null,
+                    ContentValues().apply {
+                        put("group_id", groupId)
+                        put("row_json", row)
+                    },
+                )
+            }
+            val deleted = db.delete("transactions", selection, selectionArgs)
+            if (deleted != rows.size) error("Delete count mismatch")
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
         }
     }
+
+    fun deletedTransactionGroups(): List<DeletedTransactionGroup> = readableDatabase.rawQuery(
+        """SELECT group_id,description,item_count,deleted_at
+           FROM deleted_transaction_groups ORDER BY deleted_at DESC""",
+        null,
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                add(
+                    DeletedTransactionGroup(
+                        groupId = cursor.getString(0),
+                        description = cursor.getString(1),
+                        itemCount = cursor.getInt(2),
+                        deletedAt = java.time.Instant.ofEpochMilli(cursor.getLong(3)),
+                    )
+                )
+            }
+        }
+    }
+
+    fun restoreDeletedTransactionGroup(groupId: String): Boolean {
+        val db = writableDatabase
+        val rows = db.rawQuery(
+            "SELECT row_json FROM deleted_transactions WHERE group_id = ? ORDER BY id",
+            arrayOf(groupId),
+        ).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(JSONObject(cursor.getString(0))) }
+        }
+        if (rows.isEmpty()) return false
+        val columns = tableColumns(db, "transactions")
+        db.beginTransaction()
+        return try {
+            rows.forEach { row ->
+                db.insertOrThrow("transactions", null, jsonToContentValues(row, columns))
+            }
+            db.delete("deleted_transactions", "group_id = ?", arrayOf(groupId))
+            db.delete("deleted_transaction_groups", "group_id = ?", arrayOf(groupId))
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun permanentlyDeleteTransactionGroup(groupId: String): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            db.delete("deleted_transactions", "group_id = ?", arrayOf(groupId))
+            val deleted = db.delete(
+                "deleted_transaction_groups", "group_id = ?", arrayOf(groupId),
+            ) == 1
+            if (deleted) db.setTransactionSuccessful()
+            deleted
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun createBackupJson(): String {
+        val db = readableDatabase
+        val tables = JSONObject()
+        BACKUP_TABLES.forEach { table ->
+            val rows = JSONArray()
+            db.query(table, null, null, null, null, null, null).use { cursor ->
+                while (cursor.moveToNext()) rows.put(cursorRowToJson(cursor))
+            }
+            tables.put(table, rows)
+        }
+        return JSONObject()
+            .put("format", BACKUP_FORMAT_VERSION)
+            .put("databaseVersion", DATABASE_VERSION)
+            .put("createdAt", System.currentTimeMillis())
+            .put("tables", tables)
+            .toString()
+    }
+
+    fun previewBackup(content: String): BackupValidationResult = runCatching {
+        val root = validatedBackup(content)
+        val tables = root.getJSONObject("tables")
+        BackupValidationResult.Valid(
+            BackupPreview(
+                createdAt = java.time.Instant.ofEpochMilli(root.getLong("createdAt")),
+                databaseVersion = root.getInt("databaseVersion"),
+                tableCount = BACKUP_TABLES.size,
+                transactionCount = tables.getJSONArray("transactions").length(),
+                accountCount = tables.getJSONArray("financial_accounts").length(),
+            )
+        )
+    }.getOrElse { BackupValidationResult.Invalid(it.message ?: "Backup inválido") }
+
+    fun restoreBackup(content: String): Boolean {
+        val root = runCatching { validatedBackup(content) }.getOrNull() ?: return false
+        val tables = root.getJSONObject("tables")
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            BACKUP_TABLES.asReversed().forEach { table -> db.delete(table, null, null) }
+            BACKUP_TABLES.forEach { table ->
+                val columns = tableColumns(db, table)
+                val rows = tables.getJSONArray(table)
+                for (index in 0 until rows.length()) {
+                    db.insertOrThrow(
+                        table,
+                        null,
+                        jsonToContentValues(rows.getJSONObject(index), columns),
+                    )
+                }
+            }
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun exportTransactionsCsvLegacy(): String {
+        val header = listOf(
+            "ID", "Descrição", "Direção", "Valor", "Data", "Vencimento",
+            "Pagamento previsto", "Pagamento realizado", "Situação", "Categoria",
+            "Conta", "Origem", "Série", "Parcela",
+        )
+        val lines = recentTransactions(10_000).map { transaction ->
+            listOf(
+                transaction.id.toString(), transaction.description, transaction.direction.name,
+                transaction.amount, transaction.occurredAt, transaction.dueDate.orEmpty(),
+                transaction.plannedPaymentDate.orEmpty(), transaction.paidAt.orEmpty(),
+                transaction.status.name, transaction.category.displayName,
+                transaction.account.orEmpty(), transaction.origin.name,
+                transaction.seriesId.orEmpty(),
+                transaction.seriesIndex?.let { "$it/${transaction.seriesTotal}" }.orEmpty(),
+            ).joinToString(";") { csvCell(it) }
+        }
+        return "\uFEFF" + (listOf(header.joinToString(";") { csvCell(it) }) + lines)
+            .joinToString("\r\n")
+    }
+
+    fun exportTransactionsCsv(): String =
+        TransactionCsvExporter.export(recentTransactions(10_000))
 
     fun deleteTransfer(movementId: Long): Boolean {
         val db = writableDatabase
@@ -1513,6 +1703,28 @@ class DiagnosticStore(context: Context) :
         )
     }
 
+    private fun createDeletedTransactionsTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS deleted_transaction_groups(
+                group_id TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                item_count INTEGER NOT NULL,
+                deleted_at INTEGER NOT NULL
+            )"""
+        )
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS deleted_transactions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL,
+                row_json TEXT NOT NULL
+            )"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_deleted_transactions_group
+               ON deleted_transactions(group_id)"""
+        )
+    }
+
     private fun insertPaymentAccountMovement(
         db: SQLiteDatabase,
         paymentId: Long,
@@ -1893,6 +2105,69 @@ class DiagnosticStore(context: Context) :
         }
     }
 
+    private fun validatedBackup(content: String): JSONObject {
+        require(content.length <= MAX_BACKUP_CHARACTERS) { "Arquivo de backup muito grande" }
+        val root = JSONObject(content)
+        require(root.optInt("format", -1) == BACKUP_FORMAT_VERSION) {
+            "Formato de backup incompatível"
+        }
+        val version = root.optInt("databaseVersion", -1)
+        require(version in 1..DATABASE_VERSION) { "Versão de banco incompatível" }
+        require(root.optLong("createdAt", -1L) > 0L) { "Data do backup inválida" }
+        val tables = root.optJSONObject("tables") ?: error("Tabelas ausentes")
+        BACKUP_TABLES.forEach { table ->
+            require(tables.optJSONArray(table) != null) { "Tabela ausente: $table" }
+        }
+        return root
+    }
+
+    private fun cursorRowToJson(cursor: Cursor): JSONObject = JSONObject().apply {
+        cursor.columnNames.forEachIndexed { index, name ->
+            when (cursor.getType(index)) {
+                Cursor.FIELD_TYPE_NULL -> put(name, JSONObject.NULL)
+                Cursor.FIELD_TYPE_INTEGER -> put(name, cursor.getLong(index))
+                Cursor.FIELD_TYPE_FLOAT -> put(name, cursor.getDouble(index))
+                Cursor.FIELD_TYPE_BLOB -> put(
+                    name,
+                    JSONObject().put(
+                        "base64",
+                        Base64.encodeToString(cursor.getBlob(index), Base64.NO_WRAP),
+                    ),
+                )
+                else -> put(name, cursor.getString(index))
+            }
+        }
+    }
+
+    private fun tableColumns(db: SQLiteDatabase, table: String): Set<String> = db.rawQuery(
+        "PRAGMA table_info($table)", null,
+    ).use { cursor ->
+        buildSet { while (cursor.moveToNext()) add(cursor.getString(1)) }
+    }
+
+    private fun jsonToContentValues(row: JSONObject, allowedColumns: Set<String>): ContentValues =
+        ContentValues().apply {
+            row.keys().forEach { key ->
+                require(key in allowedColumns) { "Coluna incompatível: $key" }
+                val value = row.get(key)
+                when (value) {
+                    JSONObject.NULL -> putNull(key)
+                    is Int -> put(key, value)
+                    is Long -> put(key, value)
+                    is Double -> put(key, value)
+                    is String -> put(key, value)
+                    is JSONObject -> put(
+                        key,
+                        Base64.decode(value.getString("base64"), Base64.DEFAULT),
+                    )
+                    else -> error("Tipo de dado incompatível")
+                }
+            }
+        }
+
+    private fun csvCell(value: String): String =
+        "\"${value.replace("\"", "\"\"").replace("\r", " ").replace("\n", " ")}\""
+
     private data class StoredEvent(
         val id: Long,
         val packageName: String,
@@ -1919,7 +2194,22 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 17
+        const val DATABASE_VERSION = 18
+        const val BACKUP_FORMAT_VERSION = 1
+        const val MAX_BACKUP_CHARACTERS = 50_000_000
+        val BACKUP_TABLES = listOf(
+            "candidates",
+            "events",
+            "category_rules",
+            "financial_accounts",
+            "credit_card_invoices",
+            "invoice_payments",
+            "invoice_adjustments",
+            "account_movements",
+            "transactions",
+            "deleted_transaction_groups",
+            "deleted_transactions",
+        )
     }
 }
 
