@@ -2111,6 +2111,26 @@ class DiagnosticStore(context: Context) :
             """CREATE INDEX IF NOT EXISTS idx_transactions_series
                ON transactions(series_id,series_index) WHERE series_id IS NOT NULL"""
         )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_status_dates
+               ON transactions(status,planned_payment_date,due_date,paid_at)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_account
+               ON transactions(account_id,occurred_at DESC)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_invoice
+               ON transactions(invoice_id) WHERE invoice_id IS NOT NULL"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
+               ON credit_card_invoices(account_id,due_date DESC)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_movements_account_date
+               ON account_movements(account_id,occurred_at DESC)"""
+        )
     }
 
     private fun initializeImportedInstallmentSeries(db: SQLiteDatabase) {
@@ -2175,9 +2195,7 @@ class DiagnosticStore(context: Context) :
         require(version in 1..DATABASE_VERSION) { "Versão de banco incompatível" }
         require(root.optLong("createdAt", -1L) > 0L) { "Data do backup inválida" }
         val tables = root.optJSONObject("tables") ?: error("Tabelas ausentes")
-        BACKUP_TABLES.filterNot { table ->
-            version < 19 && table == "monthly_budgets"
-        }.forEach { table ->
+        BackupTableCompatibility.requiredTables(version, BACKUP_TABLES).forEach { table ->
             require(tables.optJSONArray(table) != null) { "Tabela ausente: $table" }
         }
         return root
@@ -2253,7 +2271,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 19
+        const val DATABASE_VERSION = 20
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(

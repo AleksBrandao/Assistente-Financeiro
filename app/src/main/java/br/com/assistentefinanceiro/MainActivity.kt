@@ -2,6 +2,7 @@ package br.com.assistentefinanceiro
 
 import android.content.ComponentName
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,6 +55,8 @@ private enum class AppScreen {
     PLANNING,
     DATA,
     BUDGET,
+    MORE,
+    ABOUT,
 }
 
 private data class AccountLedgerItem(
@@ -87,46 +90,197 @@ class MainActivity : ComponentActivity() {
                 val preferences = remember { BankPackagePreferences(applicationContext) }
                 var screen by remember { mutableStateOf(AppScreen.STATEMENT) }
 
-                when (screen) {
-                    AppScreen.STATEMENT -> MonthlyStatementScreen(
-                        store = store,
-                        onOpenAccounts = { screen = AppScreen.ACCOUNTS },
-                        onOpenSearch = { screen = AppScreen.SEARCH },
-                        onOpenSummary = { screen = AppScreen.SUMMARY },
-                        onOpenPlanning = { screen = AppScreen.PLANNING },
-                        onOpenData = { screen = AppScreen.DATA },
-                        onOpenBudget = { screen = AppScreen.BUDGET },
+                Scaffold(
+                    bottomBar = {
+                        MainNavigationBar(screen = screen, onNavigate = { screen = it })
+                    },
+                ) { rootPadding ->
+                    Box(Modifier.fillMaxSize().padding(rootPadding)) {
+                        when (screen) {
+                            AppScreen.STATEMENT -> MonthlyStatementScreen(store = store)
+                            AppScreen.DIAGNOSTIC -> DiagnosticScreen(
+                                store = store,
+                                preferences = preferences,
+                                onOpenStatement = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.ACCOUNTS -> AccountsScreen(
+                                store = store,
+                                onOpenStatement = { screen = AppScreen.STATEMENT },
+                                onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
+                            )
+                            AppScreen.SEARCH -> TransactionSearchScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.SUMMARY -> AnnualSummaryScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.PLANNING -> PlanningScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.DATA -> DataManagementScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.BUDGET -> MonthlyBudgetScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.MORE -> MoreScreen(
+                                onSearch = { screen = AppScreen.SEARCH },
+                                onSummary = { screen = AppScreen.SUMMARY },
+                                onData = { screen = AppScreen.DATA },
+                                onDiagnostic = { screen = AppScreen.DIAGNOSTIC },
+                                onAbout = { screen = AppScreen.ABOUT },
+                            )
+                            AppScreen.ABOUT -> AboutScreen(onBack = { screen = AppScreen.MORE })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun MainNavigationBar(
+        screen: AppScreen,
+        onNavigate: (AppScreen) -> Unit,
+    ) {
+        val selected = when (screen) {
+            AppScreen.STATEMENT -> AppScreen.STATEMENT
+            AppScreen.PLANNING -> AppScreen.PLANNING
+            AppScreen.BUDGET -> AppScreen.BUDGET
+            AppScreen.ACCOUNTS -> AppScreen.ACCOUNTS
+            else -> AppScreen.MORE
+        }
+        NavigationBar {
+            listOf(
+                Triple(AppScreen.STATEMENT, "▤", "Extrato"),
+                Triple(AppScreen.PLANNING, "◷", "Planejar"),
+                Triple(AppScreen.BUDGET, "R$", "Orçamento"),
+                Triple(AppScreen.ACCOUNTS, "▣", "Contas"),
+                Triple(AppScreen.MORE, "•••", "Mais"),
+            ).forEach { (destination, icon, label) ->
+                NavigationBarItem(
+                    selected = selected == destination,
+                    onClick = { onNavigate(destination) },
+                    icon = { Text(icon) },
+                    label = { Text(label) },
+                )
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun MoreScreen(
+        onSearch: () -> Unit,
+        onSummary: () -> Unit,
+        onData: () -> Unit,
+        onDiagnostic: () -> Unit,
+        onAbout: () -> Unit,
+    ) {
+        Scaffold(topBar = { TopAppBar(title = { Text("Mais") }) }) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    Text("Consultas e relatórios", style = MaterialTheme.typography.titleMedium)
+                }
+                item { MoreOptionCard("Pesquisar movimentações", "Nome, período e situação", onSearch) }
+                item { MoreOptionCard("Resumo anual", "Entradas, saídas e saldo mês a mês", onSummary) }
+                item {
+                    Text("Segurança e suporte", style = MaterialTheme.typography.titleMedium)
+                }
+                item { MoreOptionCard("Dados e segurança", "Backup, restauração, CSV e lixeira", onData) }
+                item { MoreOptionCard("Diagnóstico", "Notificações e aplicativos financeiros", onDiagnostic) }
+                item { MoreOptionCard("Sobre", "Versão e informações do aplicativo", onAbout) }
+            }
+        }
+    }
+
+    @Composable
+    private fun MoreOptionCard(title: String, description: String, onClick: () -> Unit) {
+        Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("›", style = MaterialTheme.typography.headlineSmall)
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AboutScreen(onBack: () -> Unit) {
+        val context = LocalContext.current
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Sobre") },
+                    actions = { TextButton(onClick = onBack) { Text("Mais") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Assistente Financeiro", style = MaterialTheme.typography.headlineSmall)
+                            Text("Versão ${BuildConfig.VERSION_NAME}")
+                            Text(
+                                "Código ${BuildConfig.VERSION_CODE}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        "Seus dados financeiros permanecem armazenados localmente no aparelho. " +
+                            "Use Dados e segurança para criar cópias de recuperação.",
                     )
-                    AppScreen.DIAGNOSTIC -> DiagnosticScreen(
-                        store = store,
-                        preferences = preferences,
-                        onOpenStatement = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.ACCOUNTS -> AccountsScreen(
-                        store = store,
-                        onOpenStatement = { screen = AppScreen.STATEMENT },
-                        onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
-                    )
-                    AppScreen.SEARCH -> TransactionSearchScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.SUMMARY -> AnnualSummaryScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.PLANNING -> PlanningScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.DATA -> DataManagementScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.BUDGET -> MonthlyBudgetScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/AleksBrandao/Assistente-Financeiro/releases/latest"),
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Ver última versão no GitHub") }
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/AleksBrandao/Assistente-Financeiro"),
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Abrir projeto no GitHub") }
                 }
             }
         }
@@ -136,12 +290,6 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MonthlyStatementScreen(
         store: DiagnosticStore,
-        onOpenAccounts: () -> Unit,
-        onOpenSearch: () -> Unit,
-        onOpenSummary: () -> Unit,
-        onOpenPlanning: () -> Unit,
-        onOpenData: () -> Unit,
-        onOpenBudget: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -334,10 +482,6 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text(if (readingImport) "Lendo…" else "Importar")
                         }
-                        TextButton(onClick = onOpenData) { Text("Dados") }
-                        TextButton(onClick = onOpenAccounts) {
-                            Text("Contas")
-                        }
                     },
                 )
             },
@@ -352,32 +496,6 @@ class MainActivity : ComponentActivity() {
                         onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
                         onNext = { selectedMonth = selectedMonth.plusMonths(1) },
                     )
-                }
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(onClick = onOpenSearch, modifier = Modifier.weight(1f)) {
-                            Text("Pesquisar")
-                        }
-                        OutlinedButton(onClick = onOpenSummary, modifier = Modifier.weight(1f)) {
-                            Text("Resumo anual")
-                        }
-                    }
-                }
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(onClick = onOpenPlanning, modifier = Modifier.weight(1f)) {
-                            Text("Planejamento")
-                        }
-                        OutlinedButton(onClick = onOpenBudget, modifier = Modifier.weight(1f)) {
-                            Text("Orçamentos")
-                        }
-                    }
                 }
                 item {
                     Row(
