@@ -63,8 +63,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.name }}
         run: |
-          gh release create "v$VERSION" \
-            "AssistenteFinanceiro-$VERSION.apk" \
-            --title "Assistente Financeiro $VERSION" \
-            --generate-notes \
-            --target "$GITHUB_SHA"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" \
+              "AssistenteFinanceiro-$VERSION.apk" \
+              --clobber
+          else
+            gh release create "v$VERSION" \
+              "AssistenteFinanceiro-$VERSION.apk" \
+              --title "Assistente Financeiro $VERSION" \
+              --generate-notes \
+              --target "$GITHUB_SHA"
+          fi
