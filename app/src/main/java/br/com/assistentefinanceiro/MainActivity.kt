@@ -26,15 +26,18 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.importing.SimpleXlsxReader
 import java.text.NumberFormat
+import java.io.File
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -49,6 +52,7 @@ private enum class AppScreen {
     SEARCH,
     SUMMARY,
     PLANNING,
+    DATA,
 }
 
 private data class AccountLedgerItem(
@@ -89,6 +93,7 @@ class MainActivity : ComponentActivity() {
                         onOpenSearch = { screen = AppScreen.SEARCH },
                         onOpenSummary = { screen = AppScreen.SUMMARY },
                         onOpenPlanning = { screen = AppScreen.PLANNING },
+                        onOpenData = { screen = AppScreen.DATA },
                     )
                     AppScreen.DIAGNOSTIC -> DiagnosticScreen(
                         store = store,
@@ -112,6 +117,10 @@ class MainActivity : ComponentActivity() {
                         store = store,
                         onBack = { screen = AppScreen.STATEMENT },
                     )
+                    AppScreen.DATA -> DataManagementScreen(
+                        store = store,
+                        onBack = { screen = AppScreen.STATEMENT },
+                    )
                 }
             }
         }
@@ -125,6 +134,7 @@ class MainActivity : ComponentActivity() {
         onOpenSearch: () -> Unit,
         onOpenSummary: () -> Unit,
         onOpenPlanning: () -> Unit,
+        onOpenData: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -317,6 +327,7 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text(if (readingImport) "Lendo…" else "Importar")
                         }
+                        TextButton(onClick = onOpenData) { Text("Dados") }
                         TextButton(onClick = onOpenAccounts) {
                             Text("Contas")
                         }
@@ -2697,6 +2708,232 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun DataManagementScreen(
+        store: DiagnosticStore,
+        onBack: () -> Unit,
+    ) {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var refresh by remember { mutableIntStateOf(0) }
+        var message by remember { mutableStateOf<String?>(null) }
+        var pendingBackup by remember { mutableStateOf<String?>(null) }
+        var pendingPreview by remember { mutableStateOf<BackupPreview?>(null) }
+        var permanentDelete by remember { mutableStateOf<DeletedTransactionGroup?>(null) }
+        val deletedGroups = remember(refresh) { store.deletedTransactionGroups() }
+
+        fun runFileOperation(operation: suspend () -> String) {
+            scope.launch {
+                message = runCatching { withContext(Dispatchers.IO) { operation() } }
+                    .getOrElse { "Não foi possível concluir: ${it.message ?: "erro desconhecido"}" }
+            }
+        }
+
+        val createBackup = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/json"),
+        ) { uri ->
+            if (uri != null) runFileOperation {
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                    it.write(store.createBackupJson())
+                } ?: error("arquivo indisponível")
+                "Backup criado com sucesso."
+            }
+        }
+        val exportCsv = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("text/csv"),
+        ) { uri ->
+            if (uri != null) runFileOperation {
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                    it.write(store.exportTransactionsCsv())
+                } ?: error("arquivo indisponível")
+                "Planilha CSV exportada com sucesso."
+            }
+        }
+        val openBackup = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            if (uri != null) scope.launch {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                            ?: error("arquivo indisponível")
+                    }
+                }
+                result.onSuccess { content ->
+                    when (val validation = store.previewBackup(content)) {
+                        is BackupValidationResult.Valid -> {
+                            pendingBackup = content
+                            pendingPreview = validation.preview
+                        }
+                        is BackupValidationResult.Invalid -> message = validation.reason
+                    }
+                }.onFailure { message = "Não foi possível ler o backup: ${it.message}" }
+            }
+        }
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Dados e segurança") },
+                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text("Backup e recuperação", style = MaterialTheme.typography.headlineMedium)
+                    Text(
+                        "Guarde uma cópia completa antes de trocar de aparelho ou fazer alterações importantes.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                item {
+                    Button(
+                        onClick = { createBackup.launch("AssistenteFinanceiro-backup-${LocalDate.now()}.json") },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Criar backup completo") }
+                }
+                item {
+                    OutlinedButton(
+                        onClick = { openBackup.launch(arrayOf("application/json", "text/plain")) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Restaurar um backup") }
+                }
+                item {
+                    HorizontalDivider()
+                    Text("Exportação", style = MaterialTheme.typography.headlineSmall)
+                    Text("O CSV pode ser aberto no Excel e não altera os dados do aplicativo.")
+                }
+                item {
+                    OutlinedButton(
+                        onClick = { exportCsv.launch("AssistenteFinanceiro-movimentacoes-${LocalDate.now()}.csv") },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Salvar movimentações em CSV") }
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            runFileOperation {
+                                val file = File(context.cacheDir, "AssistenteFinanceiro-movimentacoes.csv")
+                                file.writeText(store.exportTransactionsCsv())
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.files",
+                                    file,
+                                )
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/csv"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                withContext(Dispatchers.Main) {
+                                    context.startActivity(Intent.createChooser(intent, "Compartilhar movimentações"))
+                                }
+                                "Arquivo preparado para compartilhamento."
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Compartilhar CSV") }
+                }
+                message?.let { text ->
+                    item {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Text(text, modifier = Modifier.padding(16.dp))
+                        }
+                    }
+                }
+                item {
+                    HorizontalDivider()
+                    Text("Lixeira", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        if (deletedGroups.isEmpty()) "Nenhuma movimentação excluída."
+                        else "Movimentações excluídas manualmente podem ser restauradas.",
+                    )
+                }
+                items(deletedGroups, key = { it.groupId }) { group ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(group.description, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${group.itemCount} registro(s) · excluído em " +
+                                    group.deletedAt.atZone(ZoneId.systemDefault()).toLocalDate()
+                                        .format(SHORT_DATE_FORMATTER),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = {
+                                    if (store.restoreDeletedTransactionGroup(group.groupId)) {
+                                        message = "Movimentação restaurada."
+                                        refresh++
+                                    } else message = "Não foi possível restaurar a movimentação."
+                                }) { Text("Restaurar") }
+                                TextButton(onClick = { permanentDelete = group }) {
+                                    Text("Excluir definitivamente", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+
+        pendingPreview?.let { preview ->
+            AlertDialog(
+                onDismissRequest = { pendingPreview = null; pendingBackup = null },
+                title = { Text("Confirmar restauração") },
+                text = {
+                    Text(
+                        "Backup de ${preview.createdAt.atZone(ZoneId.systemDefault()).toLocalDate().format(SHORT_DATE_FORMATTER)}\n" +
+                            "${preview.transactionCount} movimentações · ${preview.accountCount} contas/cartões\n\n" +
+                            "Os dados atuais serão substituídos. Crie um backup deles antes de continuar.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val content = pendingBackup
+                        pendingPreview = null
+                        pendingBackup = null
+                        if (content != null) {
+                            message = if (store.restoreBackup(content)) {
+                                refresh++
+                                "Backup restaurado com sucesso."
+                            } else "A restauração falhou e os dados atuais foram preservados."
+                        }
+                    }) { Text("Restaurar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingPreview = null; pendingBackup = null }) { Text("Cancelar") }
+                },
+            )
+        }
+
+        permanentDelete?.let { group ->
+            AlertDialog(
+                onDismissRequest = { permanentDelete = null },
+                title = { Text("Excluir definitivamente?") },
+                text = { Text("${group.description} não poderá mais ser restaurada pela lixeira.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (store.permanentlyDeleteTransactionGroup(group.groupId)) {
+                            message = "Item removido definitivamente."
+                            refresh++
+                        }
+                        permanentDelete = null
+                    }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = { TextButton(onClick = { permanentDelete = null }) { Text("Cancelar") } },
+            )
         }
     }
 
