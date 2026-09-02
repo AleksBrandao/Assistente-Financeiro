@@ -163,6 +163,10 @@ class DiagnosticStore(context: Context) :
         }
         if (oldVersion < 18) createDeletedTransactionsTables(db)
         if (oldVersion < 19) createMonthlyBudgetsTable(db)
+        if (oldVersion < 21) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN custom_category TEXT")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN subcategory TEXT")
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -293,7 +297,8 @@ class DiagnosticStore(context: Context) :
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
-                      planned_payment_date,paid_at,series_id,series_index,series_total
+                      planned_payment_date,paid_at,series_id,series_index,series_total,
+                      custom_category,subcategory
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -330,6 +335,8 @@ class DiagnosticStore(context: Context) :
                                 seriesId = cursor.getString(22),
                                 seriesIndex = if (cursor.isNull(23)) null else cursor.getInt(23),
                                 seriesTotal = if (cursor.isNull(24)) null else cursor.getInt(24),
+                                customCategory = cursor.getString(25),
+                                subcategory = cursor.getString(26),
                             )
                         )
                     }
@@ -337,10 +344,25 @@ class DiagnosticStore(context: Context) :
             }
         }
 
+    fun customCategories(direction: FinancialTransactionDirection): List<String> =
+        readableDatabase.rawQuery(
+            """SELECT DISTINCT custom_category FROM transactions
+               WHERE direction = ? AND custom_category IS NOT NULL
+                 AND TRIM(custom_category) <> ''
+               ORDER BY custom_category COLLATE NOCASE""",
+            arrayOf(direction.name),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+
     fun updateTransactionDetails(
         transactionId: Long,
         description: String,
         category: TransactionCategory,
+        customCategory: String?,
+        subcategory: String?,
         status: TransactionStatus,
         amount: java.math.BigDecimal,
         dueDate: LocalDate?,
@@ -390,6 +412,10 @@ class DiagnosticStore(context: Context) :
                 ContentValues().apply {
                     put("description", normalizedDescription)
                     put("category", category.name)
+                    if (customCategory.isNullOrBlank()) putNull("custom_category")
+                    else put("custom_category", customCategory.trim())
+                    if (subcategory.isNullOrBlank()) putNull("subcategory")
+                    else put("subcategory", subcategory.trim())
                     put("category_source", TransactionCategorySource.MANUAL.name)
                     put(
                         "status",
@@ -427,6 +453,10 @@ class DiagnosticStore(context: Context) :
                     ContentValues().apply {
                         put("description", normalizedDescription)
                         put("category", category.name)
+                        if (customCategory.isNullOrBlank()) putNull("custom_category")
+                        else put("custom_category", customCategory.trim())
+                        if (subcategory.isNullOrBlank()) putNull("subcategory")
+                        else put("subcategory", subcategory.trim())
                         put("category_source", TransactionCategorySource.MANUAL.name)
                         put("amount", amount.toPlainString())
                     },
@@ -1309,7 +1339,7 @@ class DiagnosticStore(context: Context) :
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
-                      planned_payment_date,paid_at
+                      planned_payment_date,paid_at,custom_category,subcategory
                FROM transactions WHERE invoice_id = ?
                ORDER BY occurred_at DESC,id DESC""",
             arrayOf(invoiceId.toString()),
@@ -1343,6 +1373,8 @@ class DiagnosticStore(context: Context) :
                             dueDate = cursor.getString(19),
                             plannedPaymentDate = cursor.getString(20),
                             paidAt = cursor.getString(21),
+                            customCategory = cursor.getString(22),
+                            subcategory = cursor.getString(23),
                         )
                     )
                 }
@@ -1661,6 +1693,8 @@ class DiagnosticStore(context: Context) :
                 series_id TEXT,
                 series_index INTEGER,
                 series_total INTEGER,
+                custom_category TEXT,
+                subcategory TEXT,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2271,7 +2305,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 20
+        const val DATABASE_VERSION = 21
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(

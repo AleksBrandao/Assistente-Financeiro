@@ -26,7 +26,15 @@ data class FinancialTransactionRecord(
     val seriesId: String? = null,
     val seriesIndex: Int? = null,
     val seriesTotal: Int? = null,
+    val customCategory: String? = null,
+    val subcategory: String? = null,
 )
+
+val FinancialTransactionRecord.categoryDisplayName: String
+    get() = listOfNotNull(
+        customCategory?.takeIf { it.isNotBlank() } ?: category.displayName,
+        subcategory?.takeIf { it.isNotBlank() },
+    ).joinToString(" › ")
 
 enum class TransactionSeriesScope {
     ONLY_THIS,

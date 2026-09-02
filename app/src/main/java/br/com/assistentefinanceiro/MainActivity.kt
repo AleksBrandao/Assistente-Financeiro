@@ -81,6 +81,18 @@ private data class PlanningItem(
     val date: LocalDate,
 )
 
+private data class CategoryChoice(
+    val category: TransactionCategory,
+    val customCategory: String? = null,
+    val subcategory: String? = null,
+) {
+    val displayName: String
+        get() = listOfNotNull(
+            customCategory?.takeIf { it.isNotBlank() } ?: category.displayName,
+            subcategory?.takeIf { it.isNotBlank() },
+        ).joinToString(" › ")
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -588,14 +600,17 @@ class MainActivity : ComponentActivity() {
 
         editingTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
+                            customCategory = customCategory,
+                            subcategory = subcategory,
                             status = status,
                             amount = amount,
                             dueDate = dueDate,
@@ -1040,7 +1055,7 @@ class MainActivity : ComponentActivity() {
                     amount = transaction.amount.toBigDecimalOrNull() ?: return@mapNotNull null,
                     description = transaction.description,
                     detail = listOf(
-                        transaction.category.displayName,
+                        transaction.categoryDisplayName,
                         if (transaction.status == TransactionStatus.PENDING) "Pendente"
                         else "Realizada",
                     ).joinToString(" · "),
@@ -1198,12 +1213,13 @@ class MainActivity : ComponentActivity() {
         }
         editingTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (
                         store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
                         )
                     ) {
@@ -1809,7 +1825,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             Text(
                                 listOfNotNull(
-                                    transaction.category.displayName,
+                                    transaction.categoryDisplayName,
                                     dateLabel,
                                     if (transaction.origin == TransactionOrigin.MOBILLS) {
                                         "Mobills"
@@ -1883,11 +1899,12 @@ class MainActivity : ComponentActivity() {
         }
         editingInvoiceTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingInvoiceTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
                         )) {
                         editingInvoiceTransaction = null
@@ -2333,7 +2350,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text(
                         text = transactionTypeLabel(transaction.type) +
-                            " · " + transaction.category.displayName +
+                            " · " + transaction.categoryDisplayName +
                             if (transaction.categorySource == TransactionCategorySource.RULE) {
                                 " · automática"
                             } else {
@@ -2367,11 +2384,198 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun CategoryPickerDialog(
+        current: CategoryChoice,
+        direction: FinancialTransactionDirection,
+        availableCategories: List<TransactionCategory>,
+        customCategories: List<String>,
+        onDismiss: () -> Unit,
+        onSelected: (CategoryChoice) -> Unit,
+    ) {
+        var draft by remember(current) { mutableStateOf(current) }
+        var newCategory by remember { mutableStateOf("") }
+        var newSubcategory by remember { mutableStateOf("") }
+        var creatingCategory by remember { mutableStateOf(false) }
+        val presetSubcategories = mapOf(
+            TransactionCategory.FOOD to listOf("Mercado", "Restaurante", "Delivery"),
+            TransactionCategory.TRANSPORT to listOf("Combustível", "Transporte público", "Aplicativo"),
+            TransactionCategory.HOUSING to listOf("Aluguel", "Condomínio", "Energia", "Água", "Internet"),
+            TransactionCategory.HEALTH to listOf("Farmácia", "Consulta", "Exames"),
+            TransactionCategory.SHOPPING to listOf("Vestuário", "Casa", "Eletrônicos"),
+            TransactionCategory.EDUCATION to listOf("Mensalidade", "Cursos", "Livros"),
+            TransactionCategory.LEISURE to listOf("Viagem", "Cinema", "Eventos"),
+            TransactionCategory.SERVICES to listOf("Assinaturas", "Manutenção", "Profissionais"),
+        )
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Selecionar categoria") },
+            text = {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    availableCategories.forEach { category ->
+                        item(key = category.name) {
+                            val selected = !creatingCategory && draft.category == category &&
+                                draft.customCategory == null
+                            TextButton(
+                                onClick = {
+                                    creatingCategory = false
+                                    draft = CategoryChoice(category)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                RadioButton(selected = selected, onClick = null)
+                                Text(category.displayName, modifier = Modifier.weight(1f))
+                            }
+                        }
+                        if (
+                            !creatingCategory && draft.category == category &&
+                            draft.customCategory == null &&
+                            category != TransactionCategory.UNCATEGORIZED
+                        ) {
+                            item {
+                                Text(
+                                    "Subcategoria (opcional)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            }
+                            item {
+                                OutlinedButton(
+                                    onClick = { draft = draft.copy(subcategory = null) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Sem subcategoria") }
+                            }
+                            presetSubcategories[category].orEmpty().forEach { name ->
+                                item(key = "preset-${category.name}-$name") {
+                                    OutlinedButton(
+                                        onClick = { draft = draft.copy(subcategory = name) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text(name) }
+                                }
+                            }
+                            item {
+                                OutlinedTextField(
+                                    value = newSubcategory,
+                                    onValueChange = { newSubcategory = it.take(40) },
+                                    label = { Text("Nova subcategoria") },
+                                    singleLine = true,
+                                    trailingIcon = {
+                                        TextButton(
+                                            enabled = newSubcategory.isNotBlank(),
+                                            onClick = {
+                                                draft = draft.copy(
+                                                    subcategory = newSubcategory.trim()
+                                                )
+                                                newSubcategory = ""
+                                            },
+                                        ) { Text("Usar") }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                    customCategories.forEach { name ->
+                        item(key = "custom-$name") {
+                            TextButton(
+                                onClick = {
+                                    creatingCategory = false
+                                    draft = CategoryChoice(
+                                        category = if (
+                                            direction == FinancialTransactionDirection.INCOME
+                                        ) TransactionCategory.OTHER_INCOME
+                                        else TransactionCategory.OTHER_EXPENSE,
+                                        customCategory = name,
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                RadioButton(
+                                    selected = !creatingCategory && draft.customCategory == name,
+                                    onClick = null,
+                                )
+                                Text(name, modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (!creatingCategory && draft.customCategory != null) {
+                        item {
+                            OutlinedTextField(
+                                value = draft.subcategory.orEmpty(),
+                                onValueChange = {
+                                    draft = draft.copy(subcategory = it.take(40))
+                                },
+                                label = { Text("Subcategoria (opcional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    item {
+                        TextButton(
+                            onClick = { creatingCategory = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("+ Nova categoria") }
+                    }
+                    if (creatingCategory) {
+                        item {
+                            OutlinedTextField(
+                                value = newCategory,
+                                onValueChange = { newCategory = it.take(40) },
+                                label = { Text("Nome da nova categoria") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        item {
+                            OutlinedTextField(
+                                value = newSubcategory,
+                                onValueChange = { newSubcategory = it.take(40) },
+                                label = { Text("Subcategoria (opcional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !creatingCategory || newCategory.isNotBlank(),
+                    onClick = {
+                        if (creatingCategory) {
+                            val fallback =
+                                if (direction == FinancialTransactionDirection.INCOME) {
+                                    TransactionCategory.OTHER_INCOME
+                                } else {
+                                    TransactionCategory.OTHER_EXPENSE
+                                }
+                            onSelected(
+                                CategoryChoice(
+                                    category = fallback,
+                                    customCategory = newCategory.trim(),
+                                    subcategory = newSubcategory.trim().ifBlank { null },
+                                )
+                            )
+                        } else {
+                            onSelected(draft)
+                        }
+                    },
+                ) { Text("Selecionar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
+    }
+
+    @Composable
     private fun EditTransactionDialog(
+        store: DiagnosticStore,
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
         onSave: (
-            String, TransactionCategory, TransactionStatus, java.math.BigDecimal,
+            String, TransactionCategory, String?, String?, TransactionStatus, java.math.BigDecimal,
             LocalDate?, LocalDate?, LocalDate?, Boolean, TransactionSeriesScope,
         ) -> Unit,
         onDelete: ((TransactionSeriesScope) -> Unit)? = null,
@@ -2382,7 +2586,13 @@ class MainActivity : ComponentActivity() {
         var selectedCategory by remember(transaction.id) {
             mutableStateOf(transaction.category)
         }
-        var categoryMenuExpanded by remember(transaction.id) {
+        var customCategory by remember(transaction.id) {
+            mutableStateOf(transaction.customCategory)
+        }
+        var subcategory by remember(transaction.id) {
+            mutableStateOf(transaction.subcategory)
+        }
+        var categoryPickerVisible by remember(transaction.id) {
             mutableStateOf(false)
         }
         var applyToFuture by remember(transaction.id) {
@@ -2419,6 +2629,9 @@ class MainActivity : ComponentActivity() {
             (paidAt.isBlank() || paidAtValue != null)
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
+        }
+        val customCategories = remember(transaction.direction, transaction.id) {
+            store.customCategories(transaction.direction)
         }
 
         AlertDialog(
@@ -2505,27 +2718,36 @@ class MainActivity : ComponentActivity() {
                         text = "Categoria",
                         style = MaterialTheme.typography.labelLarge,
                     )
-                    Box {
-                        OutlinedButton(
-                            onClick = { categoryMenuExpanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(selectedCategory.displayName)
-                        }
-                        DropdownMenu(
-                            expanded = categoryMenuExpanded,
-                            onDismissRequest = { categoryMenuExpanded = false },
-                        ) {
-                            availableCategories.forEach { category ->
-                                DropdownMenuItem(
-                                    text = { Text(category.displayName) },
-                                    onClick = {
-                                        selectedCategory = category
-                                        categoryMenuExpanded = false
-                                    },
-                                )
-                            }
-                        }
+                    OutlinedButton(
+                        onClick = { categoryPickerVisible = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            CategoryChoice(
+                                selectedCategory,
+                                customCategory,
+                                subcategory,
+                            ).displayName
+                        )
+                    }
+                    if (categoryPickerVisible) {
+                        CategoryPickerDialog(
+                            current = CategoryChoice(
+                                selectedCategory,
+                                customCategory,
+                                subcategory,
+                            ),
+                            direction = transaction.direction,
+                            availableCategories = availableCategories,
+                            customCategories = customCategories,
+                            onDismiss = { categoryPickerVisible = false },
+                            onSelected = { choice ->
+                                selectedCategory = choice.category
+                                customCategory = choice.customCategory
+                                subcategory = choice.subcategory
+                                categoryPickerVisible = false
+                            },
+                        )
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2583,7 +2805,7 @@ class MainActivity : ComponentActivity() {
                 TextButton(
                     onClick = {
                         onSave(
-                            description, selectedCategory, selectedStatus,
+                            description, selectedCategory, customCategory, subcategory, selectedStatus,
                             checkNotNull(amountValue), dueDateValue, plannedPaymentDateValue,
                             paidAtValue, applyToFuture,
                             seriesScope,
@@ -2700,11 +2922,12 @@ class MainActivity : ComponentActivity() {
         }
         editing?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editing = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, apply, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, apply, scope ->
                     if (store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, apply, scope,
                         )) {
                         editing = null
