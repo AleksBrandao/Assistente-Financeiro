@@ -222,6 +222,12 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AboutScreen(onBack: () -> Unit) {
         val context = LocalContext.current
+        val packageInfo = remember(context) {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        val versionName = packageInfo.versionName ?: "não informada"
+        @Suppress("DEPRECATION")
+        val versionCode = packageInfo.versionCode
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -242,9 +248,9 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Text("Assistente Financeiro", style = MaterialTheme.typography.headlineSmall)
-                            Text("Versão ${BuildConfig.VERSION_NAME}")
+                            Text("Versão $versionName")
                             Text(
-                                "Código ${BuildConfig.VERSION_CODE}",
+                                "Código $versionCode",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
