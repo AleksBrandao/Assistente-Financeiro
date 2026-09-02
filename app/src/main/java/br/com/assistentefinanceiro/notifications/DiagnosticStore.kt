@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import br.com.assistentefinanceiro.importing.ImportDisposition
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
+import java.math.BigDecimal
 import java.time.LocalDateTime
 import java.time.LocalDate
 import java.time.YearMonth
@@ -64,6 +65,7 @@ class DiagnosticStore(context: Context) :
         createInvoiceAdjustmentsTable(db)
         createAccountMovementsTable(db)
         createDeletedTransactionsTables(db)
+        createMonthlyBudgetsTable(db)
         createIndexes(db)
     }
 
@@ -160,6 +162,7 @@ class DiagnosticStore(context: Context) :
             initializeImportedInstallmentSeries(db)
         }
         if (oldVersion < 18) createDeletedTransactionsTables(db)
+        if (oldVersion < 19) createMonthlyBudgetsTable(db)
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -1190,7 +1193,7 @@ class DiagnosticStore(context: Context) :
             BACKUP_TABLES.asReversed().forEach { table -> db.delete(table, null, null) }
             BACKUP_TABLES.forEach { table ->
                 val columns = tableColumns(db, table)
-                val rows = tables.getJSONArray(table)
+                val rows = tables.optJSONArray(table) ?: JSONArray()
                 for (index in 0 until rows.length()) {
                     db.insertOrThrow(
                         table,
@@ -1208,29 +1211,75 @@ class DiagnosticStore(context: Context) :
         }
     }
 
-    fun exportTransactionsCsvLegacy(): String {
-        val header = listOf(
-            "ID", "Descrição", "Direção", "Valor", "Data", "Vencimento",
-            "Pagamento previsto", "Pagamento realizado", "Situação", "Categoria",
-            "Conta", "Origem", "Série", "Parcela",
-        )
-        val lines = recentTransactions(10_000).map { transaction ->
-            listOf(
-                transaction.id.toString(), transaction.description, transaction.direction.name,
-                transaction.amount, transaction.occurredAt, transaction.dueDate.orEmpty(),
-                transaction.plannedPaymentDate.orEmpty(), transaction.paidAt.orEmpty(),
-                transaction.status.name, transaction.category.displayName,
-                transaction.account.orEmpty(), transaction.origin.name,
-                transaction.seriesId.orEmpty(),
-                transaction.seriesIndex?.let { "$it/${transaction.seriesTotal}" }.orEmpty(),
-            ).joinToString(";") { csvCell(it) }
-        }
-        return "\uFEFF" + (listOf(header.joinToString(";") { csvCell(it) }) + lines)
-            .joinToString("\r\n")
-    }
-
     fun exportTransactionsCsv(): String =
         TransactionCsvExporter.export(recentTransactions(10_000))
+
+    fun monthlyBudgets(period: YearMonth): List<MonthlyBudgetRecord> = readableDatabase.rawQuery(
+        """SELECT category_key,amount FROM monthly_budgets
+           WHERE period = ? ORDER BY category_key""",
+        arrayOf(period.toString()),
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                val category = cursor.getString(0).takeUnless { it == TOTAL_BUDGET_KEY }
+                    ?.let(TransactionCategory::fromStored)
+                val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
+                add(MonthlyBudgetRecord(period, category, amount))
+            }
+        }
+    }
+
+    fun saveMonthlyBudget(
+        period: YearMonth,
+        category: TransactionCategory?,
+        amount: BigDecimal,
+    ): Boolean {
+        if (amount.signum() <= 0) return false
+        return writableDatabase.insertWithOnConflict(
+            "monthly_budgets",
+            null,
+            ContentValues().apply {
+                put("period", period.toString())
+                put("category_key", category?.name ?: TOTAL_BUDGET_KEY)
+                put("amount", amount.toPlainString())
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        ) != -1L
+    }
+
+    fun deleteMonthlyBudget(period: YearMonth, category: TransactionCategory?): Boolean =
+        writableDatabase.delete(
+            "monthly_budgets",
+            "period = ? AND category_key = ?",
+            arrayOf(period.toString(), category?.name ?: TOTAL_BUDGET_KEY),
+        ) == 1
+
+    fun copyMonthlyBudgets(source: YearMonth, target: YearMonth): Int {
+        val sourceBudgets = monthlyBudgets(source)
+        if (sourceBudgets.isEmpty()) return 0
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            db.delete("monthly_budgets", "period = ?", arrayOf(target.toString()))
+            sourceBudgets.forEach { budget ->
+                db.insertOrThrow(
+                    "monthly_budgets",
+                    null,
+                    ContentValues().apply {
+                        put("period", target.toString())
+                        put("category_key", budget.category?.name ?: TOTAL_BUDGET_KEY)
+                        put("amount", budget.amount.toPlainString())
+                    },
+                )
+            }
+            db.setTransactionSuccessful()
+            sourceBudgets.size
+        } catch (_: Exception) {
+            0
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     fun deleteTransfer(movementId: Long): Boolean {
         val db = writableDatabase
@@ -1725,6 +1774,17 @@ class DiagnosticStore(context: Context) :
         )
     }
 
+    private fun createMonthlyBudgetsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS monthly_budgets(
+                period TEXT NOT NULL,
+                category_key TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                PRIMARY KEY(period,category_key)
+            )"""
+        )
+    }
+
     private fun insertPaymentAccountMovement(
         db: SQLiteDatabase,
         paymentId: Long,
@@ -2115,7 +2175,9 @@ class DiagnosticStore(context: Context) :
         require(version in 1..DATABASE_VERSION) { "Versão de banco incompatível" }
         require(root.optLong("createdAt", -1L) > 0L) { "Data do backup inválida" }
         val tables = root.optJSONObject("tables") ?: error("Tabelas ausentes")
-        BACKUP_TABLES.forEach { table ->
+        BACKUP_TABLES.filterNot { table ->
+            version < 19 && table == "monthly_budgets"
+        }.forEach { table ->
             require(tables.optJSONArray(table) != null) { "Tabela ausente: $table" }
         }
         return root
@@ -2165,9 +2227,6 @@ class DiagnosticStore(context: Context) :
             }
         }
 
-    private fun csvCell(value: String): String =
-        "\"${value.replace("\"", "\"\"").replace("\r", " ").replace("\n", " ")}\""
-
     private data class StoredEvent(
         val id: Long,
         val packageName: String,
@@ -2194,7 +2253,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 18
+        const val DATABASE_VERSION = 19
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(
@@ -2209,7 +2268,9 @@ class DiagnosticStore(context: Context) :
             "transactions",
             "deleted_transaction_groups",
             "deleted_transactions",
+            "monthly_budgets",
         )
+        const val TOTAL_BUDGET_KEY = "__TOTAL__"
     }
 }
 

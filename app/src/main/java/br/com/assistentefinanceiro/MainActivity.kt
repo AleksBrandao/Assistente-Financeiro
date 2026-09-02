@@ -53,6 +53,7 @@ private enum class AppScreen {
     SUMMARY,
     PLANNING,
     DATA,
+    BUDGET,
 }
 
 private data class AccountLedgerItem(
@@ -94,6 +95,7 @@ class MainActivity : ComponentActivity() {
                         onOpenSummary = { screen = AppScreen.SUMMARY },
                         onOpenPlanning = { screen = AppScreen.PLANNING },
                         onOpenData = { screen = AppScreen.DATA },
+                        onOpenBudget = { screen = AppScreen.BUDGET },
                     )
                     AppScreen.DIAGNOSTIC -> DiagnosticScreen(
                         store = store,
@@ -121,6 +123,10 @@ class MainActivity : ComponentActivity() {
                         store = store,
                         onBack = { screen = AppScreen.STATEMENT },
                     )
+                    AppScreen.BUDGET -> MonthlyBudgetScreen(
+                        store = store,
+                        onBack = { screen = AppScreen.STATEMENT },
+                    )
                 }
             }
         }
@@ -135,6 +141,7 @@ class MainActivity : ComponentActivity() {
         onOpenSummary: () -> Unit,
         onOpenPlanning: () -> Unit,
         onOpenData: () -> Unit,
+        onOpenBudget: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -360,11 +367,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 item {
-                    OutlinedButton(
-                        onClick = onOpenPlanning,
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text("Planejamento · próximos 90 dias")
+                        OutlinedButton(onClick = onOpenPlanning, modifier = Modifier.weight(1f)) {
+                            Text("Planejamento")
+                        }
+                        OutlinedButton(onClick = onOpenBudget, modifier = Modifier.weight(1f)) {
+                            Text("Orçamentos")
+                        }
                     }
                 }
                 item {
@@ -2709,6 +2721,208 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun MonthlyBudgetScreen(
+        store: DiagnosticStore,
+        onBack: () -> Unit,
+    ) {
+        var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
+        var refresh by remember { mutableIntStateOf(0) }
+        var editingCategory by remember { mutableStateOf<TransactionCategory?>(null) }
+        var editingTotal by remember { mutableStateOf(false) }
+        var message by remember { mutableStateOf<String?>(null) }
+        val budgets = remember(selectedMonth, refresh) { store.monthlyBudgets(selectedMonth) }
+        val transactions = remember(refresh) { consolidatedTransactions(store) }
+        val progress = remember(selectedMonth, budgets, transactions) {
+            MonthlyBudgetCalculator.calculate(selectedMonth, budgets, transactions)
+        }
+        val totalProgress = progress.firstOrNull { it.category == null }
+        val categoryProgress = progress.filter { it.category != null }
+        val expenseCategories = TransactionCategory.availableFor(
+            FinancialTransactionDirection.EXPENSE,
+        )
+        val configuredCategories = categoryProgress.mapNotNull { it.category }.toSet()
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Orçamento mensal") },
+                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    MonthSelector(
+                        selectedMonth = selectedMonth,
+                        onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
+                        onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    )
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { editingTotal = true },
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (totalProgress == null) "Definir limite total" else "Editar total") }
+                        OutlinedButton(
+                            onClick = {
+                                val copied = store.copyMonthlyBudgets(
+                                    selectedMonth.minusMonths(1), selectedMonth,
+                                )
+                                message = if (copied > 0) {
+                                    "$copied orçamento(s) copiado(s) do mês anterior."
+                                } else "O mês anterior não possui orçamento."
+                                if (copied > 0) refresh++
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Copiar mês anterior") }
+                    }
+                }
+                message?.let { value ->
+                    item { Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                totalProgress?.let { item ->
+                    item(key = "budget-total") {
+                        BudgetProgressCard(item, onEdit = { editingTotal = true })
+                    }
+                }
+                if (categoryProgress.isNotEmpty()) {
+                    item { Text("Por categoria", style = MaterialTheme.typography.headlineSmall) }
+                    items(categoryProgress, key = { it.category!!.name }) { item ->
+                        BudgetProgressCard(item, onEdit = { editingCategory = item.category })
+                    }
+                }
+                val missing = expenseCategories.filterNot { it in configuredCategories }
+                if (missing.isNotEmpty()) {
+                    item { Text("Adicionar categoria", style = MaterialTheme.typography.headlineSmall) }
+                    items(missing, key = { "missing-${it.name}" }) { category ->
+                        OutlinedButton(
+                            onClick = { editingCategory = category },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Definir limite para ${category.displayName}") }
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+
+        if (editingTotal || editingCategory != null) {
+            val category = editingCategory
+            val existing = budgets.firstOrNull { it.category == category }?.amount
+            BudgetEditDialog(
+                title = category?.displayName ?: "Limite total do mês",
+                initialAmount = existing?.toPlainString().orEmpty(),
+                onDismiss = { editingTotal = false; editingCategory = null },
+                onSave = { amount ->
+                    if (store.saveMonthlyBudget(selectedMonth, category, amount)) {
+                        editingTotal = false
+                        editingCategory = null
+                        refresh++
+                    }
+                },
+                onDelete = existing?.let {
+                    {
+                        store.deleteMonthlyBudget(selectedMonth, category)
+                        editingTotal = false
+                        editingCategory = null
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun BudgetProgressCard(
+        progress: MonthlyBudgetProgress,
+        onEdit: () -> Unit,
+    ) {
+        val overBudget = progress.remaining.signum() < 0
+        Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        progress.category?.displayName ?: "Orçamento total",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(formatCurrency(progress.limit.toPlainString()))
+                }
+                LinearProgressIndicator(
+                    progress = { (progress.usagePercent.coerceAtMost(100)) / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = if (overBudget) MaterialTheme.colorScheme.error else Color(0xFF087F67),
+                )
+                Text(
+                    "Realizado: ${formatCurrency(progress.realized.toPlainString())} · " +
+                        "Pendente: ${formatCurrency(progress.pending.toPlainString())}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (overBudget) {
+                        "Excedente previsto: ${formatCurrency(progress.remaining.abs().toPlainString())}"
+                    } else {
+                        "Disponível previsto: ${formatCurrency(progress.remaining.toPlainString())}"
+                    },
+                    color = if (overBudget) MaterialTheme.colorScheme.error else Color(0xFF087F67),
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun BudgetEditDialog(
+        title: String,
+        initialAmount: String,
+        onDismiss: () -> Unit,
+        onSave: (java.math.BigDecimal) -> Unit,
+        onDelete: (() -> Unit)?,
+    ) {
+        var amount by remember(title, initialAmount) { mutableStateOf(initialAmount) }
+        val parsed = remember(amount) {
+            if (',' in amount) amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+            else amount.toBigDecimalOrNull()
+        }
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(title) },
+            text = {
+                OutlinedTextField(
+                    value = amount,
+                    onValueChange = { amount = it },
+                    label = { Text("Limite mensal") },
+                    prefix = { Text("R$ ") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { parsed?.let(onSave) },
+                    enabled = parsed?.signum() == 1,
+                ) { Text("Salvar") }
+            },
+            dismissButton = {
+                Row {
+                    onDelete?.let { delete ->
+                        TextButton(onClick = delete) {
+                            Text("Remover", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = onDismiss) { Text("Cancelar") }
+                }
+            },
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
