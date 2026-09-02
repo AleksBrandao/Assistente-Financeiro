@@ -1251,10 +1251,15 @@ class DiagnosticStore(context: Context) :
     ).use { cursor ->
         buildList {
             while (cursor.moveToNext()) {
-                val category = cursor.getString(0).takeUnless { it == TOTAL_BUDGET_KEY }
+                val storedKey = cursor.getString(0)
+                val customCategory = storedKey
+                    .takeIf { it.startsWith(CUSTOM_BUDGET_PREFIX) }
+                    ?.removePrefix(CUSTOM_BUDGET_PREFIX)
+                val category = storedKey
+                    .takeUnless { it == TOTAL_BUDGET_KEY || customCategory != null }
                     ?.let(TransactionCategory::fromStored)
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
-                add(MonthlyBudgetRecord(period, category, amount))
+                add(MonthlyBudgetRecord(period, category, amount, customCategory))
             }
         }
     }
@@ -1263,6 +1268,7 @@ class DiagnosticStore(context: Context) :
         period: YearMonth,
         category: TransactionCategory?,
         amount: BigDecimal,
+        customCategory: String? = null,
     ): Boolean {
         if (amount.signum() <= 0) return false
         return writableDatabase.insertWithOnConflict(
@@ -1270,18 +1276,30 @@ class DiagnosticStore(context: Context) :
             null,
             ContentValues().apply {
                 put("period", period.toString())
-                put("category_key", category?.name ?: TOTAL_BUDGET_KEY)
+                put(
+                    "category_key",
+                    customCategory?.let { CUSTOM_BUDGET_PREFIX + it.trim() }
+                        ?: category?.name ?: TOTAL_BUDGET_KEY,
+                )
                 put("amount", amount.toPlainString())
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         ) != -1L
     }
 
-    fun deleteMonthlyBudget(period: YearMonth, category: TransactionCategory?): Boolean =
+    fun deleteMonthlyBudget(
+        period: YearMonth,
+        category: TransactionCategory?,
+        customCategory: String? = null,
+    ): Boolean =
         writableDatabase.delete(
             "monthly_budgets",
             "period = ? AND category_key = ?",
-            arrayOf(period.toString(), category?.name ?: TOTAL_BUDGET_KEY),
+            arrayOf(
+                period.toString(),
+                customCategory?.let { CUSTOM_BUDGET_PREFIX + it.trim() }
+                    ?: category?.name ?: TOTAL_BUDGET_KEY,
+            ),
         ) == 1
 
     fun copyMonthlyBudgets(source: YearMonth, target: YearMonth): Int {
@@ -1297,7 +1315,11 @@ class DiagnosticStore(context: Context) :
                     null,
                     ContentValues().apply {
                         put("period", target.toString())
-                        put("category_key", budget.category?.name ?: TOTAL_BUDGET_KEY)
+                        put(
+                            "category_key",
+                            budget.customCategory?.let { CUSTOM_BUDGET_PREFIX + it }
+                                ?: budget.category?.name ?: TOTAL_BUDGET_KEY,
+                        )
                         put("amount", budget.amount.toPlainString())
                     },
                 )
@@ -2323,6 +2345,7 @@ class DiagnosticStore(context: Context) :
             "monthly_budgets",
         )
         const val TOTAL_BUDGET_KEY = "__TOTAL__"
+        const val CUSTOM_BUDGET_PREFIX = "CUSTOM:"
     }
 }
 

@@ -10,14 +10,25 @@ data class MonthlyBudgetRecord(
     val period: YearMonth,
     val category: TransactionCategory?,
     val amount: BigDecimal,
-)
+    val customCategory: String? = null,
+) {
+    val categoryKey: String?
+        get() = customCategory?.let { "CUSTOM:$it" } ?: category?.name
+    val displayName: String
+        get() = customCategory ?: category?.displayName ?: "Limite total do mês"
+}
 
 data class MonthlyBudgetProgress(
     val category: TransactionCategory?,
     val limit: BigDecimal,
     val realized: BigDecimal,
     val pending: BigDecimal,
+    val customCategory: String? = null,
 ) {
+    val categoryKey: String?
+        get() = customCategory?.let { "CUSTOM:$it" } ?: category?.name
+    val displayName: String
+        get() = customCategory ?: category?.displayName ?: "Orçamento total"
     val projected: BigDecimal get() = realized + pending
     val remaining: BigDecimal get() = limit - projected
     val usagePercent: Int
@@ -39,16 +50,26 @@ object MonthlyBudgetCalculator {
             if (YearMonth.from(date) != period) return@mapNotNull null
             val amount = transaction.amount.toBigDecimalOrNull()
                 ?.takeIf { it.signum() >= 0 } ?: return@mapNotNull null
-            BudgetExpense(transaction.category, transaction.status, amount)
+            BudgetExpense(
+                transaction.category,
+                transaction.customCategory,
+                transaction.status,
+                amount,
+            )
         }
-        return budgets.sortedWith(compareBy<MonthlyBudgetRecord> { it.category != null }
-            .thenBy { it.category?.displayName.orEmpty() })
+        return budgets.sortedWith(compareBy<MonthlyBudgetRecord> { it.categoryKey != null }
+            .thenBy { it.displayName })
             .map { budget ->
-                val matching = if (budget.category == null) expenses else expenses.filter {
-                    it.category == budget.category
+                val matching = if (budget.categoryKey == null) expenses else expenses.filter {
+                    if (budget.customCategory != null) {
+                        it.customCategory == budget.customCategory
+                    } else {
+                        it.customCategory == null && it.category == budget.category
+                    }
                 }
                 MonthlyBudgetProgress(
                     category = budget.category,
+                    customCategory = budget.customCategory,
                     limit = budget.amount,
                     realized = matching.filter { it.status == TransactionStatus.REALIZED }
                         .fold(BigDecimal.ZERO) { total, item -> total + item.amount },
@@ -68,6 +89,7 @@ object MonthlyBudgetCalculator {
 
     private data class BudgetExpense(
         val category: TransactionCategory,
+        val customCategory: String?,
         val status: TransactionStatus,
         val amount: BigDecimal,
     )

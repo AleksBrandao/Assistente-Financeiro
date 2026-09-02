@@ -32,6 +32,37 @@ class MonthlyBudgetCalculatorTest {
         assertEquals(110, progress[1].usagePercent)
     }
 
+    @Test
+    fun keepsCustomCategorySeparateFromFallbackCategory() {
+        val period = YearMonth.of(2026, 9)
+        val custom = expense(
+            1, "120", TransactionStatus.PENDING,
+            TransactionCategory.OTHER_EXPENSE, "2026-09-10",
+        ).copy(customCategory = "Animais", subcategory = "Ração")
+        val ordinary = expense(
+            2, "80", TransactionStatus.PENDING,
+            TransactionCategory.OTHER_EXPENSE, "2026-09-11",
+        )
+
+        val progress = MonthlyBudgetCalculator.calculate(
+            period,
+            listOf(
+                MonthlyBudgetRecord(
+                    period, TransactionCategory.OTHER_EXPENSE,
+                    BigDecimal("200"), customCategory = "Animais",
+                ),
+                MonthlyBudgetRecord(
+                    period, TransactionCategory.OTHER_EXPENSE, BigDecimal("200"),
+                ),
+            ),
+            listOf(custom, ordinary),
+        )
+
+        assertEquals("Animais", progress[0].displayName)
+        assertEquals(BigDecimal("120"), progress[0].pending)
+        assertEquals(BigDecimal("80"), progress[1].pending)
+    }
+
     private fun expense(
         id: Long,
         amount: String,

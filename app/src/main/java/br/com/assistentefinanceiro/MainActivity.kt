@@ -312,6 +312,8 @@ class MainActivity : ComponentActivity() {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var pendingOnly by remember { mutableStateOf(false) }
+        var withoutCategoryOnly by remember { mutableStateOf(false) }
+        var withoutSubcategoryOnly by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
         val creditCardAccounts = remember(refresh) {
             store.financialAccounts()
@@ -390,11 +392,28 @@ class MainActivity : ComponentActivity() {
         val generalProjectedBalance = remember(refresh, selectedMonth) {
             store.generalProjectedBalance(selectedMonth.atEndOfMonth())
         }
-        val visibleGroups = remember(statement.groups, pendingOnly) {
-            if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
+        val visibleGroups = remember(
+            statement.groups,
+            pendingOnly,
+            withoutCategoryOnly,
+            withoutSubcategoryOnly,
+        ) {
+            statement.groups.mapNotNull { group ->
                 group.copy(
                     transactions = group.transactions.filter {
-                        it.status == TransactionStatus.PENDING
+                        (!pendingOnly || it.status == TransactionStatus.PENDING) &&
+                            (
+                                (!withoutCategoryOnly && !withoutSubcategoryOnly) ||
+                                    (
+                                        withoutCategoryOnly &&
+                                            it.category == TransactionCategory.UNCATEGORIZED
+                                        ) ||
+                                    (
+                                        withoutSubcategoryOnly &&
+                                            it.category != TransactionCategory.UNCATEGORIZED &&
+                                            it.subcategory.isNullOrBlank()
+                                        )
+                                )
                     },
                 ).takeIf { it.transactions.isNotEmpty() }
             }
@@ -516,15 +535,42 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = pendingOnly,
-                            onCheckedChange = { pendingOnly = it },
-                        )
-                        Text("Mostrar somente pendentes")
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = pendingOnly,
+                                onCheckedChange = { pendingOnly = it },
+                            )
+                            Text("Mostrar somente pendentes")
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = withoutCategoryOnly,
+                                onClick = { withoutCategoryOnly = !withoutCategoryOnly },
+                                label = { Text("Sem categoria") },
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilterChip(
+                                selected = withoutSubcategoryOnly,
+                                onClick = { withoutSubcategoryOnly = !withoutSubcategoryOnly },
+                                label = { Text("Sem subcategoria") },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        if (withoutCategoryOnly || withoutSubcategoryOnly) {
+                            TextButton(
+                                onClick = {
+                                    withoutCategoryOnly = false
+                                    withoutSubcategoryOnly = false
+                                },
+                            ) { Text("Limpar filtros de classificação") }
+                        }
                     }
                 }
                 item {
@@ -3078,7 +3124,7 @@ class MainActivity : ComponentActivity() {
     ) {
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var refresh by remember { mutableIntStateOf(0) }
-        var editingCategory by remember { mutableStateOf<TransactionCategory?>(null) }
+        var editingCategory by remember { mutableStateOf<CategoryChoice?>(null) }
         var editingTotal by remember { mutableStateOf(false) }
         var message by remember { mutableStateOf<String?>(null) }
         val budgets = remember(selectedMonth, refresh) { store.monthlyBudgets(selectedMonth) }
@@ -3091,7 +3137,14 @@ class MainActivity : ComponentActivity() {
         val expenseCategories = TransactionCategory.availableFor(
             FinancialTransactionDirection.EXPENSE,
         )
-        val configuredCategories = categoryProgress.mapNotNull { it.category }.toSet()
+        val configuredKeys = categoryProgress.mapNotNull { it.categoryKey }.toSet()
+        val customExpenseCategories = transactions
+            .asSequence()
+            .filter { it.direction == FinancialTransactionDirection.EXPENSE }
+            .mapNotNull { it.customCategory?.takeIf(String::isNotBlank) }
+            .distinct()
+            .sorted()
+            .toList()
 
         Scaffold(
             topBar = {
@@ -3142,18 +3195,40 @@ class MainActivity : ComponentActivity() {
                 }
                 if (categoryProgress.isNotEmpty()) {
                     item { Text("Por categoria", style = MaterialTheme.typography.headlineSmall) }
-                    items(categoryProgress, key = { it.category!!.name }) { item ->
-                        BudgetProgressCard(item, onEdit = { editingCategory = item.category })
+                    items(categoryProgress, key = { it.categoryKey!! }) { item ->
+                        BudgetProgressCard(
+                            item,
+                            onEdit = {
+                                editingCategory = CategoryChoice(
+                                    category = item.category ?: TransactionCategory.OTHER_EXPENSE,
+                                    customCategory = item.customCategory,
+                                )
+                            },
+                        )
                     }
                 }
-                val missing = expenseCategories.filterNot { it in configuredCategories }
-                if (missing.isNotEmpty()) {
+                val missing = expenseCategories.filterNot { it.name in configuredKeys }
+                val missingCustom = customExpenseCategories.filterNot {
+                    "CUSTOM:$it" in configuredKeys
+                }
+                if (missing.isNotEmpty() || missingCustom.isNotEmpty()) {
                     item { Text("Adicionar categoria", style = MaterialTheme.typography.headlineSmall) }
                     items(missing, key = { "missing-${it.name}" }) { category ->
                         OutlinedButton(
-                            onClick = { editingCategory = category },
+                            onClick = { editingCategory = CategoryChoice(category) },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Definir limite para ${category.displayName}") }
+                    }
+                    items(missingCustom, key = { "missing-custom-$it" }) { name ->
+                        OutlinedButton(
+                            onClick = {
+                                editingCategory = CategoryChoice(
+                                    TransactionCategory.OTHER_EXPENSE,
+                                    customCategory = name,
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Definir limite para $name") }
                     }
                 }
                 item { Spacer(Modifier.height(24.dp)) }
@@ -3161,14 +3236,28 @@ class MainActivity : ComponentActivity() {
         }
 
         if (editingTotal || editingCategory != null) {
-            val category = editingCategory
-            val existing = budgets.firstOrNull { it.category == category }?.amount
+            val choice = editingCategory
+            val category = choice?.category
+            val customCategory = choice?.customCategory
+            val existing = budgets.firstOrNull {
+                it.category == category && it.customCategory == customCategory
+            }?.amount
+            val includedTransactions = transactions.filter { transaction ->
+                transaction.direction == FinancialTransactionDirection.EXPENSE &&
+                    transactionEffectiveDate(transaction)?.let { YearMonth.from(it) } == selectedMonth &&
+                    if (choice == null) true
+                    else if (customCategory != null) transaction.customCategory == customCategory
+                    else transaction.customCategory == null && transaction.category == category
+            }
             BudgetEditDialog(
-                title = category?.displayName ?: "Limite total do mês",
+                title = customCategory ?: category?.displayName ?: "Limite total do mês",
                 initialAmount = existing?.toPlainString().orEmpty(),
+                transactions = includedTransactions,
                 onDismiss = { editingTotal = false; editingCategory = null },
                 onSave = { amount ->
-                    if (store.saveMonthlyBudget(selectedMonth, category, amount)) {
+                    if (store.saveMonthlyBudget(
+                            selectedMonth, category, amount, customCategory,
+                        )) {
                         editingTotal = false
                         editingCategory = null
                         refresh++
@@ -3176,7 +3265,7 @@ class MainActivity : ComponentActivity() {
                 },
                 onDelete = existing?.let {
                     {
-                        store.deleteMonthlyBudget(selectedMonth, category)
+                        store.deleteMonthlyBudget(selectedMonth, category, customCategory)
                         editingTotal = false
                         editingCategory = null
                         refresh++
@@ -3199,7 +3288,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        progress.category?.displayName ?: "Orçamento total",
+                        progress.displayName,
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f),
                     )
@@ -3231,6 +3320,7 @@ class MainActivity : ComponentActivity() {
     private fun BudgetEditDialog(
         title: String,
         initialAmount: String,
+        transactions: List<FinancialTransactionRecord>,
         onDismiss: () -> Unit,
         onSave: (java.math.BigDecimal) -> Unit,
         onDelete: (() -> Unit)?,
@@ -3240,18 +3330,80 @@ class MainActivity : ComponentActivity() {
             if (',' in amount) amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
             else amount.toBigDecimalOrNull()
         }
+        val realized = transactions
+            .filter { it.status == TransactionStatus.REALIZED }
+            .sumOf { it.amount.toBigDecimalOrNull() ?: java.math.BigDecimal.ZERO }
+        val pending = transactions
+            .filter { it.status == TransactionStatus.PENDING }
+            .sumOf { it.amount.toBigDecimalOrNull() ?: java.math.BigDecimal.ZERO }
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(title) },
             text = {
-                OutlinedTextField(
-                    value = amount,
-                    onValueChange = { amount = it },
-                    label = { Text("Limite mensal") },
-                    prefix = { Text("R$ ") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                )
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item {
+                        OutlinedTextField(
+                            value = amount,
+                            onValueChange = { amount = it },
+                            label = { Text("Limite mensal") },
+                            prefix = { Text("R$ ") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    item {
+                        Card {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text("Resumo do mês", style = MaterialTheme.typography.titleMedium)
+                                Text("Realizado: ${formatCurrency(realized.toPlainString())}")
+                                Text("Pendente: ${formatCurrency(pending.toPlainString())}")
+                                Text(
+                                    "Total previsto: ${formatCurrency((realized + pending).toPlainString())}"
+                                )
+                            }
+                        }
+                    }
+                    item {
+                        Text(
+                            "Movimentações incluídas (${transactions.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (transactions.isEmpty()) {
+                        item { Text("Nenhuma movimentação nesta categoria no mês.") }
+                    } else {
+                        items(transactions, key = { "budget-transaction-${it.id}" }) { transaction ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(transaction.description)
+                                    Text(
+                                        if (transaction.status == TransactionStatus.REALIZED) {
+                                            "Realizado"
+                                        } else {
+                                            "Pendente"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    formatCurrency(transaction.amount),
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
