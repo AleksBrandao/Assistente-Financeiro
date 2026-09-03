@@ -163,6 +163,10 @@ class DiagnosticStore(context: Context) :
         }
         if (oldVersion < 18) createDeletedTransactionsTables(db)
         if (oldVersion < 19) createMonthlyBudgetsTable(db)
+        if (oldVersion < 21) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN custom_category TEXT")
+            db.execSQL("ALTER TABLE transactions ADD COLUMN subcategory TEXT")
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -293,7 +297,8 @@ class DiagnosticStore(context: Context) :
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
-                      planned_payment_date,paid_at,series_id,series_index,series_total
+                      planned_payment_date,paid_at,series_id,series_index,series_total,
+                      custom_category,subcategory
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -330,6 +335,8 @@ class DiagnosticStore(context: Context) :
                                 seriesId = cursor.getString(22),
                                 seriesIndex = if (cursor.isNull(23)) null else cursor.getInt(23),
                                 seriesTotal = if (cursor.isNull(24)) null else cursor.getInt(24),
+                                customCategory = cursor.getString(25),
+                                subcategory = cursor.getString(26),
                             )
                         )
                     }
@@ -337,10 +344,25 @@ class DiagnosticStore(context: Context) :
             }
         }
 
+    fun customCategories(direction: FinancialTransactionDirection): List<String> =
+        readableDatabase.rawQuery(
+            """SELECT DISTINCT custom_category FROM transactions
+               WHERE direction = ? AND custom_category IS NOT NULL
+                 AND TRIM(custom_category) <> ''
+               ORDER BY custom_category COLLATE NOCASE""",
+            arrayOf(direction.name),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+
     fun updateTransactionDetails(
         transactionId: Long,
         description: String,
         category: TransactionCategory,
+        customCategory: String?,
+        subcategory: String?,
         status: TransactionStatus,
         amount: java.math.BigDecimal,
         dueDate: LocalDate?,
@@ -390,6 +412,10 @@ class DiagnosticStore(context: Context) :
                 ContentValues().apply {
                     put("description", normalizedDescription)
                     put("category", category.name)
+                    if (customCategory.isNullOrBlank()) putNull("custom_category")
+                    else put("custom_category", customCategory.trim())
+                    if (subcategory.isNullOrBlank()) putNull("subcategory")
+                    else put("subcategory", subcategory.trim())
                     put("category_source", TransactionCategorySource.MANUAL.name)
                     put(
                         "status",
@@ -427,6 +453,10 @@ class DiagnosticStore(context: Context) :
                     ContentValues().apply {
                         put("description", normalizedDescription)
                         put("category", category.name)
+                        if (customCategory.isNullOrBlank()) putNull("custom_category")
+                        else put("custom_category", customCategory.trim())
+                        if (subcategory.isNullOrBlank()) putNull("subcategory")
+                        else put("subcategory", subcategory.trim())
                         put("category_source", TransactionCategorySource.MANUAL.name)
                         put("amount", amount.toPlainString())
                     },
@@ -1221,10 +1251,15 @@ class DiagnosticStore(context: Context) :
     ).use { cursor ->
         buildList {
             while (cursor.moveToNext()) {
-                val category = cursor.getString(0).takeUnless { it == TOTAL_BUDGET_KEY }
+                val storedKey = cursor.getString(0)
+                val customCategory = storedKey
+                    .takeIf { it.startsWith(CUSTOM_BUDGET_PREFIX) }
+                    ?.removePrefix(CUSTOM_BUDGET_PREFIX)
+                val category = storedKey
+                    .takeUnless { it == TOTAL_BUDGET_KEY || customCategory != null }
                     ?.let(TransactionCategory::fromStored)
                 val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
-                add(MonthlyBudgetRecord(period, category, amount))
+                add(MonthlyBudgetRecord(period, category, amount, customCategory))
             }
         }
     }
@@ -1233,6 +1268,7 @@ class DiagnosticStore(context: Context) :
         period: YearMonth,
         category: TransactionCategory?,
         amount: BigDecimal,
+        customCategory: String? = null,
     ): Boolean {
         if (amount.signum() <= 0) return false
         return writableDatabase.insertWithOnConflict(
@@ -1240,18 +1276,30 @@ class DiagnosticStore(context: Context) :
             null,
             ContentValues().apply {
                 put("period", period.toString())
-                put("category_key", category?.name ?: TOTAL_BUDGET_KEY)
+                put(
+                    "category_key",
+                    customCategory?.let { CUSTOM_BUDGET_PREFIX + it.trim() }
+                        ?: category?.name ?: TOTAL_BUDGET_KEY,
+                )
                 put("amount", amount.toPlainString())
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         ) != -1L
     }
 
-    fun deleteMonthlyBudget(period: YearMonth, category: TransactionCategory?): Boolean =
+    fun deleteMonthlyBudget(
+        period: YearMonth,
+        category: TransactionCategory?,
+        customCategory: String? = null,
+    ): Boolean =
         writableDatabase.delete(
             "monthly_budgets",
             "period = ? AND category_key = ?",
-            arrayOf(period.toString(), category?.name ?: TOTAL_BUDGET_KEY),
+            arrayOf(
+                period.toString(),
+                customCategory?.let { CUSTOM_BUDGET_PREFIX + it.trim() }
+                    ?: category?.name ?: TOTAL_BUDGET_KEY,
+            ),
         ) == 1
 
     fun copyMonthlyBudgets(source: YearMonth, target: YearMonth): Int {
@@ -1267,7 +1315,11 @@ class DiagnosticStore(context: Context) :
                     null,
                     ContentValues().apply {
                         put("period", target.toString())
-                        put("category_key", budget.category?.name ?: TOTAL_BUDGET_KEY)
+                        put(
+                            "category_key",
+                            budget.customCategory?.let { CUSTOM_BUDGET_PREFIX + it }
+                                ?: budget.category?.name ?: TOTAL_BUDGET_KEY,
+                        )
                         put("amount", budget.amount.toPlainString())
                     },
                 )
@@ -1309,7 +1361,7 @@ class DiagnosticStore(context: Context) :
             """SELECT id,source_event_id,direction,type,amount,occurred_at,description,source_package,
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
-                      planned_payment_date,paid_at
+                      planned_payment_date,paid_at,custom_category,subcategory
                FROM transactions WHERE invoice_id = ?
                ORDER BY occurred_at DESC,id DESC""",
             arrayOf(invoiceId.toString()),
@@ -1343,6 +1395,8 @@ class DiagnosticStore(context: Context) :
                             dueDate = cursor.getString(19),
                             plannedPaymentDate = cursor.getString(20),
                             paidAt = cursor.getString(21),
+                            customCategory = cursor.getString(22),
+                            subcategory = cursor.getString(23),
                         )
                     )
                 }
@@ -1661,6 +1715,8 @@ class DiagnosticStore(context: Context) :
                 series_id TEXT,
                 series_index INTEGER,
                 series_total INTEGER,
+                custom_category TEXT,
+                subcategory TEXT,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2111,6 +2167,26 @@ class DiagnosticStore(context: Context) :
             """CREATE INDEX IF NOT EXISTS idx_transactions_series
                ON transactions(series_id,series_index) WHERE series_id IS NOT NULL"""
         )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_status_dates
+               ON transactions(status,planned_payment_date,due_date,paid_at)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_account
+               ON transactions(account_id,occurred_at DESC)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_invoice
+               ON transactions(invoice_id) WHERE invoice_id IS NOT NULL"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
+               ON credit_card_invoices(account_id,due_date DESC)"""
+        )
+        db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_movements_account_date
+               ON account_movements(account_id,occurred_at DESC)"""
+        )
     }
 
     private fun initializeImportedInstallmentSeries(db: SQLiteDatabase) {
@@ -2175,9 +2251,7 @@ class DiagnosticStore(context: Context) :
         require(version in 1..DATABASE_VERSION) { "Versão de banco incompatível" }
         require(root.optLong("createdAt", -1L) > 0L) { "Data do backup inválida" }
         val tables = root.optJSONObject("tables") ?: error("Tabelas ausentes")
-        BACKUP_TABLES.filterNot { table ->
-            version < 19 && table == "monthly_budgets"
-        }.forEach { table ->
+        BackupTableCompatibility.requiredTables(version, BACKUP_TABLES).forEach { table ->
             require(tables.optJSONArray(table) != null) { "Tabela ausente: $table" }
         }
         return root
@@ -2253,7 +2327,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 19
+        const val DATABASE_VERSION = 21
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(
@@ -2271,6 +2345,7 @@ class DiagnosticStore(context: Context) :
             "monthly_budgets",
         )
         const val TOTAL_BUDGET_KEY = "__TOTAL__"
+        const val CUSTOM_BUDGET_PREFIX = "CUSTOM:"
     }
 }
 

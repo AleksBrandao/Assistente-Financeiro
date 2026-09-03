@@ -2,6 +2,7 @@ package br.com.assistentefinanceiro
 
 import android.content.ComponentName
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,6 +55,8 @@ private enum class AppScreen {
     PLANNING,
     DATA,
     BUDGET,
+    MORE,
+    ABOUT,
 }
 
 private data class AccountLedgerItem(
@@ -78,6 +81,18 @@ private data class PlanningItem(
     val date: LocalDate,
 )
 
+private data class CategoryChoice(
+    val category: TransactionCategory,
+    val customCategory: String? = null,
+    val subcategory: String? = null,
+) {
+    val displayName: String
+        get() = listOfNotNull(
+            customCategory?.takeIf { it.isNotBlank() } ?: category.displayName,
+            subcategory?.takeIf { it.isNotBlank() },
+        ).joinToString(" › ")
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,46 +102,203 @@ class MainActivity : ComponentActivity() {
                 val preferences = remember { BankPackagePreferences(applicationContext) }
                 var screen by remember { mutableStateOf(AppScreen.STATEMENT) }
 
-                when (screen) {
-                    AppScreen.STATEMENT -> MonthlyStatementScreen(
-                        store = store,
-                        onOpenAccounts = { screen = AppScreen.ACCOUNTS },
-                        onOpenSearch = { screen = AppScreen.SEARCH },
-                        onOpenSummary = { screen = AppScreen.SUMMARY },
-                        onOpenPlanning = { screen = AppScreen.PLANNING },
-                        onOpenData = { screen = AppScreen.DATA },
-                        onOpenBudget = { screen = AppScreen.BUDGET },
+                Scaffold(
+                    bottomBar = {
+                        MainNavigationBar(screen = screen, onNavigate = { screen = it })
+                    },
+                ) { rootPadding ->
+                    Box(Modifier.fillMaxSize().padding(rootPadding)) {
+                        when (screen) {
+                            AppScreen.STATEMENT -> MonthlyStatementScreen(store = store)
+                            AppScreen.DIAGNOSTIC -> DiagnosticScreen(
+                                store = store,
+                                preferences = preferences,
+                                onOpenStatement = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.ACCOUNTS -> AccountsScreen(
+                                store = store,
+                                onOpenStatement = { screen = AppScreen.STATEMENT },
+                                onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
+                            )
+                            AppScreen.SEARCH -> TransactionSearchScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.SUMMARY -> AnnualSummaryScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.PLANNING -> PlanningScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.DATA -> DataManagementScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.MORE },
+                            )
+                            AppScreen.BUDGET -> MonthlyBudgetScreen(
+                                store = store,
+                                onBack = { screen = AppScreen.STATEMENT },
+                            )
+                            AppScreen.MORE -> MoreScreen(
+                                onSearch = { screen = AppScreen.SEARCH },
+                                onSummary = { screen = AppScreen.SUMMARY },
+                                onData = { screen = AppScreen.DATA },
+                                onDiagnostic = { screen = AppScreen.DIAGNOSTIC },
+                                onAbout = { screen = AppScreen.ABOUT },
+                            )
+                            AppScreen.ABOUT -> AboutScreen(onBack = { screen = AppScreen.MORE })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun MainNavigationBar(
+        screen: AppScreen,
+        onNavigate: (AppScreen) -> Unit,
+    ) {
+        val selected = when (screen) {
+            AppScreen.STATEMENT -> AppScreen.STATEMENT
+            AppScreen.PLANNING -> AppScreen.PLANNING
+            AppScreen.BUDGET -> AppScreen.BUDGET
+            AppScreen.ACCOUNTS -> AppScreen.ACCOUNTS
+            else -> AppScreen.MORE
+        }
+        NavigationBar {
+            listOf(
+                Triple(AppScreen.STATEMENT, "▤", "Extrato"),
+                Triple(AppScreen.PLANNING, "◷", "Planejar"),
+                Triple(AppScreen.BUDGET, "R$", "Orçamento"),
+                Triple(AppScreen.ACCOUNTS, "▣", "Contas"),
+                Triple(AppScreen.MORE, "•••", "Mais"),
+            ).forEach { (destination, icon, label) ->
+                NavigationBarItem(
+                    selected = selected == destination,
+                    onClick = { onNavigate(destination) },
+                    icon = { Text(icon) },
+                    label = { Text(label) },
+                )
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun MoreScreen(
+        onSearch: () -> Unit,
+        onSummary: () -> Unit,
+        onData: () -> Unit,
+        onDiagnostic: () -> Unit,
+        onAbout: () -> Unit,
+    ) {
+        Scaffold(topBar = { TopAppBar(title = { Text("Mais") }) }) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    Text("Consultas e relatórios", style = MaterialTheme.typography.titleMedium)
+                }
+                item { MoreOptionCard("Pesquisar movimentações", "Nome, período e situação", onSearch) }
+                item { MoreOptionCard("Resumo anual", "Entradas, saídas e saldo mês a mês", onSummary) }
+                item {
+                    Text("Segurança e suporte", style = MaterialTheme.typography.titleMedium)
+                }
+                item { MoreOptionCard("Dados e segurança", "Backup, restauração, CSV e lixeira", onData) }
+                item { MoreOptionCard("Diagnóstico", "Notificações e aplicativos financeiros", onDiagnostic) }
+                item { MoreOptionCard("Sobre", "Versão e informações do aplicativo", onAbout) }
+            }
+        }
+    }
+
+    @Composable
+    private fun MoreOptionCard(title: String, description: String, onClick: () -> Unit) {
+        Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("›", style = MaterialTheme.typography.headlineSmall)
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AboutScreen(onBack: () -> Unit) {
+        val context = LocalContext.current
+        val packageInfo = remember(context) {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        val versionName = packageInfo.versionName ?: "não informada"
+        @Suppress("DEPRECATION")
+        val versionCode = packageInfo.versionCode
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Sobre") },
+                    actions = { TextButton(onClick = onBack) { Text("Mais") } },
+                )
+            },
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("Assistente Financeiro", style = MaterialTheme.typography.headlineSmall)
+                            Text("Versão $versionName")
+                            Text(
+                                "Código $versionCode",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        "Seus dados financeiros permanecem armazenados localmente no aparelho. " +
+                            "Use Dados e segurança para criar cópias de recuperação.",
                     )
-                    AppScreen.DIAGNOSTIC -> DiagnosticScreen(
-                        store = store,
-                        preferences = preferences,
-                        onOpenStatement = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.ACCOUNTS -> AccountsScreen(
-                        store = store,
-                        onOpenStatement = { screen = AppScreen.STATEMENT },
-                        onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
-                    )
-                    AppScreen.SEARCH -> TransactionSearchScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.SUMMARY -> AnnualSummaryScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.PLANNING -> PlanningScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.DATA -> DataManagementScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
-                    AppScreen.BUDGET -> MonthlyBudgetScreen(
-                        store = store,
-                        onBack = { screen = AppScreen.STATEMENT },
-                    )
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/AleksBrandao/Assistente-Financeiro/releases/latest"),
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Ver última versão no GitHub") }
+                }
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/AleksBrandao/Assistente-Financeiro"),
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Abrir projeto no GitHub") }
                 }
             }
         }
@@ -136,16 +308,12 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MonthlyStatementScreen(
         store: DiagnosticStore,
-        onOpenAccounts: () -> Unit,
-        onOpenSearch: () -> Unit,
-        onOpenSummary: () -> Unit,
-        onOpenPlanning: () -> Unit,
-        onOpenData: () -> Unit,
-        onOpenBudget: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var pendingOnly by remember { mutableStateOf(false) }
+        var withoutCategoryOnly by remember { mutableStateOf(false) }
+        var withoutSubcategoryOnly by remember { mutableStateOf(false) }
         val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
         val creditCardAccounts = remember(refresh) {
             store.financialAccounts()
@@ -224,11 +392,28 @@ class MainActivity : ComponentActivity() {
         val generalProjectedBalance = remember(refresh, selectedMonth) {
             store.generalProjectedBalance(selectedMonth.atEndOfMonth())
         }
-        val visibleGroups = remember(statement.groups, pendingOnly) {
-            if (!pendingOnly) statement.groups else statement.groups.mapNotNull { group ->
+        val visibleGroups = remember(
+            statement.groups,
+            pendingOnly,
+            withoutCategoryOnly,
+            withoutSubcategoryOnly,
+        ) {
+            statement.groups.mapNotNull { group ->
                 group.copy(
                     transactions = group.transactions.filter {
-                        it.status == TransactionStatus.PENDING
+                        (!pendingOnly || it.status == TransactionStatus.PENDING) &&
+                            (
+                                (!withoutCategoryOnly && !withoutSubcategoryOnly) ||
+                                    (
+                                        withoutCategoryOnly &&
+                                            it.category == TransactionCategory.UNCATEGORIZED
+                                        ) ||
+                                    (
+                                        withoutSubcategoryOnly &&
+                                            it.category != TransactionCategory.UNCATEGORIZED &&
+                                            it.subcategory.isNullOrBlank()
+                                        )
+                                )
                     },
                 ).takeIf { it.transactions.isNotEmpty() }
             }
@@ -334,10 +519,6 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text(if (readingImport) "Lendo…" else "Importar")
                         }
-                        TextButton(onClick = onOpenData) { Text("Dados") }
-                        TextButton(onClick = onOpenAccounts) {
-                            Text("Contas")
-                        }
                     },
                 )
             },
@@ -354,41 +535,42 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(onClick = onOpenSearch, modifier = Modifier.weight(1f)) {
-                            Text("Pesquisar")
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = pendingOnly,
+                                onCheckedChange = { pendingOnly = it },
+                            )
+                            Text("Mostrar somente pendentes")
                         }
-                        OutlinedButton(onClick = onOpenSummary, modifier = Modifier.weight(1f)) {
-                            Text("Resumo anual")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = withoutCategoryOnly,
+                                onClick = { withoutCategoryOnly = !withoutCategoryOnly },
+                                label = { Text("Sem categoria") },
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilterChip(
+                                selected = withoutSubcategoryOnly,
+                                onClick = { withoutSubcategoryOnly = !withoutSubcategoryOnly },
+                                label = { Text("Sem subcategoria") },
+                                modifier = Modifier.weight(1f),
+                            )
                         }
-                    }
-                }
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(onClick = onOpenPlanning, modifier = Modifier.weight(1f)) {
-                            Text("Planejamento")
+                        if (withoutCategoryOnly || withoutSubcategoryOnly) {
+                            TextButton(
+                                onClick = {
+                                    withoutCategoryOnly = false
+                                    withoutSubcategoryOnly = false
+                                },
+                            ) { Text("Limpar filtros de classificação") }
                         }
-                        OutlinedButton(onClick = onOpenBudget, modifier = Modifier.weight(1f)) {
-                            Text("Orçamentos")
-                        }
-                    }
-                }
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = pendingOnly,
-                            onCheckedChange = { pendingOnly = it },
-                        )
-                        Text("Mostrar somente pendentes")
                     }
                 }
                 item {
@@ -464,14 +646,17 @@ class MainActivity : ComponentActivity() {
 
         editingTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (
                         store.updateTransactionDetails(
                             transactionId = transaction.id,
                             description = description,
                             category = category,
+                            customCategory = customCategory,
+                            subcategory = subcategory,
                             status = status,
                             amount = amount,
                             dueDate = dueDate,
@@ -916,7 +1101,7 @@ class MainActivity : ComponentActivity() {
                     amount = transaction.amount.toBigDecimalOrNull() ?: return@mapNotNull null,
                     description = transaction.description,
                     detail = listOf(
-                        transaction.category.displayName,
+                        transaction.categoryDisplayName,
                         if (transaction.status == TransactionStatus.PENDING) "Pendente"
                         else "Realizada",
                     ).joinToString(" · "),
@@ -1074,12 +1259,13 @@ class MainActivity : ComponentActivity() {
         }
         editingTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (
                         store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
                         )
                     ) {
@@ -1685,7 +1871,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             Text(
                                 listOfNotNull(
-                                    transaction.category.displayName,
+                                    transaction.categoryDisplayName,
                                     dateLabel,
                                     if (transaction.origin == TransactionOrigin.MOBILLS) {
                                         "Mobills"
@@ -1759,11 +1945,12 @@ class MainActivity : ComponentActivity() {
         }
         editingInvoiceTransaction?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editingInvoiceTransaction = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
                     if (store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
                         )) {
                         editingInvoiceTransaction = null
@@ -2209,7 +2396,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text(
                         text = transactionTypeLabel(transaction.type) +
-                            " · " + transaction.category.displayName +
+                            " · " + transaction.categoryDisplayName +
                             if (transaction.categorySource == TransactionCategorySource.RULE) {
                                 " · automática"
                             } else {
@@ -2243,11 +2430,198 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun CategoryPickerDialog(
+        current: CategoryChoice,
+        direction: FinancialTransactionDirection,
+        availableCategories: List<TransactionCategory>,
+        customCategories: List<String>,
+        onDismiss: () -> Unit,
+        onSelected: (CategoryChoice) -> Unit,
+    ) {
+        var draft by remember(current) { mutableStateOf(current) }
+        var newCategory by remember { mutableStateOf("") }
+        var newSubcategory by remember { mutableStateOf("") }
+        var creatingCategory by remember { mutableStateOf(false) }
+        val presetSubcategories = mapOf(
+            TransactionCategory.FOOD to listOf("Mercado", "Restaurante", "Delivery"),
+            TransactionCategory.TRANSPORT to listOf("Combustível", "Transporte público", "Aplicativo"),
+            TransactionCategory.HOUSING to listOf("Aluguel", "Condomínio", "Energia", "Água", "Internet"),
+            TransactionCategory.HEALTH to listOf("Farmácia", "Consulta", "Exames"),
+            TransactionCategory.SHOPPING to listOf("Vestuário", "Casa", "Eletrônicos"),
+            TransactionCategory.EDUCATION to listOf("Mensalidade", "Cursos", "Livros"),
+            TransactionCategory.LEISURE to listOf("Viagem", "Cinema", "Eventos"),
+            TransactionCategory.SERVICES to listOf("Assinaturas", "Manutenção", "Profissionais"),
+        )
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Selecionar categoria") },
+            text = {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    availableCategories.forEach { category ->
+                        item(key = category.name) {
+                            val selected = !creatingCategory && draft.category == category &&
+                                draft.customCategory == null
+                            TextButton(
+                                onClick = {
+                                    creatingCategory = false
+                                    draft = CategoryChoice(category)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                RadioButton(selected = selected, onClick = null)
+                                Text(category.displayName, modifier = Modifier.weight(1f))
+                            }
+                        }
+                        if (
+                            !creatingCategory && draft.category == category &&
+                            draft.customCategory == null &&
+                            category != TransactionCategory.UNCATEGORIZED
+                        ) {
+                            item {
+                                Text(
+                                    "Subcategoria (opcional)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            }
+                            item {
+                                OutlinedButton(
+                                    onClick = { draft = draft.copy(subcategory = null) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Sem subcategoria") }
+                            }
+                            presetSubcategories[category].orEmpty().forEach { name ->
+                                item(key = "preset-${category.name}-$name") {
+                                    OutlinedButton(
+                                        onClick = { draft = draft.copy(subcategory = name) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text(name) }
+                                }
+                            }
+                            item {
+                                OutlinedTextField(
+                                    value = newSubcategory,
+                                    onValueChange = { newSubcategory = it.take(40) },
+                                    label = { Text("Nova subcategoria") },
+                                    singleLine = true,
+                                    trailingIcon = {
+                                        TextButton(
+                                            enabled = newSubcategory.isNotBlank(),
+                                            onClick = {
+                                                draft = draft.copy(
+                                                    subcategory = newSubcategory.trim()
+                                                )
+                                                newSubcategory = ""
+                                            },
+                                        ) { Text("Usar") }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                    customCategories.forEach { name ->
+                        item(key = "custom-$name") {
+                            TextButton(
+                                onClick = {
+                                    creatingCategory = false
+                                    draft = CategoryChoice(
+                                        category = if (
+                                            direction == FinancialTransactionDirection.INCOME
+                                        ) TransactionCategory.OTHER_INCOME
+                                        else TransactionCategory.OTHER_EXPENSE,
+                                        customCategory = name,
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                RadioButton(
+                                    selected = !creatingCategory && draft.customCategory == name,
+                                    onClick = null,
+                                )
+                                Text(name, modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (!creatingCategory && draft.customCategory != null) {
+                        item {
+                            OutlinedTextField(
+                                value = draft.subcategory.orEmpty(),
+                                onValueChange = {
+                                    draft = draft.copy(subcategory = it.take(40))
+                                },
+                                label = { Text("Subcategoria (opcional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    item {
+                        TextButton(
+                            onClick = { creatingCategory = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("+ Nova categoria") }
+                    }
+                    if (creatingCategory) {
+                        item {
+                            OutlinedTextField(
+                                value = newCategory,
+                                onValueChange = { newCategory = it.take(40) },
+                                label = { Text("Nome da nova categoria") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        item {
+                            OutlinedTextField(
+                                value = newSubcategory,
+                                onValueChange = { newSubcategory = it.take(40) },
+                                label = { Text("Subcategoria (opcional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !creatingCategory || newCategory.isNotBlank(),
+                    onClick = {
+                        if (creatingCategory) {
+                            val fallback =
+                                if (direction == FinancialTransactionDirection.INCOME) {
+                                    TransactionCategory.OTHER_INCOME
+                                } else {
+                                    TransactionCategory.OTHER_EXPENSE
+                                }
+                            onSelected(
+                                CategoryChoice(
+                                    category = fallback,
+                                    customCategory = newCategory.trim(),
+                                    subcategory = newSubcategory.trim().ifBlank { null },
+                                )
+                            )
+                        } else {
+                            onSelected(draft)
+                        }
+                    },
+                ) { Text("Selecionar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
+    }
+
+    @Composable
     private fun EditTransactionDialog(
+        store: DiagnosticStore,
         transaction: FinancialTransactionRecord,
         onDismiss: () -> Unit,
         onSave: (
-            String, TransactionCategory, TransactionStatus, java.math.BigDecimal,
+            String, TransactionCategory, String?, String?, TransactionStatus, java.math.BigDecimal,
             LocalDate?, LocalDate?, LocalDate?, Boolean, TransactionSeriesScope,
         ) -> Unit,
         onDelete: ((TransactionSeriesScope) -> Unit)? = null,
@@ -2258,7 +2632,13 @@ class MainActivity : ComponentActivity() {
         var selectedCategory by remember(transaction.id) {
             mutableStateOf(transaction.category)
         }
-        var categoryMenuExpanded by remember(transaction.id) {
+        var customCategory by remember(transaction.id) {
+            mutableStateOf(transaction.customCategory)
+        }
+        var subcategory by remember(transaction.id) {
+            mutableStateOf(transaction.subcategory)
+        }
+        var categoryPickerVisible by remember(transaction.id) {
             mutableStateOf(false)
         }
         var applyToFuture by remember(transaction.id) {
@@ -2295,6 +2675,9 @@ class MainActivity : ComponentActivity() {
             (paidAt.isBlank() || paidAtValue != null)
         val availableCategories = remember(transaction.direction) {
             TransactionCategory.availableFor(transaction.direction)
+        }
+        val customCategories = remember(transaction.direction, transaction.id) {
+            store.customCategories(transaction.direction)
         }
 
         AlertDialog(
@@ -2381,27 +2764,36 @@ class MainActivity : ComponentActivity() {
                         text = "Categoria",
                         style = MaterialTheme.typography.labelLarge,
                     )
-                    Box {
-                        OutlinedButton(
-                            onClick = { categoryMenuExpanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(selectedCategory.displayName)
-                        }
-                        DropdownMenu(
-                            expanded = categoryMenuExpanded,
-                            onDismissRequest = { categoryMenuExpanded = false },
-                        ) {
-                            availableCategories.forEach { category ->
-                                DropdownMenuItem(
-                                    text = { Text(category.displayName) },
-                                    onClick = {
-                                        selectedCategory = category
-                                        categoryMenuExpanded = false
-                                    },
-                                )
-                            }
-                        }
+                    OutlinedButton(
+                        onClick = { categoryPickerVisible = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            CategoryChoice(
+                                selectedCategory,
+                                customCategory,
+                                subcategory,
+                            ).displayName
+                        )
+                    }
+                    if (categoryPickerVisible) {
+                        CategoryPickerDialog(
+                            current = CategoryChoice(
+                                selectedCategory,
+                                customCategory,
+                                subcategory,
+                            ),
+                            direction = transaction.direction,
+                            availableCategories = availableCategories,
+                            customCategories = customCategories,
+                            onDismiss = { categoryPickerVisible = false },
+                            onSelected = { choice ->
+                                selectedCategory = choice.category
+                                customCategory = choice.customCategory
+                                subcategory = choice.subcategory
+                                categoryPickerVisible = false
+                            },
+                        )
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2459,7 +2851,7 @@ class MainActivity : ComponentActivity() {
                 TextButton(
                     onClick = {
                         onSave(
-                            description, selectedCategory, selectedStatus,
+                            description, selectedCategory, customCategory, subcategory, selectedStatus,
                             checkNotNull(amountValue), dueDateValue, plannedPaymentDateValue,
                             paidAtValue, applyToFuture,
                             seriesScope,
@@ -2576,11 +2968,12 @@ class MainActivity : ComponentActivity() {
         }
         editing?.let { transaction ->
             EditTransactionDialog(
+                store = store,
                 transaction = transaction,
                 onDismiss = { editing = null },
-                onSave = { description, category, status, amount, dueDate, plannedDate, paidAt, apply, scope ->
+                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, apply, scope ->
                     if (store.updateTransactionDetails(
-                            transaction.id, description, category, status,
+                            transaction.id, description, category, customCategory, subcategory, status,
                             amount, dueDate, plannedDate, paidAt, apply, scope,
                         )) {
                         editing = null
@@ -2731,7 +3124,7 @@ class MainActivity : ComponentActivity() {
     ) {
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var refresh by remember { mutableIntStateOf(0) }
-        var editingCategory by remember { mutableStateOf<TransactionCategory?>(null) }
+        var editingCategory by remember { mutableStateOf<CategoryChoice?>(null) }
         var editingTotal by remember { mutableStateOf(false) }
         var message by remember { mutableStateOf<String?>(null) }
         val budgets = remember(selectedMonth, refresh) { store.monthlyBudgets(selectedMonth) }
@@ -2744,7 +3137,14 @@ class MainActivity : ComponentActivity() {
         val expenseCategories = TransactionCategory.availableFor(
             FinancialTransactionDirection.EXPENSE,
         )
-        val configuredCategories = categoryProgress.mapNotNull { it.category }.toSet()
+        val configuredKeys = categoryProgress.mapNotNull { it.categoryKey }.toSet()
+        val customExpenseCategories = transactions
+            .asSequence()
+            .filter { it.direction == FinancialTransactionDirection.EXPENSE }
+            .mapNotNull { it.customCategory?.takeIf(String::isNotBlank) }
+            .distinct()
+            .sorted()
+            .toList()
 
         Scaffold(
             topBar = {
@@ -2795,18 +3195,40 @@ class MainActivity : ComponentActivity() {
                 }
                 if (categoryProgress.isNotEmpty()) {
                     item { Text("Por categoria", style = MaterialTheme.typography.headlineSmall) }
-                    items(categoryProgress, key = { it.category!!.name }) { item ->
-                        BudgetProgressCard(item, onEdit = { editingCategory = item.category })
+                    items(categoryProgress, key = { it.categoryKey!! }) { item ->
+                        BudgetProgressCard(
+                            item,
+                            onEdit = {
+                                editingCategory = CategoryChoice(
+                                    category = item.category ?: TransactionCategory.OTHER_EXPENSE,
+                                    customCategory = item.customCategory,
+                                )
+                            },
+                        )
                     }
                 }
-                val missing = expenseCategories.filterNot { it in configuredCategories }
-                if (missing.isNotEmpty()) {
+                val missing = expenseCategories.filterNot { it.name in configuredKeys }
+                val missingCustom = customExpenseCategories.filterNot {
+                    "CUSTOM:$it" in configuredKeys
+                }
+                if (missing.isNotEmpty() || missingCustom.isNotEmpty()) {
                     item { Text("Adicionar categoria", style = MaterialTheme.typography.headlineSmall) }
                     items(missing, key = { "missing-${it.name}" }) { category ->
                         OutlinedButton(
-                            onClick = { editingCategory = category },
+                            onClick = { editingCategory = CategoryChoice(category) },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Definir limite para ${category.displayName}") }
+                    }
+                    items(missingCustom, key = { "missing-custom-$it" }) { name ->
+                        OutlinedButton(
+                            onClick = {
+                                editingCategory = CategoryChoice(
+                                    TransactionCategory.OTHER_EXPENSE,
+                                    customCategory = name,
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Definir limite para $name") }
                     }
                 }
                 item { Spacer(Modifier.height(24.dp)) }
@@ -2814,14 +3236,28 @@ class MainActivity : ComponentActivity() {
         }
 
         if (editingTotal || editingCategory != null) {
-            val category = editingCategory
-            val existing = budgets.firstOrNull { it.category == category }?.amount
+            val choice = editingCategory
+            val category = choice?.category
+            val customCategory = choice?.customCategory
+            val existing = budgets.firstOrNull {
+                it.category == category && it.customCategory == customCategory
+            }?.amount
+            val includedTransactions = transactions.filter { transaction ->
+                transaction.direction == FinancialTransactionDirection.EXPENSE &&
+                    transactionEffectiveDate(transaction)?.let { YearMonth.from(it) } == selectedMonth &&
+                    if (choice == null) true
+                    else if (customCategory != null) transaction.customCategory == customCategory
+                    else transaction.customCategory == null && transaction.category == category
+            }
             BudgetEditDialog(
-                title = category?.displayName ?: "Limite total do mês",
+                title = customCategory ?: category?.displayName ?: "Limite total do mês",
                 initialAmount = existing?.toPlainString().orEmpty(),
+                transactions = includedTransactions,
                 onDismiss = { editingTotal = false; editingCategory = null },
                 onSave = { amount ->
-                    if (store.saveMonthlyBudget(selectedMonth, category, amount)) {
+                    if (store.saveMonthlyBudget(
+                            selectedMonth, category, amount, customCategory,
+                        )) {
                         editingTotal = false
                         editingCategory = null
                         refresh++
@@ -2829,7 +3265,7 @@ class MainActivity : ComponentActivity() {
                 },
                 onDelete = existing?.let {
                     {
-                        store.deleteMonthlyBudget(selectedMonth, category)
+                        store.deleteMonthlyBudget(selectedMonth, category, customCategory)
                         editingTotal = false
                         editingCategory = null
                         refresh++
@@ -2852,7 +3288,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        progress.category?.displayName ?: "Orçamento total",
+                        progress.displayName,
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f),
                     )
@@ -2884,6 +3320,7 @@ class MainActivity : ComponentActivity() {
     private fun BudgetEditDialog(
         title: String,
         initialAmount: String,
+        transactions: List<FinancialTransactionRecord>,
         onDismiss: () -> Unit,
         onSave: (java.math.BigDecimal) -> Unit,
         onDelete: (() -> Unit)?,
@@ -2893,18 +3330,80 @@ class MainActivity : ComponentActivity() {
             if (',' in amount) amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
             else amount.toBigDecimalOrNull()
         }
+        val realized = transactions
+            .filter { it.status == TransactionStatus.REALIZED }
+            .sumOf { it.amount.toBigDecimalOrNull() ?: java.math.BigDecimal.ZERO }
+        val pending = transactions
+            .filter { it.status == TransactionStatus.PENDING }
+            .sumOf { it.amount.toBigDecimalOrNull() ?: java.math.BigDecimal.ZERO }
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(title) },
             text = {
-                OutlinedTextField(
-                    value = amount,
-                    onValueChange = { amount = it },
-                    label = { Text("Limite mensal") },
-                    prefix = { Text("R$ ") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                )
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item {
+                        OutlinedTextField(
+                            value = amount,
+                            onValueChange = { amount = it },
+                            label = { Text("Limite mensal") },
+                            prefix = { Text("R$ ") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    item {
+                        Card {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text("Resumo do mês", style = MaterialTheme.typography.titleMedium)
+                                Text("Realizado: ${formatCurrency(realized.toPlainString())}")
+                                Text("Pendente: ${formatCurrency(pending.toPlainString())}")
+                                Text(
+                                    "Total previsto: ${formatCurrency((realized + pending).toPlainString())}"
+                                )
+                            }
+                        }
+                    }
+                    item {
+                        Text(
+                            "Movimentações incluídas (${transactions.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (transactions.isEmpty()) {
+                        item { Text("Nenhuma movimentação nesta categoria no mês.") }
+                    } else {
+                        items(transactions, key = { "budget-transaction-${it.id}" }) { transaction ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(transaction.description)
+                                    Text(
+                                        if (transaction.status == TransactionStatus.REALIZED) {
+                                            "Realizado"
+                                        } else {
+                                            "Pendente"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    formatCurrency(transaction.amount),
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
