@@ -17,6 +17,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -4075,6 +4076,9 @@ class MainActivity : ComponentActivity() {
         val progress = remember(selectedMonth, budgets, transactions) {
             MonthlyBudgetCalculator.calculate(selectedMonth, budgets, transactions)
         }
+        val categorySpending = remember(selectedMonth, transactions) {
+            MonthlyBudgetCalculator.spendingByCategory(selectedMonth, transactions)
+        }
         val totalProgress = progress.firstOrNull { it.category == null }
         val categoryProgress = progress.filter { it.category != null }
         val expenseCategories = TransactionCategory.availableFor(
@@ -4167,10 +4171,53 @@ class MainActivity : ComponentActivity() {
                         BudgetProgressCard(item, onEdit = { editingTotal = true })
                     }
                 }
+                item {
+                    Column(
+                        modifier = Modifier.padding(top = FinanceSpacing.sm),
+                        verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xxs),
+                    ) {
+                        Text(
+                            "Gastos por categoria",
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            "Participação no total gasto no mês, com ou sem limite definido.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (categorySpending.isEmpty()) {
+                    item(key = "category-spending-empty") {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
+                            Text(
+                                "Nenhum gasto registrado neste mês.",
+                                modifier = Modifier.padding(FinanceSpacing.md),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                } else {
+                    itemsIndexed(
+                        categorySpending,
+                        key = { _, spending -> "spending-${spending.categoryKey}" },
+                    ) { index, spending ->
+                        CategorySpendingRow(rank = index + 1, spending = spending)
+                    }
+                }
                 if (categoryProgress.isNotEmpty()) {
                     item {
                         Text(
-                            "Por categoria",
+                            "Limites por categoria",
                             modifier = Modifier.padding(top = FinanceSpacing.sm),
                             style = MaterialTheme.typography.titleLarge,
                         )
@@ -4274,6 +4321,58 @@ class MainActivity : ComponentActivity() {
                     }
                 },
             )
+        }
+    }
+
+    @Composable
+    private fun CategorySpendingRow(
+        rank: Int,
+        spending: MonthlyCategorySpending,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Row(
+                modifier = Modifier.padding(FinanceSpacing.md),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    rank.toString(),
+                    modifier = Modifier.width(28.dp),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.width(FinanceSpacing.xs))
+                FinanceIconTile(
+                    icon = spending.category.financeIcon(),
+                    contentDescription = null,
+                )
+                Spacer(Modifier.width(FinanceSpacing.sm))
+                Text(
+                    spending.displayName,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(FinanceSpacing.sm))
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        formatCurrency(spending.amount.toPlainString()),
+                        style = FinanceTextStyles.moneyMedium,
+                        color = MaterialTheme.financeColors.expense,
+                    )
+                    Text(
+                        "${spending.sharePercent}% do total",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 
