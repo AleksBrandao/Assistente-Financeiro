@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,10 +72,10 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PlanningScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
 ) {
     val screenViewModel: PlanningViewModel = viewModel(
-        factory = ScreenViewModelFactory { PlanningViewModel(store) },
+        factory = ScreenViewModelFactory { PlanningViewModel(repository) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val horizonDays = uiState.horizonDays

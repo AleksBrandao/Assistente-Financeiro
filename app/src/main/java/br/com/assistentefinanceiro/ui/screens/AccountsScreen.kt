@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,10 +72,10 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AccountsScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
 ) {
     val screenViewModel: AccountsViewModel = viewModel(
-        factory = ScreenViewModelFactory { AccountsViewModel(store) },
+        factory = ScreenViewModelFactory { AccountsViewModel(repository) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val accounts = uiState.accounts
@@ -82,7 +83,7 @@ internal fun AccountsScreen(
 
     uiState.viewingInvoicesFor?.let { account ->
         CardInvoicesScreen(
-            store = store,
+            repository = repository,
             account = account,
             onBack = screenViewModel::closeChildAndRefresh,
         )
@@ -90,7 +91,7 @@ internal fun AccountsScreen(
     }
     uiState.viewingMovementsFor?.let { account ->
         AccountMovementsScreen(
-            store = store,
+            repository = repository,
             account = account,
             onBack = screenViewModel::closeChildAndRefresh,
             onChanged = screenViewModel::refresh,

@@ -30,8 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import br.com.assistentefinanceiro.data.DiagnosticFinancialRepository
 import br.com.assistentefinanceiro.notifications.BankPackagePreferences
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.ui.screens.AboutScreen
 import br.com.assistentefinanceiro.ui.screens.AccountsScreen
 import br.com.assistentefinanceiro.ui.screens.AnnualSummaryScreen
@@ -63,7 +63,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             AssistenteFinanceiroTheme {
-                val store = remember { DiagnosticStore(applicationContext) }
+                val repository = remember {
+                    DiagnosticFinancialRepository(applicationContext)
+                }
                 val preferences = remember { BankPackagePreferences(applicationContext) }
                 var screen by remember { mutableStateOf(AppScreen.STATEMENT) }
 
@@ -75,27 +77,29 @@ class MainActivity : ComponentActivity() {
                 ) { rootPadding ->
                     Box(Modifier.fillMaxSize().padding(rootPadding)) {
                         when (screen) {
-                            AppScreen.STATEMENT -> MonthlyStatementScreen(store = store)
+                            AppScreen.STATEMENT -> MonthlyStatementScreen(
+                                repository = repository,
+                            )
                             AppScreen.DIAGNOSTIC -> DiagnosticScreen(
-                                store = store,
+                                repository = repository,
                                 preferences = preferences,
                                 onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.ACCOUNTS -> AccountsScreen(store = store)
+                            AppScreen.ACCOUNTS -> AccountsScreen(repository = repository)
                             AppScreen.SEARCH -> TransactionSearchScreen(
-                                store = store,
+                                repository = repository,
                                 onBack = { screen = AppScreen.MORE },
                             )
                             AppScreen.SUMMARY -> AnnualSummaryScreen(
-                                store = store,
+                                repository = repository,
                                 onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.PLANNING -> PlanningScreen(store = store)
+                            AppScreen.PLANNING -> PlanningScreen(repository = repository)
                             AppScreen.DATA -> DataManagementScreen(
-                                store = store,
+                                repository = repository,
                                 onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.BUDGET -> MonthlyBudgetScreen(store = store)
+                            AppScreen.BUDGET -> MonthlyBudgetScreen(repository = repository)
                             AppScreen.MORE -> MoreScreen(
                                 onSearch = { screen = AppScreen.SEARCH },
                                 onSummary = { screen = AppScreen.SUMMARY },

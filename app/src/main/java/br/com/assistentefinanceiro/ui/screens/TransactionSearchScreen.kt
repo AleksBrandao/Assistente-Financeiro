@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,11 +72,11 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TransactionSearchScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
     onBack: () -> Unit,
 ) {
     val screenViewModel: TransactionSearchViewModel = viewModel(
-        factory = ScreenViewModelFactory { TransactionSearchViewModel(store) },
+        factory = ScreenViewModelFactory { TransactionSearchViewModel(repository) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     Scaffold(

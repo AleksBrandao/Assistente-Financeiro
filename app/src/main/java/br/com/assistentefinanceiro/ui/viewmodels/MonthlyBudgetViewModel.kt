@@ -1,7 +1,7 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.MonthlyBudgetCalculator
@@ -62,9 +62,9 @@ internal data class MonthlyBudgetUiState(
 }
 
 internal class MonthlyBudgetViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
-    private var transactions = store.recentTransactions(10_000)
+    private var transactions = repository.granularTransactions()
 
     private val _uiState = MutableStateFlow(buildState(YearMonth.now()))
     val uiState: StateFlow<MonthlyBudgetUiState> = _uiState.asStateFlow()
@@ -87,7 +87,7 @@ internal class MonthlyBudgetViewModel(
 
     fun copyPreviousMonth() {
         val period = _uiState.value.selectedMonth
-        val copied = store.copyMonthlyBudgets(period.minusMonths(1), period)
+        val copied = repository.copyMonthlyBudgets(period.minusMonths(1), period)
         val message = if (copied > 0) {
             "$copied orçamento(s) copiado(s) do mês anterior."
         } else {
@@ -102,7 +102,7 @@ internal class MonthlyBudgetViewModel(
         val state = _uiState.value
         val choice = state.editingCategory
         if (
-            store.saveMonthlyBudget(
+            repository.saveMonthlyBudget(
                 state.selectedMonth,
                 choice?.category,
                 amount,
@@ -116,7 +116,7 @@ internal class MonthlyBudgetViewModel(
     fun deleteBudget() {
         val state = _uiState.value
         val choice = state.editingCategory
-        store.deleteMonthlyBudget(
+        repository.deleteMonthlyBudget(
             state.selectedMonth,
             choice?.category,
             choice?.customCategory,
@@ -129,12 +129,12 @@ internal class MonthlyBudgetViewModel(
     }
 
     private fun reload(period: YearMonth, message: String? = null) {
-        transactions = store.recentTransactions(10_000)
+        transactions = repository.granularTransactions()
         _uiState.value = buildState(period).copy(message = message)
     }
 
     private fun buildState(period: YearMonth): MonthlyBudgetUiState {
-        val budgets = store.monthlyBudgets(period)
+        val budgets = repository.monthlyBudgets(period)
         return MonthlyBudgetUiState(
             selectedMonth = period,
             budgets = budgets,

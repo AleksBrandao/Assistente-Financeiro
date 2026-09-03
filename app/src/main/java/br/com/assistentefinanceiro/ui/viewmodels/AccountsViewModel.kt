@@ -1,8 +1,8 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.AccountBalanceSummary
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import java.math.BigDecimal
@@ -22,7 +22,7 @@ internal data class AccountsUiState(
 )
 
 internal class AccountsViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(loadState())
     val uiState: StateFlow<AccountsUiState> = _uiState.asStateFlow()
@@ -78,7 +78,7 @@ internal class AccountsViewModel(
     ) {
         val creating = _uiState.value.creatingAccount
         if (
-            store.saveFinancialAccount(
+            repository.saveFinancialAccount(
                 id = account.id.takeUnless { creating },
                 name = name,
                 type = type,
@@ -100,7 +100,7 @@ internal class AccountsViewModel(
         description: String,
     ) {
         if (
-            store.recordTransfer(
+            repository.recordTransfer(
                 sourceAccountId,
                 destinationAccountId,
                 amount,
@@ -121,12 +121,12 @@ internal class AccountsViewModel(
     }
 
     private fun loadState(): AccountsUiState {
-        val accounts = store.financialAccounts()
+        val accounts = repository.financialAccounts()
         return AccountsUiState(
             accounts = accounts,
             bankBalances = accounts
                 .filter { it.type == FinancialAccountType.BANK_ACCOUNT }
-                .associateWith(store::accountBalance),
+                .associateWith(repository::accountBalance),
         )
     }
 }

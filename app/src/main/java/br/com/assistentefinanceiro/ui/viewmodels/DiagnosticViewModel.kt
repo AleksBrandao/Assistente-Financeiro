@@ -4,9 +4,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.BankPackagePreferences
 import br.com.assistentefinanceiro.notifications.DiagnosticEvent
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinanceNotificationListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,7 +21,7 @@ internal data class DiagnosticUiState(
 
 internal class DiagnosticViewModel(
     context: Context,
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
     private val preferences: BankPackagePreferences,
 ) : ViewModel() {
     private val applicationContext = context.applicationContext
@@ -38,14 +38,14 @@ internal class DiagnosticViewModel(
     }
 
     fun clearEvents() {
-        store.clearEvents()
+        repository.clearEvents()
         refresh()
     }
 
     private fun loadState() = DiagnosticUiState(
         allowedPackages = preferences.allowedPackages(),
-        candidates = store.candidates(),
-        events = store.recentEvents(),
+        candidates = repository.candidates(),
+        events = repository.recentEvents(),
         notificationAccessEnabled = notificationAccessEnabled(),
     )
 
