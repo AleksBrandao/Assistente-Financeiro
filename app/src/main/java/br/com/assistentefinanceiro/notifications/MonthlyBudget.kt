@@ -38,25 +38,26 @@ data class MonthlyBudgetProgress(
             .toInt()
 }
 
+data class MonthlyCategorySpending(
+    val category: TransactionCategory,
+    val amount: BigDecimal,
+    val sharePercent: Int,
+    val transactionCount: Int,
+    val customCategory: String? = null,
+) {
+    val categoryKey: String
+        get() = customCategory?.let { "CUSTOM:$it" } ?: category.name
+    val displayName: String
+        get() = customCategory ?: category.displayName
+}
+
 object MonthlyBudgetCalculator {
     fun calculate(
         period: YearMonth,
         budgets: List<MonthlyBudgetRecord>,
         transactions: List<FinancialTransactionRecord>,
     ): List<MonthlyBudgetProgress> {
-        val expenses = transactions.mapNotNull { transaction ->
-            if (transaction.direction != FinancialTransactionDirection.EXPENSE) return@mapNotNull null
-            val date = effectiveDate(transaction) ?: return@mapNotNull null
-            if (YearMonth.from(date) != period) return@mapNotNull null
-            val amount = transaction.amount.toBigDecimalOrNull()
-                ?.takeIf { it.signum() >= 0 } ?: return@mapNotNull null
-            BudgetExpense(
-                transaction.category,
-                transaction.customCategory,
-                transaction.status,
-                amount,
-            )
-        }
+        val expenses = expensesFor(period, transactions)
         return budgets.sortedWith(compareBy<MonthlyBudgetRecord> { it.categoryKey != null }
             .thenBy { it.displayName })
             .map { budget ->
@@ -79,6 +80,58 @@ object MonthlyBudgetCalculator {
             }
     }
 
+    fun spendingByCategory(
+        period: YearMonth,
+        transactions: List<FinancialTransactionRecord>,
+    ): List<MonthlyCategorySpending> {
+        val expenses = expensesFor(period, transactions).filter { it.amount.signum() > 0 }
+        val total = expenses.fold(BigDecimal.ZERO) { sum, expense -> sum + expense.amount }
+        return expenses
+            .groupBy { BudgetCategory(it.category, it.customCategory) }
+            .map { (category, items) ->
+                val categoryTotal = items.fold(BigDecimal.ZERO) { sum, item ->
+                    sum + item.amount
+                }
+                MonthlyCategorySpending(
+                    category = category.category,
+                    customCategory = category.customCategory,
+                    amount = categoryTotal,
+                    sharePercent = percentageOf(categoryTotal, total),
+                    transactionCount = items.size,
+                )
+            }
+            .sortedWith(
+                compareByDescending<MonthlyCategorySpending> { it.amount }
+                    .thenBy { it.displayName },
+            )
+    }
+
+    private fun expensesFor(
+        period: YearMonth,
+        transactions: List<FinancialTransactionRecord>,
+    ): List<BudgetExpense> = transactions.mapNotNull { transaction ->
+        if (transaction.direction != FinancialTransactionDirection.EXPENSE) return@mapNotNull null
+        val date = effectiveDate(transaction) ?: return@mapNotNull null
+        if (YearMonth.from(date) != period) return@mapNotNull null
+        val amount = transaction.amount.toBigDecimalOrNull()
+            ?.takeIf { it.signum() >= 0 } ?: return@mapNotNull null
+        BudgetExpense(
+            transaction.category,
+            transaction.customCategory?.trim()?.takeIf(String::isNotEmpty),
+            transaction.status,
+            amount,
+        )
+    }
+
+    private fun percentageOf(value: BigDecimal, total: BigDecimal): Int {
+        if (total.signum() == 0) return 0
+        return value
+            .multiply(BigDecimal(100))
+            .divide(total, 0, RoundingMode.HALF_UP)
+            .toInt()
+            .coerceIn(0, 100)
+    }
+
     private fun effectiveDate(transaction: FinancialTransactionRecord): LocalDate? {
         val stored = if (transaction.status == TransactionStatus.REALIZED) {
             transaction.paidAt
@@ -92,5 +145,10 @@ object MonthlyBudgetCalculator {
         val customCategory: String?,
         val status: TransactionStatus,
         val amount: BigDecimal,
+    )
+
+    private data class BudgetCategory(
+        val category: TransactionCategory,
+        val customCategory: String?,
     )
 }
