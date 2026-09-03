@@ -673,50 +673,60 @@ class DiagnosticStore(context: Context) :
     fun creditCardInvoices(accountId: Long): List<CreditCardInvoiceRecord> {
         val db = writableDatabase
         refreshInvoiceStatuses(db, accountId, LocalDate.now())
-        return db.rawQuery(
-            """SELECT invoices.id,invoices.account_id,invoices.closing_period,
-                      invoices.closing_date,invoices.due_date,invoices.status,
-                      COALESCE(SUM(CASE
-                          WHEN transactions.direction = 'EXPENSE' THEN transactions.amount
-                          ELSE -transactions.amount
-                      END),0),
-                      COALESCE((SELECT adjustments.amount FROM invoice_adjustments AS adjustments
-                                WHERE adjustments.account_id = invoices.account_id
-                                  AND adjustments.closing_period = invoices.closing_period),0),
-                      COALESCE((SELECT SUM(payments.amount) FROM invoice_payments AS payments
-                                WHERE payments.account_id = invoices.account_id
-                                  AND payments.closing_period = invoices.closing_period),0),
-                      COUNT(transactions.id)
-               FROM credit_card_invoices AS invoices
-               LEFT JOIN transactions ON transactions.invoice_id = invoices.id
-               WHERE invoices.account_id = ?
-               GROUP BY invoices.id
-               ORDER BY invoices.closing_period DESC""",
-            arrayOf(accountId.toString()),
-        ).use { cursor ->
-            buildList {
-                while (cursor.moveToNext()) {
-                    val baseTotal = cursor.getString(6).toBigDecimal()
-                    val adjustment = cursor.getString(7).toBigDecimal()
-                    val total = baseTotal + adjustment
-                    val paid = cursor.getString(8).toBigDecimal()
-                    add(
-                        CreditCardInvoiceRecord(
-                            id = cursor.getLong(0),
-                            accountId = cursor.getLong(1),
-                            closingPeriod = YearMonth.parse(cursor.getString(2)),
-                            closingDate = LocalDate.parse(cursor.getString(3)),
-                            dueDate = cursor.getString(4)?.let(LocalDate::parse),
-                            status = CreditCardInvoiceStatus.fromStored(cursor.getString(5)),
-                            total = total,
-                            paidAmount = paid,
-                            outstandingAmount = (total - paid).max(java.math.BigDecimal.ZERO),
-                            transactionCount = cursor.getInt(9),
-                            baseTotal = baseTotal,
-                            adjustmentAmount = adjustment,
-                        )
+        return queryCreditCardInvoices(
+            db = db,
+            whereClause = "invoices.account_id = ?",
+            selectionArgs = arrayOf(accountId.toString()),
+        )
+    }
+
+    private fun queryCreditCardInvoices(
+        db: SQLiteDatabase,
+        whereClause: String,
+        selectionArgs: Array<String>,
+    ): List<CreditCardInvoiceRecord> = db.rawQuery(
+        """SELECT invoices.id,invoices.account_id,invoices.closing_period,
+                  invoices.closing_date,invoices.due_date,invoices.status,
+                  COALESCE(SUM(CASE
+                      WHEN transactions.direction = 'EXPENSE' THEN transactions.amount
+                      ELSE -transactions.amount
+                  END),0),
+                  COALESCE((SELECT adjustments.amount FROM invoice_adjustments AS adjustments
+                            WHERE adjustments.account_id = invoices.account_id
+                              AND adjustments.closing_period = invoices.closing_period),0),
+                  COALESCE((SELECT SUM(payments.amount) FROM invoice_payments AS payments
+                            WHERE payments.account_id = invoices.account_id
+                              AND payments.closing_period = invoices.closing_period),0),
+                  COUNT(transactions.id)
+           FROM credit_card_invoices AS invoices
+           LEFT JOIN transactions ON transactions.invoice_id = invoices.id
+           WHERE $whereClause
+           GROUP BY invoices.id
+           ORDER BY invoices.closing_period DESC""",
+        selectionArgs,
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                val baseTotal = cursor.getString(6).toBigDecimal()
+                val adjustment = cursor.getString(7).toBigDecimal()
+                val total = baseTotal + adjustment
+                val paid = cursor.getString(8).toBigDecimal()
+                add(
+                    CreditCardInvoiceRecord(
+                        id = cursor.getLong(0),
+                        accountId = cursor.getLong(1),
+                        closingPeriod = YearMonth.parse(cursor.getString(2)),
+                        closingDate = LocalDate.parse(cursor.getString(3)),
+                        dueDate = cursor.getString(4)?.let(LocalDate::parse),
+                        status = CreditCardInvoiceStatus.fromStored(cursor.getString(5)),
+                        total = total,
+                        paidAmount = paid,
+                        outstandingAmount = (total - paid).max(java.math.BigDecimal.ZERO),
+                        transactionCount = cursor.getInt(9),
+                        baseTotal = baseTotal,
+                        adjustmentAmount = adjustment,
                     )
-                }
+                )
             }
         }
     }
@@ -902,35 +912,164 @@ class DiagnosticStore(context: Context) :
         return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
     }
 
-    fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal {
-        val accounts = financialAccounts()
-        val bankBalance = accounts
-            .filter {
-                it.type == FinancialAccountType.BANK_ACCOUNT &&
-                    (it.openingBalanceDate == null || !it.openingBalanceDate.isAfter(throughDate))
-            }
-            .fold(java.math.BigDecimal.ZERO) { total, account ->
-                total + accountBalance(account, throughDate).projectedBalance
-            }
-        val invoiceAdjustment = accounts
-            .filter { it.type == FinancialAccountType.CREDIT_CARD }
-            .flatMap { creditCardInvoices(it.id) }
-            .fold(java.math.BigDecimal.ZERO) { total, invoice ->
-                val payments = invoicePayments(invoice).filter { !it.paidAt.isAfter(throughDate) }
-                val paidThroughDate = payments.fold(java.math.BigDecimal.ZERO) { sum, payment ->
-                    sum + payment.amount
+    fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal =
+        generalProjectedBalances(listOf(throughDate)).getValue(throughDate)
+
+    fun generalProjectedBalances(
+        throughDates: Collection<LocalDate>,
+    ): Map<LocalDate, java.math.BigDecimal> {
+        val dates = throughDates.distinct()
+        if (dates.isEmpty()) return emptyMap()
+
+        val data = loadGeneralProjectedBalanceData()
+        return dates.associateWith { throughDate ->
+            GeneralProjectedBalanceCalculator.calculate(
+                throughDate = throughDate,
+                accounts = data.accounts,
+                transactionsByAccount = data.transactionsByAccount,
+                movementsByAccount = data.movementsByAccount,
+                invoices = data.invoices,
+                paymentsByInvoice = data.paymentsByInvoice,
+            )
+        }
+    }
+
+    private data class GeneralProjectedBalanceData(
+        val accounts: List<FinancialAccountRecord>,
+        val transactionsByAccount: Map<Long, List<ProjectedBalanceTransaction>>,
+        val movementsByAccount: Map<Long, List<AccountMovementRecord>>,
+        val invoices: List<CreditCardInvoiceRecord>,
+        val paymentsByInvoice: Map<Long, List<InvoicePaymentRecord>>,
+    )
+
+    private fun loadGeneralProjectedBalanceData(): GeneralProjectedBalanceData {
+        val db = readableDatabase
+        return GeneralProjectedBalanceData(
+            accounts = financialAccounts(),
+            transactionsByAccount = projectedBalanceTransactionsByAccount(db),
+            movementsByAccount = projectedBalanceMovementsByAccount(db),
+            invoices = projectedBalanceInvoices(db),
+            paymentsByInvoice = projectedBalancePaymentsByInvoice(db),
+        )
+    }
+
+    private fun projectedBalanceTransactionsByAccount(
+        db: SQLiteDatabase,
+    ): Map<Long, List<ProjectedBalanceTransaction>> {
+        val transactionsByAccount = linkedMapOf<Long, MutableList<ProjectedBalanceTransaction>>()
+        db.rawQuery(
+            """SELECT transactions.account_id,transactions.direction,transactions.amount,
+                      transactions.occurred_at,transactions.status,transactions.due_date,
+                      transactions.planned_payment_date,transactions.paid_at
+               FROM transactions
+               INNER JOIN financial_accounts AS accounts
+                       ON accounts.id = transactions.account_id
+               WHERE accounts.type = ?""",
+            arrayOf(FinancialAccountType.BANK_ACCOUNT.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val occurredAt = runCatching {
+                    LocalDateTime.parse(cursor.getString(3)).toLocalDate()
+                }.getOrNull() ?: continue
+                val amount = cursor.getString(2).toBigDecimalOrNull() ?: continue
+                val direction = FinancialTransactionDirection.fromStored(cursor.getString(1))
+                    ?: continue
+                fun optionalDate(index: Int): LocalDate? = cursor.getString(index)?.let { value ->
+                    runCatching { LocalDate.parse(value) }.getOrNull()
                 }
-                val outstandingAtDate = (invoice.total - paidThroughDate)
-                    .max(java.math.BigDecimal.ZERO)
-                val dueOutstanding = if (
-                    invoice.dueDate != null && !invoice.dueDate.isAfter(throughDate)
-                ) outstandingAtDate else java.math.BigDecimal.ZERO
-                val paymentsWithoutAccount = payments
-                    .filter { it.sourceAccountId == null }
-                    .fold(java.math.BigDecimal.ZERO) { sum, payment -> sum + payment.amount }
-                total + dueOutstanding + paymentsWithoutAccount
+                transactionsByAccount.getOrPut(cursor.getLong(0)) { mutableListOf() }.add(
+                    ProjectedBalanceTransaction(
+                        direction = direction,
+                        amount = amount,
+                        occurredAt = occurredAt,
+                        status = TransactionStatus.fromStored(cursor.getString(4)),
+                        dueDate = optionalDate(5),
+                        plannedPaymentDate = optionalDate(6),
+                        paidAt = optionalDate(7),
+                    )
+                )
             }
-        return bankBalance - invoiceAdjustment
+        }
+        return transactionsByAccount
+    }
+
+    private fun projectedBalanceMovementsByAccount(
+        db: SQLiteDatabase,
+    ): Map<Long, List<AccountMovementRecord>> {
+        val movementsByAccount = linkedMapOf<Long, MutableList<AccountMovementRecord>>()
+        db.rawQuery(
+            """SELECT movements.account_id,movements.id,movements.direction,movements.type,
+                      movements.amount,movements.occurred_at,movements.description,related.name
+               FROM account_movements AS movements
+               INNER JOIN financial_accounts AS accounts
+                       ON accounts.id = movements.account_id
+               LEFT JOIN financial_accounts AS related
+                      ON related.id = movements.related_account_id
+               WHERE accounts.type = ?""",
+            arrayOf(FinancialAccountType.BANK_ACCOUNT.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                movementsByAccount.getOrPut(cursor.getLong(0)) { mutableListOf() }.add(
+                    AccountMovementRecord(
+                        id = cursor.getLong(1),
+                        direction = runCatching {
+                            AccountMovementDirection.valueOf(cursor.getString(2))
+                        }.getOrDefault(AccountMovementDirection.DEBIT),
+                        type = runCatching { AccountMovementType.valueOf(cursor.getString(3)) }
+                            .getOrDefault(AccountMovementType.CARD_PAYMENT),
+                        amount = cursor.getString(4).toBigDecimal(),
+                        occurredAt = LocalDate.parse(cursor.getString(5)),
+                        description = cursor.getString(6),
+                        relatedAccountName = cursor.getString(7),
+                    )
+                )
+            }
+        }
+        return movementsByAccount
+    }
+
+    private fun projectedBalanceInvoices(
+        db: SQLiteDatabase,
+    ): List<CreditCardInvoiceRecord> = queryCreditCardInvoices(
+        db = db,
+        whereClause = """invoices.account_id IN (
+            SELECT id FROM financial_accounts WHERE type = ?
+        )""",
+        selectionArgs = arrayOf(FinancialAccountType.CREDIT_CARD.name),
+    )
+
+    private fun projectedBalancePaymentsByInvoice(
+        db: SQLiteDatabase,
+    ): Map<Long, List<InvoicePaymentRecord>> {
+        val paymentsByInvoice = linkedMapOf<Long, MutableList<InvoicePaymentRecord>>()
+        db.rawQuery(
+            """SELECT invoices.id,payments.id,payments.amount,payments.paid_at,
+                      payments.source_account_id,sources.name
+               FROM credit_card_invoices AS invoices
+               INNER JOIN financial_accounts AS card_accounts
+                       ON card_accounts.id = invoices.account_id
+               INNER JOIN invoice_payments AS payments
+                       ON payments.account_id = invoices.account_id
+                      AND payments.closing_period = invoices.closing_period
+               LEFT JOIN financial_accounts AS sources
+                      ON sources.id = payments.source_account_id
+               WHERE card_accounts.type = ?
+               ORDER BY payments.paid_at DESC,payments.id DESC""",
+            arrayOf(FinancialAccountType.CREDIT_CARD.name),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                paymentsByInvoice.getOrPut(cursor.getLong(0)) { mutableListOf() }.add(
+                    InvoicePaymentRecord(
+                        id = cursor.getLong(1),
+                        amount = cursor.getString(2).toBigDecimal(),
+                        paidAt = LocalDate.parse(cursor.getString(3)),
+                        sourceAccountId = if (cursor.isNull(4)) null else cursor.getLong(4),
+                        sourceAccountName = cursor.getString(5),
+                    )
+                )
+            }
+        }
+        return paymentsByInvoice
     }
 
     fun recordTransfer(
