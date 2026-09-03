@@ -63,6 +63,44 @@ class MonthlyBudgetCalculatorTest {
         assertEquals(BigDecimal("80"), progress[1].pending)
     }
 
+    @Test
+    fun keepsCreditCardPurchasesInTheirOriginalBudgetCategories() {
+        val period = YearMonth.of(2026, 9)
+        val invoiceId = 42L
+        val transactions = listOf(
+            expense(
+                1, "300", TransactionStatus.REALIZED,
+                TransactionCategory.FOOD, "2026-09-10",
+            ).copy(
+                type = FinancialTransactionType.CARD_PURCHASE,
+                accountId = 7L,
+                invoiceId = invoiceId,
+            ),
+            expense(
+                2, "150", TransactionStatus.REALIZED,
+                TransactionCategory.TRANSPORT, "2026-09-10",
+            ).copy(
+                type = FinancialTransactionType.CARD_PURCHASE,
+                accountId = 7L,
+                invoiceId = invoiceId,
+            ),
+        )
+
+        val progress = MonthlyBudgetCalculator.calculate(
+            period,
+            listOf(
+                MonthlyBudgetRecord(period, null, BigDecimal("1000")),
+                MonthlyBudgetRecord(period, TransactionCategory.FOOD, BigDecimal("500")),
+                MonthlyBudgetRecord(period, TransactionCategory.TRANSPORT, BigDecimal("300")),
+            ),
+            transactions,
+        ).associateBy { it.category }
+
+        assertEquals(BigDecimal("450"), progress.getValue(null).realized)
+        assertEquals(BigDecimal("300"), progress.getValue(TransactionCategory.FOOD).realized)
+        assertEquals(BigDecimal("150"), progress.getValue(TransactionCategory.TRANSPORT).realized)
+    }
+
     private fun expense(
         id: Long,
         amount: String,

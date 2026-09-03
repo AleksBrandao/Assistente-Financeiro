@@ -4071,7 +4071,7 @@ class MainActivity : ComponentActivity() {
         var editingTotal by remember { mutableStateOf(false) }
         var message by remember { mutableStateOf<String?>(null) }
         val budgets = remember(selectedMonth, refresh) { store.monthlyBudgets(selectedMonth) }
-        val transactions = remember(refresh) { consolidatedTransactions(store) }
+        val transactions = remember(refresh) { granularTransactions(store) }
         val progress = remember(selectedMonth, budgets, transactions) {
             MonthlyBudgetCalculator.calculate(selectedMonth, budgets, transactions)
         }
@@ -4829,7 +4829,7 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
     ) {
         var selectedYear by remember { mutableIntStateOf(LocalDate.now().year) }
-        val transactions = remember(selectedYear) { consolidatedTransactions(store) }
+        val transactions = remember(selectedYear) { granularTransactions(store) }
         val rows = remember(selectedYear, transactions) {
             (1..12).map { month ->
                 val period = YearMonth.of(selectedYear, month)
@@ -4995,6 +4995,9 @@ class MainActivity : ComponentActivity() {
         return stored?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
             ?: runCatching { LocalDateTime.parse(transaction.occurredAt).toLocalDate() }.getOrNull()
     }
+
+    private fun granularTransactions(store: DiagnosticStore): List<FinancialTransactionRecord> =
+        store.recentTransactions(10_000)
 
     private fun consolidatedTransactions(store: DiagnosticStore): List<FinancialTransactionRecord> {
         val transactions = store.recentTransactions(10_000)
