@@ -1,8 +1,8 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceRecord
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
@@ -49,10 +49,10 @@ internal data class InvoiceDetailUiState(
 }
 
 internal class InvoiceDetailViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
     private val invoice: CreditCardInvoiceRecord,
 ) : ViewModel() {
-    private val bankAccounts = store.financialAccounts().filter {
+    private val bankAccounts = repository.financialAccounts().filter {
         it.type == FinancialAccountType.BANK_ACCOUNT
     }
     private val _uiState = MutableStateFlow(loadState())
@@ -93,7 +93,7 @@ internal class InvoiceDetailViewModel(
         seriesScope: TransactionSeriesScope,
     ): Boolean {
         val transaction = _uiState.value.editingTransaction ?: return false
-        return store.updateTransactionDetails(
+        return repository.updateTransactionDetails(
             transaction.id, description, category, customCategory, subcategory, status,
             amount, dueDate, plannedPaymentDate, paidAt, applyToFuture, seriesScope,
         ).also { saved ->
@@ -147,8 +147,8 @@ internal class InvoiceDetailViewModel(
     }
 
     private fun loadState(): InvoiceDetailUiState = InvoiceDetailUiState(
-        transactions = store.invoiceTransactions(invoice.id),
-        payments = store.invoicePayments(invoice),
+        transactions = repository.invoiceTransactions(invoice.id),
+        payments = repository.invoicePayments(invoice),
         bankAccounts = bankAccounts,
         referenceMonth = invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod,
         paymentAmount = invoice.outstandingAmount.toPlainString().replace('.', ','),
@@ -156,7 +156,7 @@ internal class InvoiceDetailViewModel(
         sourceAccountId = bankAccounts.singleOrNull()?.id,
         officialTotal = invoice.total.toPlainString().replace('.', ','),
         customCategories = FinancialTransactionDirection.entries.associateWith { direction ->
-            store.customCategories(direction)
+            repository.customCategories(direction)
         },
     )
 }

@@ -2,12 +2,11 @@ package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.TransactionStatus
 import br.com.assistentefinanceiro.ui.screens.LoadState
 import br.com.assistentefinanceiro.ui.screens.PlanningItem
-import br.com.assistentefinanceiro.ui.screens.consolidatedTransactions
 import br.com.assistentefinanceiro.ui.screens.transactionEffectiveDate
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -30,10 +29,10 @@ internal data class PlanningUiState(
 )
 
 internal class PlanningViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
     private val today = LocalDate.now()
-    private val allPending = consolidatedTransactions(store)
+    private val allPending = repository.consolidatedTransactions()
         .asSequence()
         .filter { it.status == TransactionStatus.PENDING }
         .mapNotNull { transaction ->
@@ -81,7 +80,7 @@ internal class PlanningViewModel(
             val result = try {
                 LoadState.Ready(
                     withContext(Dispatchers.IO) {
-                        store.generalProjectedBalance(today.plusDays(days.toLong()))
+                        repository.generalProjectedBalance(today.plusDays(days.toLong()))
                     },
                 )
             } catch (error: CancellationException) {

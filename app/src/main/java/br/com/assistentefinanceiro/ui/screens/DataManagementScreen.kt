@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,12 +72,12 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun DataManagementScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val screenViewModel: DataManagementViewModel = viewModel(
-        factory = ScreenViewModelFactory { DataManagementViewModel(context, store) },
+        factory = ScreenViewModelFactory { DataManagementViewModel(context, repository) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val deletedGroups = uiState.deletedGroups

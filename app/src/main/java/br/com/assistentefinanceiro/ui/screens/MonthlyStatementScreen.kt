@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,10 +72,10 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun MonthlyStatementScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
 ) {
     val screenViewModel: MonthlyStatementViewModel = viewModel(
-        factory = ScreenViewModelFactory { MonthlyStatementViewModel(store) },
+        factory = ScreenViewModelFactory { MonthlyStatementViewModel(repository) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val selectedMonth = uiState.selectedMonth
@@ -100,7 +101,7 @@ internal fun MonthlyStatementScreen(
 
     uiState.selectedInvoice?.let { selected ->
         InvoiceDetailScreen(
-            store = store,
+            repository = repository,
             account = selected.account,
             invoice = selected.invoice,
             onBack = { screenViewModel.selectInvoice(null) },

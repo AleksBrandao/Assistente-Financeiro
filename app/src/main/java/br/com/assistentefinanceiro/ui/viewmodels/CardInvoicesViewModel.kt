@@ -1,8 +1,8 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceRecord
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -19,7 +19,7 @@ internal data class CardInvoicesUiState(
 )
 
 internal class CardInvoicesViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
     private val account: FinancialAccountRecord,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(loadState(YearMonth.now()))
@@ -34,19 +34,19 @@ internal class CardInvoicesViewModel(
 
     fun recordPayment(amount: BigDecimal, paidAt: LocalDate, sourceAccountId: Long?): Boolean {
         val invoice = _uiState.value.selectedInvoice ?: return false
-        return store.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)
+        return repository.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)
             .also { saved -> if (saved) reloadSelected(invoice.id) }
     }
 
     fun deletePayment(paymentId: Long): Boolean {
         val invoice = _uiState.value.selectedInvoice ?: return false
-        return store.deleteInvoicePayment(invoice, paymentId)
+        return repository.deleteInvoicePayment(invoice, paymentId)
             .also { deleted -> if (deleted) reloadSelected(invoice.id) }
     }
 
     fun adjustInvoice(officialTotal: BigDecimal): Boolean {
         val invoice = _uiState.value.selectedInvoice ?: return false
-        return store.adjustInvoiceTotal(invoice, officialTotal).also { adjusted ->
+        return repository.adjustInvoiceTotal(invoice, officialTotal).also { adjusted ->
             if (adjusted) reload(selectedInvoiceId = null)
         }
     }
@@ -67,7 +67,7 @@ internal class CardInvoicesViewModel(
 
     private fun reload(selectedInvoiceId: Long?) {
         val period = _uiState.value.selectedMonth
-        val invoices = store.creditCardInvoices(account.id)
+        val invoices = repository.creditCardInvoices(account.id)
         _uiState.value = CardInvoicesUiState(
             selectedMonth = period,
             invoices = invoices,
@@ -77,7 +77,7 @@ internal class CardInvoicesViewModel(
     }
 
     private fun loadState(period: YearMonth): CardInvoicesUiState {
-        val invoices = store.creditCardInvoices(account.id)
+        val invoices = repository.creditCardInvoices(account.id)
         return CardInvoicesUiState(
             selectedMonth = period,
             invoices = invoices,

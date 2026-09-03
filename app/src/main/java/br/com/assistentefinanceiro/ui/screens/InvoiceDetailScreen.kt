@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,7 +72,7 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun InvoiceDetailScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
     account: FinancialAccountRecord,
     invoice: CreditCardInvoiceRecord,
     onBack: () -> Unit,
@@ -82,7 +83,7 @@ internal fun InvoiceDetailScreen(
 ) {
     val screenViewModel: InvoiceDetailViewModel = viewModel(
         key = "invoice-detail-${invoice.id}-${invoice.total}-${invoice.paidAmount}",
-        factory = ScreenViewModelFactory { InvoiceDetailViewModel(store, invoice) },
+        factory = ScreenViewModelFactory { InvoiceDetailViewModel(repository, invoice) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val transactions = uiState.transactions

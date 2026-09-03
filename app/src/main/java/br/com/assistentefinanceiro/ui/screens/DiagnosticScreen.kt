@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
@@ -72,14 +73,14 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun DiagnosticScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
     preferences: BankPackagePreferences,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val screenViewModel: DiagnosticViewModel = viewModel(
         factory = ScreenViewModelFactory {
-            DiagnosticViewModel(context, store, preferences)
+            DiagnosticViewModel(context, repository, preferences)
         },
     )
     val uiState by screenViewModel.uiState.collectAsState()

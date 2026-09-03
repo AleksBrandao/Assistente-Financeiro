@@ -5,10 +5,10 @@ import android.content.Intent
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.BackupPreview
 import br.com.assistentefinanceiro.notifications.BackupValidationResult
 import br.com.assistentefinanceiro.notifications.DeletedTransactionGroup
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -29,24 +29,24 @@ internal data class DataManagementUiState(
 
 internal class DataManagementViewModel(
     context: Context,
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
     private val applicationContext = context.applicationContext
     private val _uiState = MutableStateFlow(
-        DataManagementUiState(deletedGroups = store.deletedTransactionGroups()),
+        DataManagementUiState(deletedGroups = repository.deletedTransactionGroups()),
     )
     val uiState: StateFlow<DataManagementUiState> = _uiState.asStateFlow()
 
     fun createBackup(openOutputStream: () -> OutputStream?) = runFileOperation {
         openOutputStream()?.bufferedWriter()?.use { writer ->
-            writer.write(store.createBackupJson())
+            writer.write(repository.createBackupJson())
         } ?: error("arquivo indisponível")
         "Backup criado com sucesso."
     }
 
     fun exportCsv(openOutputStream: () -> OutputStream?) = runFileOperation {
         openOutputStream()?.bufferedWriter()?.use { writer ->
-            writer.write(store.exportTransactionsCsv())
+            writer.write(repository.exportTransactionsCsv())
         } ?: error("arquivo indisponível")
         "Planilha CSV exportada com sucesso."
     }
@@ -60,7 +60,7 @@ internal class DataManagementViewModel(
                 }
             }
             result.onSuccess { content ->
-                when (val validation = store.previewBackup(content)) {
+                when (val validation = repository.previewBackup(content)) {
                     is BackupValidationResult.Valid -> {
                         _uiState.value = _uiState.value.copy(
                             pendingBackup = content,
@@ -81,7 +81,7 @@ internal class DataManagementViewModel(
 
     fun prepareShareCsv(startActivity: (Intent) -> Unit) = runFileOperation {
         val file = File(applicationContext.cacheDir, "AssistenteFinanceiro-movimentacoes.csv")
-        file.writeText(store.exportTransactionsCsv())
+        file.writeText(repository.exportTransactionsCsv())
         val uri = FileProvider.getUriForFile(
             applicationContext,
             "${applicationContext.packageName}.files",
@@ -99,7 +99,7 @@ internal class DataManagementViewModel(
     }
 
     fun restoreDeletedGroup(groupId: String) {
-        val message = if (store.restoreDeletedTransactionGroup(groupId)) {
+        val message = if (repository.restoreDeletedTransactionGroup(groupId)) {
             "Movimentação restaurada."
         } else "Não foi possível restaurar a movimentação."
         reload(message)
@@ -117,7 +117,7 @@ internal class DataManagementViewModel(
         val content = _uiState.value.pendingBackup
         dismissRestore()
         if (content != null) {
-            val message = if (store.restoreBackup(content)) {
+            val message = if (repository.restoreBackup(content)) {
                 "Backup restaurado com sucesso."
             } else "A restauração falhou e os dados atuais foram preservados."
             reload(message)
@@ -126,7 +126,7 @@ internal class DataManagementViewModel(
 
     fun confirmPermanentDelete() {
         val group = _uiState.value.permanentDelete ?: return
-        val deleted = store.permanentlyDeleteTransactionGroup(group.groupId)
+        val deleted = repository.permanentlyDeleteTransactionGroup(group.groupId)
         reload(if (deleted) "Item removido definitivamente." else _uiState.value.message)
     }
 
@@ -141,7 +141,7 @@ internal class DataManagementViewModel(
     private fun reload(message: String? = _uiState.value.message) {
         _uiState.value = DataManagementUiState(
             message = message,
-            deletedGroups = store.deletedTransactionGroups(),
+            deletedGroups = repository.deletedTransactionGroups(),
         )
     }
 }

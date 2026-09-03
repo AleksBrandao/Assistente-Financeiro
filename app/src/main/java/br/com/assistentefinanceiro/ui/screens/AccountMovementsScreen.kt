@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.ui.screens
 
+import br.com.assistentefinanceiro.data.FinancialRepository
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -71,14 +72,14 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AccountMovementsScreen(
-    store: DiagnosticStore,
+    repository: FinancialRepository,
     account: FinancialAccountRecord,
     onBack: () -> Unit,
     onChanged: () -> Unit,
 ) {
     val screenViewModel: AccountMovementsViewModel = viewModel(
         key = "account-movements-${account.id}",
-        factory = ScreenViewModelFactory { AccountMovementsViewModel(store, account) },
+        factory = ScreenViewModelFactory { AccountMovementsViewModel(repository, account) },
     )
     val uiState by screenViewModel.uiState.collectAsState()
     val selectedMonth = uiState.selectedMonth

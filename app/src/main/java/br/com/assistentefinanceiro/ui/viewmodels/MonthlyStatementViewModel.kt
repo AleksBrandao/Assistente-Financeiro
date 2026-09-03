@@ -2,12 +2,12 @@ package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.importing.SimpleXlsxReader
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceStatus
 import br.com.assistentefinanceiro.notifications.DailyTransactionGroup
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
@@ -58,7 +58,7 @@ internal data class MonthlyStatementUiState(
 }
 
 internal class MonthlyStatementViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
     private var transactions: List<FinancialTransactionRecord> = emptyList()
     private var invoiceItems: List<StatementInvoiceItem> = emptyList()
@@ -121,7 +121,7 @@ internal class MonthlyStatementViewModel(
     fun confirmDelete() {
         val state = _uiState.value
         val transaction = state.deletingTransaction ?: return
-        if (store.deleteManualTransaction(transaction.id, state.deletingScope)) refresh()
+        if (repository.deleteManualTransaction(transaction.id, state.deletingScope)) refresh()
     }
 
     fun saveTransaction(
@@ -139,7 +139,7 @@ internal class MonthlyStatementViewModel(
     ) {
         val transaction = _uiState.value.editingTransaction ?: return
         if (
-            store.updateTransactionDetails(
+            repository.updateTransactionDetails(
                 transaction.id,
                 description,
                 category,
@@ -163,7 +163,7 @@ internal class MonthlyStatementViewModel(
                 withContext(Dispatchers.IO) {
                     openInputStream().use { input ->
                         requireNotNull(input) { "Não foi possível abrir o arquivo" }
-                        store.markExistingTransactions(
+                        repository.markExistingTransactions(
                             MobillsImportAnalyzer.analyze(
                                 rawRows = SimpleXlsxReader.readMobillsRows(input),
                             ),
@@ -196,7 +196,7 @@ internal class MonthlyStatementViewModel(
     fun confirmImport() {
         val state = _uiState.value
         val preview = state.importPreview ?: return
-        val result = store.importMobills(preview, state.includePossibleDuplicates)
+        val result = repository.importMobills(preview, state.includePossibleDuplicates)
         val message = "${result.imported} movimentações importadas" +
             if (result.alreadyImported > 0) {
                 " · ${result.alreadyImported} já existentes"
@@ -223,19 +223,19 @@ internal class MonthlyStatementViewModel(
         sourceAccountId: Long?,
     ): Boolean {
         val invoice = _uiState.value.selectedInvoice?.invoice ?: return false
-        return store.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)
+        return repository.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)
             .also { saved -> if (saved) refresh() }
     }
 
     fun deleteInvoicePayment(paymentId: Long): Boolean {
         val invoice = _uiState.value.selectedInvoice?.invoice ?: return false
-        return store.deleteInvoicePayment(invoice, paymentId)
+        return repository.deleteInvoicePayment(invoice, paymentId)
             .also { deleted -> if (deleted) refresh() }
     }
 
     fun adjustInvoiceTotal(officialTotal: BigDecimal): Boolean {
         val invoice = _uiState.value.selectedInvoice?.invoice ?: return false
-        return store.adjustInvoiceTotal(invoice, officialTotal)
+        return repository.adjustInvoiceTotal(invoice, officialTotal)
             .also { adjusted -> if (adjusted) refresh() }
     }
 
@@ -278,11 +278,11 @@ internal class MonthlyStatementViewModel(
     )
 
     private fun loadState(period: YearMonth): MonthlyStatementUiState {
-        transactions = store.recentTransactions(limit = 10_000)
-        val creditCardAccounts = store.financialAccounts()
+        transactions = repository.recentTransactions(limit = 10_000)
+        val creditCardAccounts = repository.financialAccounts()
             .filter { it.type == FinancialAccountType.CREDIT_CARD }
         val invoicesByAccount = creditCardAccounts.flatMap { account ->
-            store.creditCardInvoices(account.id).map { account to it }
+            repository.creditCardInvoices(account.id).map { account to it }
         }
         invoiceItems = invoicesByAccount.mapNotNull { (account, invoice) ->
             val dueDate = invoice.dueDate ?: return@mapNotNull null
@@ -328,7 +328,7 @@ internal class MonthlyStatementViewModel(
             invoiceItemByTransactionId = invoiceItems.associateBy { it.transaction.id },
             unconsolidatedCardTransactionCount = unconsolidatedCount,
             customCategories = FinancialTransactionDirection.entries.associateWith {
-                direction -> store.customCategories(direction)
+                direction -> repository.customCategories(direction)
             },
         )
     }
@@ -347,7 +347,7 @@ internal class MonthlyStatementViewModel(
             val result = try {
                 LoadState.Ready(
                     withContext(Dispatchers.IO) {
-                        store.generalProjectedBalance(period.atEndOfMonth())
+                        repository.generalProjectedBalance(period.atEndOfMonth())
                     },
                 )
             } catch (error: CancellationException) {

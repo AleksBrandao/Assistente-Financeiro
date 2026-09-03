@@ -1,11 +1,11 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.AccountBalanceSummary
 import br.com.assistentefinanceiro.notifications.AccountMovementDirection
 import br.com.assistentefinanceiro.notifications.AccountMovementRecord
 import br.com.assistentefinanceiro.notifications.AccountMovementType
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
@@ -35,7 +35,7 @@ internal data class AccountMovementsUiState(
 )
 
 internal class AccountMovementsViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
     private val account: FinancialAccountRecord,
 ) : ViewModel() {
     private var ledgerItems: List<AccountLedgerItem> = emptyList()
@@ -76,7 +76,7 @@ internal class AccountMovementsViewModel(
         description: String,
         status: TransactionStatus,
         occurrences: Int,
-    ): Boolean = store.recordManualTransaction(
+    ): Boolean = repository.recordManualTransaction(
         account.id, direction, amount, date, description, status, occurrences,
     ).also { saved -> if (saved) reload() }
 
@@ -94,7 +94,7 @@ internal class AccountMovementsViewModel(
         seriesScope: TransactionSeriesScope,
     ): Boolean {
         val transaction = _uiState.value.editingTransaction ?: return false
-        return store.updateTransactionDetails(
+        return repository.updateTransactionDetails(
             transaction.id, description, category, customCategory, subcategory, status,
             amount, dueDate, plannedPaymentDate, paidAt, applyToFuture, seriesScope,
         ).also { saved -> if (saved) reload() }
@@ -103,13 +103,13 @@ internal class AccountMovementsViewModel(
     fun confirmDeleteTransaction(): Boolean {
         val state = _uiState.value
         val transaction = state.deletingTransaction ?: return false
-        return store.deleteManualTransaction(transaction.id, state.deletingSeriesScope)
+        return repository.deleteManualTransaction(transaction.id, state.deletingSeriesScope)
             .also { deleted -> if (deleted) reload() }
     }
 
     fun confirmDeleteTransfer(): Boolean {
         val movement = _uiState.value.deletingTransfer ?: return false
-        return store.deleteTransfer(movement.id).also { deleted -> if (deleted) reload() }
+        return repository.deleteTransfer(movement.id).also { deleted -> if (deleted) reload() }
     }
 
     private fun selectMonth(period: YearMonth) {
@@ -124,8 +124,8 @@ internal class AccountMovementsViewModel(
     }
 
     private fun loadState(period: YearMonth): AccountMovementsUiState {
-        val movements = store.accountMovements(account.id)
-        val transactions = store.recentTransactions(10_000).filter { it.accountId == account.id }
+        val movements = repository.accountMovements(account.id)
+        val transactions = repository.recentTransactions(10_000).filter { it.accountId == account.id }
         val transactionItems = transactions.mapNotNull { transaction ->
             val occurredAt = runCatching { LocalDateTime.parse(transaction.occurredAt) }
                 .getOrNull() ?: return@mapNotNull null
@@ -166,10 +166,10 @@ internal class AccountMovementsViewModel(
         )
         return AccountMovementsUiState(
             selectedMonth = period,
-            balance = store.accountBalance(account),
+            balance = repository.accountBalance(account),
             visibleLedgerItems = visibleItems(period),
             customCategories = FinancialTransactionDirection.entries.associateWith { direction ->
-                store.customCategories(direction)
+                repository.customCategories(direction)
             },
         )
     }

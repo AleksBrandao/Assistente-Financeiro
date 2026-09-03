@@ -1,7 +1,7 @@
 package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.TransactionCategory
@@ -25,9 +25,9 @@ internal data class TransactionSearchUiState(
 )
 
 internal class TransactionSearchViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
-    private var transactions = store.recentTransactions(10_000)
+    private var transactions = repository.recentTransactions(10_000)
     private val _uiState = MutableStateFlow(filteredState(TransactionSearchUiState()))
     val uiState: StateFlow<TransactionSearchUiState> = _uiState.asStateFlow()
 
@@ -61,12 +61,12 @@ internal class TransactionSearchViewModel(
     ) {
         val transaction = _uiState.value.editingTransaction ?: return
         if (
-            store.updateTransactionDetails(
+            repository.updateTransactionDetails(
                 transaction.id, description, category, customCategory, subcategory, status,
                 amount, dueDate, plannedPaymentDate, paidAt, applyToFuture, seriesScope,
             )
         ) {
-            transactions = store.recentTransactions(10_000)
+            transactions = repository.recentTransactions(10_000)
             _uiState.value = filteredState(_uiState.value.copy(editingTransaction = null))
         }
     }
@@ -91,7 +91,7 @@ internal class TransactionSearchViewModel(
                     (to == null || (date != null && !date.isAfter(to)))
             }.sortedByDescending { transactionEffectiveDate(it) },
             customCategories = FinancialTransactionDirection.entries.associateWith { direction ->
-                store.customCategories(direction)
+                repository.customCategories(direction)
             },
         )
     }

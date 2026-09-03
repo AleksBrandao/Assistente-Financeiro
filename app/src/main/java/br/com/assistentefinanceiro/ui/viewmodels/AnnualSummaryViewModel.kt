@@ -2,7 +2,7 @@ package br.com.assistentefinanceiro.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import br.com.assistentefinanceiro.notifications.DiagnosticStore
+import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.MonthlyStatement
 import br.com.assistentefinanceiro.notifications.MonthlyStatementCalculator
 import br.com.assistentefinanceiro.ui.screens.LoadState
@@ -25,7 +25,7 @@ internal data class AnnualSummaryUiState(
 )
 
 internal class AnnualSummaryViewModel(
-    private val store: DiagnosticStore,
+    private val repository: FinancialRepository,
 ) : ViewModel() {
     private var balanceJob: Job? = null
 
@@ -46,7 +46,7 @@ internal class AnnualSummaryViewModel(
     }
 
     private fun buildState(year: Int): AnnualSummaryUiState {
-        val transactions = store.recentTransactions(10_000)
+        val transactions = repository.granularTransactions()
         val periods = periodsFor(year)
         return AnnualSummaryUiState(
             selectedYear = year,
@@ -65,7 +65,7 @@ internal class AnnualSummaryViewModel(
             val result = try {
                 LoadState.Ready(
                     withContext(Dispatchers.IO) {
-                        store.generalProjectedBalances(periods.map { it.atEndOfMonth() })
+                        repository.generalProjectedBalances(periods.map { it.atEndOfMonth() })
                     },
                 )
             } catch (error: CancellationException) {
