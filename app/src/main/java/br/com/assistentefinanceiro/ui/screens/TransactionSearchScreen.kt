@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
+import br.com.assistentefinanceiro.ui.viewmodels.TransactionSearchViewModel
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -71,27 +74,10 @@ internal fun TransactionSearchScreen(
     store: DiagnosticStore,
     onBack: () -> Unit,
 ) {
-    var refresh by remember { mutableIntStateOf(0) }
-    var query by remember { mutableStateOf("") }
-    var fromDate by remember { mutableStateOf("") }
-    var toDate by remember { mutableStateOf("") }
-    var statusFilter by remember { mutableStateOf<TransactionStatus?>(null) }
-    var editing by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
-    val results = remember(refresh, query, fromDate, toDate, statusFilter) {
-        val from = fromDate.takeIf(String::isNotBlank)?.let {
-            runCatching { LocalDate.parse(it) }.getOrNull()
-        }
-        val to = toDate.takeIf(String::isNotBlank)?.let {
-            runCatching { LocalDate.parse(it) }.getOrNull()
-        }
-        store.recentTransactions(10_000).filter { transaction ->
-            val date = transactionEffectiveDate(transaction)
-            transaction.description.contains(query.trim(), ignoreCase = true) &&
-                (statusFilter == null || transaction.status == statusFilter) &&
-                (from == null || (date != null && !date.isBefore(from))) &&
-                (to == null || (date != null && !date.isAfter(to)))
-        }.sortedByDescending { transactionEffectiveDate(it) }
-    }
+    val screenViewModel: TransactionSearchViewModel = viewModel(
+        factory = ScreenViewModelFactory { TransactionSearchViewModel(store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -121,8 +107,8 @@ internal fun TransactionSearchScreen(
         ) {
             item {
                 OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
+                    value = uiState.query,
+                    onValueChange = screenViewModel::setQuery,
                     label = { Text("Nome ou descrição") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
@@ -135,14 +121,14 @@ internal fun TransactionSearchScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                     Box(Modifier.weight(1f)) {
                         DatePickerField(
-                            fromDate, "De", allowClear = true,
-                            onValueChange = { fromDate = it },
+                            uiState.fromDate, "De", allowClear = true,
+                            onValueChange = screenViewModel::setFromDate,
                         )
                     }
                     Box(Modifier.weight(1f)) {
                         DatePickerField(
-                            toDate, "Até", allowClear = true,
-                            onValueChange = { toDate = it },
+                            uiState.toDate, "Até", allowClear = true,
+                            onValueChange = screenViewModel::setToDate,
                         )
                     }
                 }
@@ -153,14 +139,16 @@ internal fun TransactionSearchScreen(
                     horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                 ) {
                     FilterChip(
-                        selected = statusFilter == null,
-                        onClick = { statusFilter = null },
+                        selected = uiState.statusFilter == null,
+                        onClick = { screenViewModel.setStatusFilter(null) },
                         label = { Text("Todas") },
                         modifier = Modifier.weight(1f),
                     )
                     FilterChip(
-                        selected = statusFilter == TransactionStatus.REALIZED,
-                        onClick = { statusFilter = TransactionStatus.REALIZED },
+                        selected = uiState.statusFilter == TransactionStatus.REALIZED,
+                        onClick = {
+                            screenViewModel.setStatusFilter(TransactionStatus.REALIZED)
+                        },
                         label = { Text("Pagas") },
                         leadingIcon = {
                             Icon(
@@ -172,8 +160,10 @@ internal fun TransactionSearchScreen(
                         modifier = Modifier.weight(1f),
                     )
                     FilterChip(
-                        selected = statusFilter == TransactionStatus.PENDING,
-                        onClick = { statusFilter = TransactionStatus.PENDING },
+                        selected = uiState.statusFilter == TransactionStatus.PENDING,
+                        onClick = {
+                            screenViewModel.setStatusFilter(TransactionStatus.PENDING)
+                        },
                         label = { Text("Não pagas") },
                         leadingIcon = {
                             Icon(
@@ -188,48 +178,42 @@ internal fun TransactionSearchScreen(
             }
             item {
                 Text(
-                    if (results.size == 1) "1 resultado" else "${results.size} resultados",
+                    if (uiState.results.size == 1) {
+                        "1 resultado"
+                    } else "${uiState.results.size} resultados",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (results.isEmpty()) {
+            if (uiState.results.isEmpty()) {
                 item {
                     FinanceEmptyState(
                         icon = Icons.Rounded.SearchOff,
                         title = "Nenhuma movimentação encontrada",
                         description = "Revise o texto, as datas ou a situação selecionada.",
                         actionLabel = "Limpar busca",
-                        onAction = {
-                            query = ""
-                            fromDate = ""
-                            toDate = ""
-                            statusFilter = null
-                        },
+                        onAction = screenViewModel::clearSearch,
                     )
                 }
             }
-            items(results, key = { "search-${it.id}" }) { transaction ->
+            items(uiState.results, key = { "search-${it.id}" }) { transaction ->
                 TransactionCard(
                     transaction = transaction,
-                    onClick = { editing = transaction },
+                    onClick = { screenViewModel.editTransaction(transaction) },
                 )
             }
         }
     }
-    editing?.let { transaction ->
+    uiState.editingTransaction?.let { transaction ->
         EditTransactionDialog(
-            store = store,
             transaction = transaction,
-            onDismiss = { editing = null },
+            customCategories = uiState.customCategories[transaction.direction].orEmpty(),
+            onDismiss = { screenViewModel.editTransaction(null) },
             onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, apply, scope ->
-                if (store.updateTransactionDetails(
-                        transaction.id, description, category, customCategory, subcategory, status,
-                        amount, dueDate, plannedDate, paidAt, apply, scope,
-                    )) {
-                    editing = null
-                    refresh++
-                }
+                screenViewModel.saveTransaction(
+                    description, category, customCategory, subcategory, status, amount,
+                    dueDate, plannedDate, paidAt, apply, scope,
+                )
             },
         )
     }

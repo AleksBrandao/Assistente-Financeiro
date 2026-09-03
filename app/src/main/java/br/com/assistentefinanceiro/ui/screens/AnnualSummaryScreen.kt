@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.AnnualSummaryViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -71,32 +74,13 @@ internal fun AnnualSummaryScreen(
     store: DiagnosticStore,
     onBack: () -> Unit,
 ) {
-    var selectedYear by remember { mutableIntStateOf(LocalDate.now().year) }
-    val transactions = remember(selectedYear) { granularTransactions(store) }
-    val periods = remember(selectedYear) {
-        (1..12).map { month -> YearMonth.of(selectedYear, month) }
-    }
-    val rows = remember(selectedYear, transactions) {
-        periods.map { period ->
-            period to MonthlyStatementCalculator.calculate(period, transactions)
-        }
-    }
-    var projectedBalances by remember(selectedYear) {
-        mutableStateOf<LoadState<Map<LocalDate, java.math.BigDecimal>>>(LoadState.Loading)
-    }
-    LaunchedEffect(selectedYear) {
-        projectedBalances = try {
-            LoadState.Ready(
-                withContext(Dispatchers.IO) {
-                    store.generalProjectedBalances(periods.map { it.atEndOfMonth() })
-                }
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            LoadState.Failed
-        }
-    }
+    val screenViewModel: AnnualSummaryViewModel = viewModel(
+        factory = ScreenViewModelFactory { AnnualSummaryViewModel(store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val selectedYear = uiState.selectedYear
+    val rows = uiState.rows
+    val projectedBalances = uiState.projectedBalances
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -137,7 +121,7 @@ internal fun AnnualSummaryScreen(
                             .padding(FinanceSpacing.xxs),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { selectedYear-- }) {
+                        IconButton(onClick = screenViewModel::showPreviousYear) {
                             Icon(
                                 Icons.Rounded.ChevronLeft,
                                 contentDescription = "Ano anterior",
@@ -148,7 +132,7 @@ internal fun AnnualSummaryScreen(
                             textAlign = TextAlign.Center,
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        IconButton(onClick = { selectedYear++ }) {
+                        IconButton(onClick = screenViewModel::showNextYear) {
                             Icon(
                                 Icons.Rounded.ChevronRight,
                                 contentDescription = "Próximo ano",

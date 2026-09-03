@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,7 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.MoreViewModel
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -74,11 +76,13 @@ internal fun MoreScreen(
     onDiagnostic: () -> Unit,
     onAbout: () -> Unit,
 ) {
+    val screenViewModel: MoreViewModel = viewModel()
+    val uiState by screenViewModel.uiState.collectAsState()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Mais") },
+                title = { Text(uiState.title) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),

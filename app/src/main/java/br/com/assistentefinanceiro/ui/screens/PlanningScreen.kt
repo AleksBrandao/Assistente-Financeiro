@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.PlanningViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -70,45 +73,16 @@ import kotlinx.coroutines.withContext
 internal fun PlanningScreen(
     store: DiagnosticStore,
 ) {
-    var horizonDays by remember { mutableIntStateOf(30) }
-    val today = remember { LocalDate.now() }
-    val allPending = remember {
-        consolidatedTransactions(store)
-            .asSequence()
-            .filter { it.status == TransactionStatus.PENDING }
-            .mapNotNull { transaction ->
-                transactionEffectiveDate(transaction)?.let { PlanningItem(transaction, it) }
-            }
-            .filter { !it.date.isBefore(today) && !it.date.isAfter(today.plusDays(90)) }
-            .sortedBy { it.date }
-            .toList()
-    }
-    val visible = remember(allPending, horizonDays) {
-        allPending.filter { !it.date.isAfter(today.plusDays(horizonDays.toLong())) }
-    }
-    val income = visible.filter {
-        it.transaction.direction == FinancialTransactionDirection.INCOME
-    }.sumOf { it.transaction.amount.toBigDecimal() }
-    val expense = visible.filter {
-        it.transaction.direction == FinancialTransactionDirection.EXPENSE
-    }.sumOf { it.transaction.amount.toBigDecimal() }
-    val net = income - expense
-    var projectedBalance by remember(horizonDays) {
-        mutableStateOf<LoadState<java.math.BigDecimal>>(LoadState.Loading)
-    }
-    LaunchedEffect(today, horizonDays) {
-        projectedBalance = try {
-            LoadState.Ready(
-                withContext(Dispatchers.IO) {
-                    store.generalProjectedBalance(today.plusDays(horizonDays.toLong()))
-                }
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            LoadState.Failed
-        }
-    }
+    val screenViewModel: PlanningViewModel = viewModel(
+        factory = ScreenViewModelFactory { PlanningViewModel(store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val horizonDays = uiState.horizonDays
+    val visible = uiState.visibleItems
+    val income = uiState.income
+    val expense = uiState.expense
+    val net = uiState.net
+    val projectedBalance = uiState.projectedBalance
     val semantic = MaterialTheme.financeColors
 
     Scaffold(
@@ -138,7 +112,7 @@ internal fun PlanningScreen(
                     listOf(30, 60, 90).forEach { days ->
                         FilterChip(
                             selected = horizonDays == days,
-                            onClick = { horizonDays = days },
+                            onClick = { screenViewModel.setHorizonDays(days) },
                             label = { Text("$days dias") },
                             modifier = Modifier.weight(1f),
                         )

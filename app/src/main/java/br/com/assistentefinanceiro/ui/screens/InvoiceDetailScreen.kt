@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.InvoiceDetailViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -77,31 +80,15 @@ internal fun InvoiceDetailScreen(
     onInvoiceAdjustment: (java.math.BigDecimal) -> Boolean,
     onTransactionChanged: () -> Unit,
 ) {
-    val transactions = remember(invoice.id) { store.invoiceTransactions(invoice.id) }
-    val payments = remember(invoice.id, invoice.paidAmount) { store.invoicePayments(invoice) }
-    val bankAccounts = remember { store.financialAccounts().filter {
-        it.type == FinancialAccountType.BANK_ACCOUNT
-    } }
-    val referenceMonth = invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod
-    var addingPayment by remember(invoice.id) { mutableStateOf(false) }
-    var paymentAmount by remember(invoice.id, invoice.outstandingAmount) {
-        mutableStateOf(invoice.outstandingAmount.toPlainString().replace('.', ','))
-    }
-    var paymentDate by remember(invoice.id) { mutableStateOf(LocalDate.now().toString()) }
-    var sourceAccountId by remember(invoice.id) {
-        mutableStateOf(bankAccounts.singleOrNull()?.id)
-    }
-    var sourceAccountMenuExpanded by remember { mutableStateOf(false) }
-    var deletingPayment by remember(invoice.id) {
-        mutableStateOf<InvoicePaymentRecord?>(null)
-    }
-    var adjustingInvoice by remember(invoice.id) { mutableStateOf(false) }
-    var editingInvoiceTransaction by remember(invoice.id) {
-        mutableStateOf<FinancialTransactionRecord?>(null)
-    }
-    var officialTotal by remember(invoice.id, invoice.total) {
-        mutableStateOf(invoice.total.toPlainString().replace('.', ','))
-    }
+    val screenViewModel: InvoiceDetailViewModel = viewModel(
+        key = "invoice-detail-${invoice.id}-${invoice.total}-${invoice.paidAmount}",
+        factory = ScreenViewModelFactory { InvoiceDetailViewModel(store, invoice) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val transactions = uiState.transactions
+    val payments = uiState.payments
+    val bankAccounts = uiState.bankAccounts
+    val referenceMonth = uiState.referenceMonth
     val semantic = MaterialTheme.financeColors
     val overdue = invoice.status == CreditCardInvoiceStatus.OVERDUE
     val paid = invoice.status == CreditCardInvoiceStatus.PAID
@@ -238,7 +225,7 @@ internal fun InvoiceDetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
                             OutlinedButton(
-                                onClick = { adjustingInvoice = true },
+                                onClick = { screenViewModel.setAdjustingInvoice(true) },
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Icon(
@@ -250,7 +237,7 @@ internal fun InvoiceDetailScreen(
                                 Text("Ajustar")
                             }
                             Button(
-                                onClick = { addingPayment = true },
+                                onClick = { screenViewModel.setAddingPayment(true) },
                                 enabled = invoice.outstandingAmount.signum() > 0,
                                 modifier = Modifier.weight(1f),
                             ) {
@@ -313,7 +300,9 @@ internal fun InvoiceDetailScreen(
                                     )
                                 }
                             }
-                            IconButton(onClick = { deletingPayment = payment }) {
+                            IconButton(
+                                onClick = { screenViewModel.requestDeletePayment(payment) },
+                            ) {
                                 Icon(
                                     Icons.Rounded.DeleteOutline,
                                     contentDescription = "Excluir pagamento",
@@ -343,7 +332,7 @@ internal fun InvoiceDetailScreen(
                     }
                 TransactionCard(
                     transaction = transaction,
-                    onClick = { editingInvoiceTransaction = transaction },
+                    onClick = { screenViewModel.editTransaction(transaction) },
                     footerText = listOfNotNull(
                         dateLabel,
                         if (transaction.origin == TransactionOrigin.MOBILLS) {
@@ -355,23 +344,17 @@ internal fun InvoiceDetailScreen(
         }
     }
 
-    if (adjustingInvoice) {
-        val officialValue = if (',' in officialTotal) {
-            officialTotal.replace(".", "").replace(',', '.').toBigDecimalOrNull()
-        } else officialTotal.toBigDecimalOrNull()
+    if (uiState.adjustingInvoice) {
+        val officialValue = uiState.officialValue
         AlertDialog(
-            onDismissRequest = { adjustingInvoice = false },
+            onDismissRequest = { screenViewModel.setAdjustingInvoice(false) },
             title = { Text("Ajustar valor da fatura") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     Text("Compras: ${formatCurrency(invoice.baseTotal.toPlainString())}")
                     OutlinedTextField(
-                        value = officialTotal,
-                        onValueChange = { value ->
-                            officialTotal = value.filter {
-                                it.isDigit() || it == ',' || it == '.'
-                            }
-                        },
+                        value = uiState.officialTotal,
+                        onValueChange = screenViewModel::setOfficialTotal,
                         label = { Text("Total oficial da fatura") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
@@ -393,44 +376,36 @@ internal fun InvoiceDetailScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (onInvoiceAdjustment(checkNotNull(officialValue))) {
-                            adjustingInvoice = false
-                        }
+                        screenViewModel.submitAdjustment(onInvoiceAdjustment)
                     },
                     enabled = officialValue?.signum()?.let { it >= 0 } == true,
                 ) { Text("Salvar ajuste") }
             },
             dismissButton = {
-                TextButton(onClick = { adjustingInvoice = false }) { Text("Cancelar") }
-            },
-        )
-    }
-    editingInvoiceTransaction?.let { transaction ->
-        EditTransactionDialog(
-            store = store,
-            transaction = transaction,
-            onDismiss = { editingInvoiceTransaction = null },
-            onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
-                if (store.updateTransactionDetails(
-                        transaction.id, description, category, customCategory, subcategory, status,
-                        amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
-                    )) {
-                    editingInvoiceTransaction = null
-                    onTransactionChanged()
+                TextButton(onClick = { screenViewModel.setAdjustingInvoice(false) }) {
+                    Text("Cancelar")
                 }
             },
         )
     }
-    if (addingPayment) {
-        val normalizedPaymentAmount = if (',' in paymentAmount) {
-            paymentAmount.replace(".", "").replace(',', '.')
-        } else {
-            paymentAmount
-        }
-        val parsedAmount = normalizedPaymentAmount.toBigDecimalOrNull()
-        val parsedDate = runCatching { LocalDate.parse(paymentDate) }.getOrNull()
+    uiState.editingTransaction?.let { transaction ->
+        EditTransactionDialog(
+            transaction = transaction,
+            customCategories = uiState.customCategories[transaction.direction].orEmpty(),
+            onDismiss = { screenViewModel.editTransaction(null) },
+            onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                if (screenViewModel.saveTransaction(
+                        description, category, customCategory, subcategory, status, amount,
+                        dueDate, plannedDate, paidAt, applyToFuture, scope,
+                    )) onTransactionChanged()
+            },
+        )
+    }
+    if (uiState.addingPayment) {
+        val parsedAmount = uiState.parsedPaymentAmount
+        val parsedDate = uiState.parsedPaymentDate
         AlertDialog(
-            onDismissRequest = { addingPayment = false },
+            onDismissRequest = { screenViewModel.setAddingPayment(false) },
             title = { Text("Registrar pagamento") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
@@ -439,10 +414,8 @@ internal fun InvoiceDetailScreen(
                             formatCurrency(invoice.outstandingAmount.toPlainString())
                     )
                     OutlinedTextField(
-                        value = paymentAmount,
-                        onValueChange = { value ->
-                            paymentAmount = value.filter { it.isDigit() || it in ",." }.take(16)
-                        },
+                        value = uiState.paymentAmount,
+                        onValueChange = screenViewModel::setPaymentAmount,
                         label = { Text("Valor pago") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
@@ -450,24 +423,29 @@ internal fun InvoiceDetailScreen(
                     if (bankAccounts.isNotEmpty()) {
                         Box {
                             OutlinedButton(
-                                onClick = { sourceAccountMenuExpanded = true },
+                                onClick = {
+                                    screenViewModel.setSourceAccountMenuExpanded(true)
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(
-                                    bankAccounts.firstOrNull { it.id == sourceAccountId }?.name
+                                    bankAccounts.firstOrNull {
+                                        it.id == uiState.sourceAccountId
+                                    }?.name
                                         ?: "Selecionar conta de pagamento"
                                 )
                             }
                             DropdownMenu(
-                                expanded = sourceAccountMenuExpanded,
-                                onDismissRequest = { sourceAccountMenuExpanded = false },
+                                expanded = uiState.sourceAccountMenuExpanded,
+                                onDismissRequest = {
+                                    screenViewModel.setSourceAccountMenuExpanded(false)
+                                },
                             ) {
                                 bankAccounts.forEach { bankAccount ->
                                     DropdownMenuItem(
                                         text = { Text(bankAccount.name) },
                                         onClick = {
-                                            sourceAccountId = bankAccount.id
-                                            sourceAccountMenuExpanded = false
+                                            screenViewModel.selectSourceAccount(bankAccount.id)
                                         },
                                     )
                                 }
@@ -475,38 +453,32 @@ internal fun InvoiceDetailScreen(
                         }
                     }
                     DatePickerField(
-                        paymentDate,
+                        uiState.paymentDate,
                         "Data do pagamento",
-                        onValueChange = { paymentDate = it },
+                        onValueChange = screenViewModel::setPaymentDate,
                     )
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (
-                            onPayment(
-                                checkNotNull(parsedAmount),
-                                checkNotNull(parsedDate),
-                                sourceAccountId,
-                            )
-                        ) {
-                            addingPayment = false
-                        }
+                        screenViewModel.submitPayment(onPayment)
                     },
                     enabled = parsedAmount != null && parsedAmount.signum() > 0 &&
                         parsedAmount <= invoice.outstandingAmount && parsedDate != null &&
-                        (bankAccounts.isEmpty() || sourceAccountId != null),
+                        (bankAccounts.isEmpty() || uiState.sourceAccountId != null),
                 ) { Text("Confirmar") }
             },
             dismissButton = {
-                TextButton(onClick = { addingPayment = false }) { Text("Cancelar") }
+                TextButton(onClick = { screenViewModel.setAddingPayment(false) }) {
+                    Text("Cancelar")
+                }
             },
         )
     }
-    deletingPayment?.let { payment ->
+    uiState.deletingPayment?.let { payment ->
         AlertDialog(
-            onDismissRequest = { deletingPayment = null },
+            onDismissRequest = { screenViewModel.requestDeletePayment(null) },
             title = { Text("Excluir pagamento?") },
             text = {
                 Text(
@@ -516,11 +488,13 @@ internal fun InvoiceDetailScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (onDeletePayment(payment.id)) deletingPayment = null
+                    screenViewModel.confirmDeletePayment(onDeletePayment)
                 }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { deletingPayment = null }) { Text("Cancelar") }
+                TextButton(onClick = { screenViewModel.requestDeletePayment(null) }) {
+                    Text("Cancelar")
+                }
             },
         )
     }

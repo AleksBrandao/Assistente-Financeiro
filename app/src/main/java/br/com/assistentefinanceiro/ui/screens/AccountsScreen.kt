@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.AccountsViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -70,38 +73,27 @@ import kotlinx.coroutines.withContext
 internal fun AccountsScreen(
     store: DiagnosticStore,
 ) {
-    var refresh by remember { mutableIntStateOf(0) }
-    val accounts = remember(refresh) { store.financialAccounts() }
-    val bankBalances = remember(accounts, refresh) {
-        accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
-            .associateWith(store::accountBalance)
-    }
-    var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
-    var creatingAccount by remember { mutableStateOf(false) }
-    var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
-    var viewingMovementsFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
-    var creatingTransfer by remember { mutableStateOf(false) }
+    val screenViewModel: AccountsViewModel = viewModel(
+        factory = ScreenViewModelFactory { AccountsViewModel(store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val accounts = uiState.accounts
+    val bankBalances = uiState.bankBalances
 
-    viewingInvoicesFor?.let { account ->
+    uiState.viewingInvoicesFor?.let { account ->
         CardInvoicesScreen(
             store = store,
             account = account,
-            onBack = {
-                viewingInvoicesFor = null
-                refresh++
-            },
+            onBack = screenViewModel::closeChildAndRefresh,
         )
         return
     }
-    viewingMovementsFor?.let { account ->
+    uiState.viewingMovementsFor?.let { account ->
         AccountMovementsScreen(
             store = store,
             account = account,
-            onBack = {
-                viewingMovementsFor = null
-                refresh++
-            },
-            onChanged = { refresh++ },
+            onBack = screenViewModel::closeChildAndRefresh,
+            onChanged = screenViewModel::refresh,
         )
         return
     }
@@ -179,7 +171,7 @@ internal fun AccountsScreen(
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                     Button(
-                        onClick = { creatingAccount = true },
+                        onClick = { screenViewModel.setCreatingAccount(true) },
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(
@@ -191,7 +183,7 @@ internal fun AccountsScreen(
                         Text("Adicionar")
                     }
                     OutlinedButton(
-                        onClick = { creatingTransfer = true },
+                        onClick = { screenViewModel.setCreatingTransfer(true) },
                         enabled = accounts.count {
                             it.type == FinancialAccountType.BANK_ACCOUNT
                         } >= 2,
@@ -214,7 +206,7 @@ internal fun AccountsScreen(
                         title = "Nenhuma conta cadastrada",
                         description = "Adicione uma conta bancária ou cartão para começar.",
                         actionLabel = "Adicionar conta",
-                        onAction = { creatingAccount = true },
+                        onAction = { screenViewModel.setCreatingAccount(true) },
                     )
                 }
             }
@@ -293,7 +285,7 @@ internal fun AccountsScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End,
                         ) {
-                            TextButton(onClick = { editingAccount = account }) {
+                            TextButton(onClick = { screenViewModel.editAccount(account) }) {
                                 Icon(
                                     Icons.Rounded.Edit,
                                     contentDescription = null,
@@ -303,7 +295,7 @@ internal fun AccountsScreen(
                                 Text("Editar")
                             }
                             if (account.type == FinancialAccountType.CREDIT_CARD) {
-                                TextButton(onClick = { viewingInvoicesFor = account }) {
+                                TextButton(onClick = { screenViewModel.viewInvoices(account) }) {
                                     Icon(
                                         Icons.Rounded.ReceiptLong,
                                         contentDescription = null,
@@ -313,7 +305,7 @@ internal fun AccountsScreen(
                                     Text("Faturas")
                                 }
                             } else {
-                                TextButton(onClick = { viewingMovementsFor = account }) {
+                                TextButton(onClick = { screenViewModel.viewMovements(account) }) {
                                     Icon(
                                         Icons.Rounded.ListAlt,
                                         contentDescription = null,
@@ -330,7 +322,7 @@ internal fun AccountsScreen(
         }
     }
 
-    val dialogAccount = editingAccount ?: if (creatingAccount) {
+    val dialogAccount = uiState.editingAccount ?: if (uiState.creatingAccount) {
         FinancialAccountRecord(
             id = 0,
             name = "",
@@ -340,42 +332,26 @@ internal fun AccountsScreen(
     dialogAccount?.let { account ->
         EditAccountDialog(
             account = account,
-            isNew = creatingAccount,
+            isNew = uiState.creatingAccount,
             onDismiss = {
-                editingAccount = null
-                creatingAccount = false
+                screenViewModel.editAccount(null)
+                screenViewModel.setCreatingAccount(false)
             },
             onSave = { name, type, closingDay, dueDay, isDefault, cardIdentifiers,
                        openingBalance, openingBalanceDate ->
-                if (
-                    store.saveFinancialAccount(
-                        id = account.id.takeUnless { creatingAccount },
-                        name = name,
-                        type = type,
-                        closingDay = closingDay,
-                        dueDay = dueDay,
-                        isDefault = isDefault,
-                        cardIdentifiers = cardIdentifiers,
-                        openingBalance = openingBalance,
-                        openingBalanceDate = openingBalanceDate,
-                    )
-                ) {
-                    editingAccount = null
-                    creatingAccount = false
-                    refresh++
-                }
+                screenViewModel.saveAccount(
+                    account, name, type, closingDay, dueDay, isDefault, cardIdentifiers,
+                    openingBalance, openingBalanceDate,
+                )
             },
         )
     }
-    if (creatingTransfer) {
+    if (uiState.creatingTransfer) {
         TransferDialog(
             accounts = accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT },
-            onDismiss = { creatingTransfer = false },
+            onDismiss = { screenViewModel.setCreatingTransfer(false) },
             onSave = { source, destination, amount, date, description ->
-                if (store.recordTransfer(source, destination, amount, date, description)) {
-                    creatingTransfer = false
-                    refresh++
-                }
+                screenViewModel.recordTransfer(source, destination, amount, date, description)
             },
         )
     }
