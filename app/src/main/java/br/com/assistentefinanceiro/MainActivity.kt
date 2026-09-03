@@ -60,6 +60,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,6 +76,12 @@ private enum class AppScreen {
     BUDGET,
     MORE,
     ABOUT,
+}
+
+private sealed interface LoadState<out T> {
+    data object Loading : LoadState<Nothing>
+    data class Ready<T>(val value: T) : LoadState<T>
+    data object Failed : LoadState<Nothing>
 }
 
 private data class AccountLedgerItem(
@@ -542,8 +549,21 @@ class MainActivity : ComponentActivity() {
         val statement = remember(statementTransactions, selectedMonth) {
             MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
         }
-        val generalProjectedBalance = remember(refresh, selectedMonth) {
-            store.generalProjectedBalance(selectedMonth.atEndOfMonth())
+        var generalProjectedBalance by remember(refresh, selectedMonth) {
+            mutableStateOf<LoadState<java.math.BigDecimal>>(LoadState.Loading)
+        }
+        LaunchedEffect(refresh, selectedMonth) {
+            generalProjectedBalance = try {
+                LoadState.Ready(
+                    withContext(Dispatchers.IO) {
+                        store.generalProjectedBalance(selectedMonth.atEndOfMonth())
+                    }
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                LoadState.Failed
+            }
         }
         val visibleGroups = remember(
             statement.groups,
@@ -2781,12 +2801,9 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun StatementSummary(
         statement: MonthlyStatement,
-        generalProjectedBalance: java.math.BigDecimal,
+        generalProjectedBalance: LoadState<java.math.BigDecimal>,
     ) {
         val semantic = MaterialTheme.financeColors
-        val projectedColor = if (generalProjectedBalance.signum() < 0) {
-            semantic.expense
-        } else MaterialTheme.colorScheme.onSurface
 
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
@@ -2816,12 +2833,27 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
-                Text(
-                    text = formatCurrency(generalProjectedBalance.toPlainString()),
-                    color = projectedColor,
-                    style = FinanceTextStyles.moneyHero,
-                    maxLines = 1,
-                )
+                when (val balance = generalProjectedBalance) {
+                    LoadState.Loading -> CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 3.dp,
+                    )
+                    LoadState.Failed -> Text(
+                        text = "Saldo indisponível",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    is LoadState.Ready -> Text(
+                        text = formatCurrency(balance.value.toPlainString()),
+                        color = if (balance.value.signum() < 0) {
+                            semantic.expense
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        style = FinanceTextStyles.moneyHero,
+                        maxLines = 1,
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
@@ -3865,8 +3897,21 @@ class MainActivity : ComponentActivity() {
             it.transaction.direction == FinancialTransactionDirection.EXPENSE
         }.sumOf { it.transaction.amount.toBigDecimal() }
         val net = income - expense
-        val projectedBalance = remember(horizonDays) {
-            store.generalProjectedBalance(today.plusDays(horizonDays.toLong()))
+        var projectedBalance by remember(horizonDays) {
+            mutableStateOf<LoadState<java.math.BigDecimal>>(LoadState.Loading)
+        }
+        LaunchedEffect(today, horizonDays) {
+            projectedBalance = try {
+                LoadState.Ready(
+                    withContext(Dispatchers.IO) {
+                        store.generalProjectedBalance(today.plusDays(horizonDays.toLong()))
+                    }
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                LoadState.Failed
+            }
         }
         val semantic = MaterialTheme.financeColors
 
@@ -3936,14 +3981,27 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
-                            Text(
-                                formatCurrency(projectedBalance.toPlainString()),
-                                color = if (projectedBalance.signum() < 0) {
-                                    semantic.expense
-                                } else MaterialTheme.colorScheme.onSurface,
-                                style = FinanceTextStyles.moneyHero,
-                                maxLines = 1,
-                            )
+                            when (val balance = projectedBalance) {
+                                LoadState.Loading -> CircularProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    strokeWidth = 3.dp,
+                                )
+                                LoadState.Failed -> Text(
+                                    text = "Saldo indisponível",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                is LoadState.Ready -> Text(
+                                    text = formatCurrency(balance.value.toPlainString()),
+                                    color = if (balance.value.signum() < 0) {
+                                        semantic.expense
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    style = FinanceTextStyles.moneyHero,
+                                    maxLines = 1,
+                                )
+                            }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
@@ -4929,14 +4987,28 @@ class MainActivity : ComponentActivity() {
     ) {
         var selectedYear by remember { mutableIntStateOf(LocalDate.now().year) }
         val transactions = remember(selectedYear) { granularTransactions(store) }
+        val periods = remember(selectedYear) {
+            (1..12).map { month -> YearMonth.of(selectedYear, month) }
+        }
         val rows = remember(selectedYear, transactions) {
-            (1..12).map { month ->
-                val period = YearMonth.of(selectedYear, month)
-                Triple(
-                    period,
-                    MonthlyStatementCalculator.calculate(period, transactions),
-                    store.generalProjectedBalance(period.atEndOfMonth()),
+            periods.map { period ->
+                period to MonthlyStatementCalculator.calculate(period, transactions)
+            }
+        }
+        var projectedBalances by remember(selectedYear) {
+            mutableStateOf<LoadState<Map<LocalDate, java.math.BigDecimal>>>(LoadState.Loading)
+        }
+        LaunchedEffect(selectedYear) {
+            projectedBalances = try {
+                LoadState.Ready(
+                    withContext(Dispatchers.IO) {
+                        store.generalProjectedBalances(periods.map { it.atEndOfMonth() })
+                    }
                 )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                LoadState.Failed
             }
         }
         Scaffold(
@@ -4999,6 +5071,19 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                when (projectedBalances) {
+                    LoadState.Loading -> item {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    LoadState.Failed -> item {
+                        Text(
+                            text = "Não foi possível calcular os saldos projetados.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    is LoadState.Ready -> Unit
+                }
                 item {
                     Surface(
                         shape = MaterialTheme.shapes.large,
@@ -5021,7 +5106,7 @@ class MainActivity : ComponentActivity() {
                                 AnnualSummaryCell("Saldo projetado", header = true)
                             }
                             HorizontalDivider()
-                            rows.forEachIndexed { index, (period, statement, projectedBalance) ->
+                            rows.forEachIndexed { index, (period, statement) ->
                                 val income = statement.projectedIncome
                                 val expense = statement.projectedExpense
                                 val result = statement.projectedBalance
@@ -5044,10 +5129,32 @@ class MainActivity : ComponentActivity() {
                                         formatCurrency(result.toPlainString()),
                                         valueColor = financialValueColor(result.signum()),
                                     )
-                                    AnnualSummaryCell(
-                                        formatCurrency(projectedBalance.toPlainString()),
-                                        valueColor = financialValueColor(projectedBalance.signum()),
-                                    )
+                                    when (val balances = projectedBalances) {
+                                        LoadState.Loading -> AnnualSummaryCell("…")
+                                        LoadState.Failed -> AnnualSummaryCell(
+                                            text = "Indisponível",
+                                            valueColor = MaterialTheme.colorScheme.error,
+                                        )
+                                        is LoadState.Ready -> {
+                                            val projectedBalance =
+                                                balances.value[period.atEndOfMonth()]
+                                            if (projectedBalance == null) {
+                                                AnnualSummaryCell(
+                                                    text = "Indisponível",
+                                                    valueColor = MaterialTheme.colorScheme.error,
+                                                )
+                                            } else {
+                                                AnnualSummaryCell(
+                                                    formatCurrency(
+                                                        projectedBalance.toPlainString()
+                                                    ),
+                                                    valueColor = financialValueColor(
+                                                        projectedBalance.signum()
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                                 if (index < rows.lastIndex) HorizontalDivider()
                             }
