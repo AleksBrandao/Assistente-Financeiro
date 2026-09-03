@@ -12,6 +12,7 @@ import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.TransactionCategory
 import br.com.assistentefinanceiro.notifications.TransactionSeriesScope
 import br.com.assistentefinanceiro.notifications.TransactionStatus
+import br.com.assistentefinanceiro.notifications.categoryDisplayName
 import br.com.assistentefinanceiro.ui.screens.AccountLedgerItem
 import java.math.BigDecimal
 import java.time.LocalDate
