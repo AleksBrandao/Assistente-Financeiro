@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.DataManagementViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -72,60 +75,31 @@ internal fun DataManagementScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var refresh by remember { mutableIntStateOf(0) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var pendingBackup by remember { mutableStateOf<String?>(null) }
-    var pendingPreview by remember { mutableStateOf<BackupPreview?>(null) }
-    var permanentDelete by remember { mutableStateOf<DeletedTransactionGroup?>(null) }
-    val deletedGroups = remember(refresh) { store.deletedTransactionGroups() }
-
-    fun runFileOperation(operation: suspend () -> String) {
-        scope.launch {
-            message = runCatching { withContext(Dispatchers.IO) { operation() } }
-                .getOrElse { "Não foi possível concluir: ${it.message ?: "erro desconhecido"}" }
-        }
-    }
+    val screenViewModel: DataManagementViewModel = viewModel(
+        factory = ScreenViewModelFactory { DataManagementViewModel(context, store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val deletedGroups = uiState.deletedGroups
 
     val createBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        if (uri != null) runFileOperation {
-            context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
-                it.write(store.createBackupJson())
-            } ?: error("arquivo indisponível")
-            "Backup criado com sucesso."
+        if (uri != null) screenViewModel.createBackup {
+            context.contentResolver.openOutputStream(uri)
         }
     }
     val exportCsv = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/csv"),
     ) { uri ->
-        if (uri != null) runFileOperation {
-            context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
-                it.write(store.exportTransactionsCsv())
-            } ?: error("arquivo indisponível")
-            "Planilha CSV exportada com sucesso."
+        if (uri != null) screenViewModel.exportCsv {
+            context.contentResolver.openOutputStream(uri)
         }
     }
     val openBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri != null) scope.launch {
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                        ?: error("arquivo indisponível")
-                }
-            }
-            result.onSuccess { content ->
-                when (val validation = store.previewBackup(content)) {
-                    is BackupValidationResult.Valid -> {
-                        pendingBackup = content
-                        pendingPreview = validation.preview
-                    }
-                    is BackupValidationResult.Invalid -> message = validation.reason
-                }
-            }.onFailure { message = "Não foi possível ler o backup: ${it.message}" }
+        if (uri != null) screenViewModel.readBackup {
+            context.contentResolver.openInputStream(uri)
         }
     }
 
@@ -201,24 +175,7 @@ internal fun DataManagementScreen(
             item {
                 OutlinedButton(
                     onClick = {
-                        runFileOperation {
-                            val file = File(context.cacheDir, "AssistenteFinanceiro-movimentacoes.csv")
-                            file.writeText(store.exportTransactionsCsv())
-                            val uri = FileProvider.getUriForFile(
-                                context,
-                                "${context.packageName}.files",
-                                file,
-                            )
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/csv"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            withContext(Dispatchers.Main) {
-                                context.startActivity(Intent.createChooser(intent, "Compartilhar movimentações"))
-                            }
-                            "Arquivo preparado para compartilhamento."
-                        }
+                        screenViewModel.prepareShareCsv(context::startActivity)
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -227,7 +184,7 @@ internal fun DataManagementScreen(
                     Text("Compartilhar CSV")
                 }
             }
-            message?.let { text ->
+            uiState.message?.let { text ->
                 item {
                     val failed = text.startsWith("Não ") ||
                         text.contains("falh", ignoreCase = true)
@@ -284,12 +241,11 @@ internal fun DataManagementScreen(
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                             TextButton(onClick = {
-                                if (store.restoreDeletedTransactionGroup(group.groupId)) {
-                                    message = "Movimentação restaurada."
-                                    refresh++
-                                } else message = "Não foi possível restaurar a movimentação."
+                                screenViewModel.restoreDeletedGroup(group.groupId)
                             }) { Text("Restaurar") }
-                            TextButton(onClick = { permanentDelete = group }) {
+                            TextButton(onClick = {
+                                screenViewModel.requestPermanentDelete(group)
+                            }) {
                                 Text("Excluir definitivamente", color = MaterialTheme.colorScheme.error)
                             }
                         }
@@ -300,9 +256,9 @@ internal fun DataManagementScreen(
         }
     }
 
-    pendingPreview?.let { preview ->
+    uiState.pendingPreview?.let { preview ->
         AlertDialog(
-            onDismissRequest = { pendingPreview = null; pendingBackup = null },
+            onDismissRequest = screenViewModel::dismissRestore,
             title = { Text("Confirmar restauração") },
             text = {
                 Text(
@@ -312,39 +268,29 @@ internal fun DataManagementScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val content = pendingBackup
-                    pendingPreview = null
-                    pendingBackup = null
-                    if (content != null) {
-                        message = if (store.restoreBackup(content)) {
-                            refresh++
-                            "Backup restaurado com sucesso."
-                        } else "A restauração falhou e os dados atuais foram preservados."
-                    }
-                }) { Text("Restaurar") }
+                TextButton(onClick = screenViewModel::confirmRestore) { Text("Restaurar") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingPreview = null; pendingBackup = null }) { Text("Cancelar") }
+                TextButton(onClick = screenViewModel::dismissRestore) { Text("Cancelar") }
             },
         )
     }
 
-    permanentDelete?.let { group ->
+    uiState.permanentDelete?.let { group ->
         AlertDialog(
-            onDismissRequest = { permanentDelete = null },
+            onDismissRequest = { screenViewModel.requestPermanentDelete(null) },
             title = { Text("Excluir definitivamente?") },
             text = { Text("${group.description} não poderá mais ser restaurada pela lixeira.") },
             confirmButton = {
-                TextButton(onClick = {
-                    if (store.permanentlyDeleteTransactionGroup(group.groupId)) {
-                        message = "Item removido definitivamente."
-                        refresh++
-                    }
-                    permanentDelete = null
-                }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = screenViewModel::confirmPermanentDelete) {
+                    Text("Excluir", color = MaterialTheme.colorScheme.error)
+                }
             },
-            dismissButton = { TextButton(onClick = { permanentDelete = null }) { Text("Cancelar") } },
+            dismissButton = {
+                TextButton(onClick = { screenViewModel.requestPermanentDelete(null) }) {
+                    Text("Cancelar")
+                }
+            },
         )
     }
 }

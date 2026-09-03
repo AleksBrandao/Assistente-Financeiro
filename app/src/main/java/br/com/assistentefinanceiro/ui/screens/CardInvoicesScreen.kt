@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.CardInvoicesViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -72,50 +75,23 @@ internal fun CardInvoicesScreen(
     account: FinancialAccountRecord,
     onBack: () -> Unit,
 ) {
-    var refresh by remember(account.id) { mutableIntStateOf(0) }
-    var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
-    val invoices = remember(account.id, refresh) { store.creditCardInvoices(account.id) }
-    val visibleInvoice = remember(invoices, selectedMonth) {
-        invoices.firstOrNull { invoice ->
-            (invoice.dueDate?.let(YearMonth::from) ?: invoice.closingPeriod) == selectedMonth
-        }
-    }
-    var selectedInvoice by remember(account.id) {
-        mutableStateOf<CreditCardInvoiceRecord?>(null)
-    }
-    selectedInvoice?.let { invoice ->
+    val screenViewModel: CardInvoicesViewModel = viewModel(
+        key = "card-invoices-${account.id}",
+        factory = ScreenViewModelFactory { CardInvoicesViewModel(store, account) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val selectedMonth = uiState.selectedMonth
+    val visibleInvoice = uiState.visibleInvoice
+    uiState.selectedInvoice?.let { invoice ->
         InvoiceDetailScreen(
             store = store,
             account = account,
             invoice = invoice,
-            onBack = { selectedInvoice = null },
-            onPayment = { amount, paidAt, sourceAccountId ->
-                if (store.recordInvoicePayment(invoice, amount, paidAt, sourceAccountId)) {
-                    refresh++
-                    selectedInvoice = store.creditCardInvoices(account.id)
-                        .firstOrNull { it.id == invoice.id }
-                    true
-                } else false
-            },
-            onDeletePayment = { paymentId ->
-                if (store.deleteInvoicePayment(invoice, paymentId)) {
-                    refresh++
-                    selectedInvoice = store.creditCardInvoices(account.id)
-                        .firstOrNull { it.id == invoice.id }
-                    true
-                } else false
-            },
-            onInvoiceAdjustment = { officialTotal ->
-                if (store.adjustInvoiceTotal(invoice, officialTotal)) {
-                    refresh++
-                    selectedInvoice = null
-                    true
-                } else false
-            },
-            onTransactionChanged = {
-                refresh++
-                selectedInvoice = null
-            },
+            onBack = { screenViewModel.selectInvoice(null) },
+            onPayment = screenViewModel::recordPayment,
+            onDeletePayment = screenViewModel::deletePayment,
+            onInvoiceAdjustment = screenViewModel::adjustInvoice,
+            onTransactionChanged = screenViewModel::onTransactionChanged,
         )
         return
     }
@@ -158,8 +134,8 @@ internal fun CardInvoicesScreen(
             item {
                 MonthSelector(
                     selectedMonth = selectedMonth,
-                    onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
-                    onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    onPrevious = screenViewModel::showPreviousMonth,
+                    onNext = screenViewModel::showNextMonth,
                 )
             }
             if (visibleInvoice == null) {
@@ -177,7 +153,7 @@ internal fun CardInvoicesScreen(
                 val overdue = invoice.status == CreditCardInvoiceStatus.OVERDUE
                 val paid = invoice.status == CreditCardInvoiceStatus.PAID
                 Surface(
-                    onClick = { selectedInvoice = invoice },
+                    onClick = { screenViewModel.selectInvoice(invoice) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.extraLarge,
                     color = MaterialTheme.colorScheme.surface,

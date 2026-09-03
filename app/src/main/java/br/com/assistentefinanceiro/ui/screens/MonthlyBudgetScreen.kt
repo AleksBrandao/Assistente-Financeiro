@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.MonthlyBudgetViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -70,32 +73,19 @@ import kotlinx.coroutines.withContext
 internal fun MonthlyBudgetScreen(
     store: DiagnosticStore,
 ) {
-    var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
-    var refresh by remember { mutableIntStateOf(0) }
-    var editingCategory by remember { mutableStateOf<CategoryChoice?>(null) }
-    var editingTotal by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
-    val budgets = remember(selectedMonth, refresh) { store.monthlyBudgets(selectedMonth) }
-    val transactions = remember(refresh) { granularTransactions(store) }
-    val progress = remember(selectedMonth, budgets, transactions) {
-        MonthlyBudgetCalculator.calculate(selectedMonth, budgets, transactions)
-    }
-    val categorySpending = remember(selectedMonth, transactions) {
-        MonthlyBudgetCalculator.spendingByCategory(selectedMonth, transactions)
-    }
-    val totalProgress = progress.firstOrNull { it.category == null }
-    val categoryProgress = progress.filter { it.category != null }
-    val expenseCategories = TransactionCategory.availableFor(
-        FinancialTransactionDirection.EXPENSE,
+    val screenViewModel: MonthlyBudgetViewModel = viewModel(
+        factory = ScreenViewModelFactory { MonthlyBudgetViewModel(store) },
     )
-    val configuredKeys = categoryProgress.mapNotNull { it.categoryKey }.toSet()
-    val customExpenseCategories = transactions
-        .asSequence()
-        .filter { it.direction == FinancialTransactionDirection.EXPENSE }
-        .mapNotNull { it.customCategory?.takeIf(String::isNotBlank) }
-        .distinct()
-        .sorted()
-        .toList()
+    val uiState by screenViewModel.uiState.collectAsState()
+    val selectedMonth = uiState.selectedMonth
+    val budgets = uiState.budgets
+    val transactions = uiState.transactions
+    val categorySpending = uiState.categorySpending
+    val totalProgress = uiState.totalProgress
+    val categoryProgress = uiState.categoryProgress
+    val expenseCategories = uiState.expenseCategories
+    val configuredKeys = uiState.configuredKeys
+    val customExpenseCategories = uiState.customExpenseCategories
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -119,14 +109,14 @@ internal fun MonthlyBudgetScreen(
             item {
                 MonthSelector(
                     selectedMonth = selectedMonth,
-                    onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
-                    onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    onPrevious = screenViewModel::showPreviousMonth,
+                    onNext = screenViewModel::showNextMonth,
                 )
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                     Button(
-                        onClick = { editingTotal = true },
+                        onClick = screenViewModel::editTotal,
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(
@@ -138,15 +128,7 @@ internal fun MonthlyBudgetScreen(
                         Text(if (totalProgress == null) "Limite total" else "Editar total")
                     }
                     OutlinedButton(
-                        onClick = {
-                            val copied = store.copyMonthlyBudgets(
-                                selectedMonth.minusMonths(1), selectedMonth,
-                            )
-                            message = if (copied > 0) {
-                                "$copied orçamento(s) copiado(s) do mês anterior."
-                            } else "O mês anterior não possui orçamento."
-                            if (copied > 0) refresh++
-                        },
+                        onClick = screenViewModel::copyPreviousMonth,
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(
@@ -159,7 +141,7 @@ internal fun MonthlyBudgetScreen(
                     }
                 }
             }
-            message?.let { value ->
+            uiState.message?.let { value ->
                 item {
                     FinanceNoticeCard(
                         icon = Icons.Rounded.Info,
@@ -172,7 +154,7 @@ internal fun MonthlyBudgetScreen(
             }
             totalProgress?.let { item ->
                 item(key = "budget-total") {
-                    BudgetProgressCard(item, onEdit = { editingTotal = true })
+                    BudgetProgressCard(item, onEdit = screenViewModel::editTotal)
                 }
             }
             item {
@@ -230,10 +212,10 @@ internal fun MonthlyBudgetScreen(
                     BudgetProgressCard(
                         item,
                         onEdit = {
-                            editingCategory = CategoryChoice(
+                            screenViewModel.editCategory(CategoryChoice(
                                 category = item.category ?: TransactionCategory.OTHER_EXPENSE,
                                 customCategory = item.customCategory,
-                            )
+                            ))
                         },
                     )
                 }
@@ -252,7 +234,9 @@ internal fun MonthlyBudgetScreen(
                 }
                 items(missing, key = { "missing-${it.name}" }) { category ->
                     OutlinedButton(
-                        onClick = { editingCategory = CategoryChoice(category) },
+                        onClick = {
+                            screenViewModel.editCategory(CategoryChoice(category))
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Icon(
@@ -267,10 +251,10 @@ internal fun MonthlyBudgetScreen(
                 items(missingCustom, key = { "missing-custom-$it" }) { name ->
                     OutlinedButton(
                         onClick = {
-                            editingCategory = CategoryChoice(
+                            screenViewModel.editCategory(CategoryChoice(
                                 TransactionCategory.OTHER_EXPENSE,
                                 customCategory = name,
-                            )
+                            ))
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
@@ -288,41 +272,21 @@ internal fun MonthlyBudgetScreen(
         }
     }
 
-    if (editingTotal || editingCategory != null) {
-        val choice = editingCategory
+    if (uiState.editingTotal || uiState.editingCategory != null) {
+        val choice = uiState.editingCategory
         val category = choice?.category
         val customCategory = choice?.customCategory
         val existing = budgets.firstOrNull {
             it.category == category && it.customCategory == customCategory
         }?.amount
-        val includedTransactions = transactions.filter { transaction ->
-            transaction.direction == FinancialTransactionDirection.EXPENSE &&
-                transactionEffectiveDate(transaction)?.let { YearMonth.from(it) } == selectedMonth &&
-                if (choice == null) true
-                else if (customCategory != null) transaction.customCategory == customCategory
-                else transaction.customCategory == null && transaction.category == category
-        }
         BudgetEditDialog(
             title = customCategory ?: category?.displayName ?: "Limite total do mês",
             initialAmount = existing?.toPlainString().orEmpty(),
-            transactions = includedTransactions,
-            onDismiss = { editingTotal = false; editingCategory = null },
-            onSave = { amount ->
-                if (store.saveMonthlyBudget(
-                        selectedMonth, category, amount, customCategory,
-                    )) {
-                    editingTotal = false
-                    editingCategory = null
-                    refresh++
-                }
-            },
+            transactions = uiState.includedTransactions,
+            onDismiss = screenViewModel::dismissEditor,
+            onSave = screenViewModel::saveBudget,
             onDelete = existing?.let {
-                {
-                    store.deleteMonthlyBudget(selectedMonth, category, customCategory)
-                    editingTotal = false
-                    editingCategory = null
-                    refresh++
-                }
+                screenViewModel::deleteBudget
             },
         )
     }

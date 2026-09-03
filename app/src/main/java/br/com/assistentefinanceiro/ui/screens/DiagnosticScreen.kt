@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -51,6 +52,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.DiagnosticViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -74,11 +77,16 @@ internal fun DiagnosticScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    var refresh by remember { mutableIntStateOf(0) }
-    val allowed = remember(refresh) { preferences.allowedPackages() }
-    val candidates = remember(refresh) { store.candidates() }
-    val events = remember(refresh) { store.recentEvents() }
-    val enabled = remember(refresh) { notificationAccessEnabled(context) }
+    val screenViewModel: DiagnosticViewModel = viewModel(
+        factory = ScreenViewModelFactory {
+            DiagnosticViewModel(context, store, preferences)
+        },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val allowed = uiState.allowedPackages
+    val candidates = uiState.candidates
+    val events = uiState.events
+    val enabled = uiState.notificationAccessEnabled
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -173,7 +181,7 @@ internal fun DiagnosticScreen(
                                 Text("Configurar")
                             }
                             OutlinedButton(
-                                onClick = { refresh++ },
+                                onClick = screenViewModel::refresh,
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Rounded.Sync, contentDescription = null)
@@ -235,12 +243,7 @@ internal fun DiagnosticScreen(
                         Switch(
                             checked = packageName in allowed,
                             onCheckedChange = {
-                                if (it) {
-                                    preferences.allow(packageName)
-                                } else {
-                                    preferences.remove(packageName)
-                                }
-                                refresh++
+                                screenViewModel.setPackageAllowed(packageName, it)
                             },
                         )
                     }
@@ -256,10 +259,7 @@ internal fun DiagnosticScreen(
                         style = MaterialTheme.typography.titleLarge,
                     )
                     TextButton(
-                        onClick = {
-                            store.clearEvents()
-                            refresh++
-                        },
+                        onClick = screenViewModel::clearEvents,
                     ) {
                         Text("Limpar")
                     }
@@ -344,14 +344,4 @@ internal fun DiagnosticScreen(
             }
         }
     }
-}
-
-private fun notificationAccessEnabled(context: Context): Boolean {
-    val component = ComponentName(context, FinanceNotificationListener::class.java)
-    return Settings.Secure.getString(
-        context.contentResolver,
-        "enabled_notification_listeners",
-    )
-        ?.split(":")
-        ?.any { ComponentName.unflattenFromString(it) == component } == true
 }

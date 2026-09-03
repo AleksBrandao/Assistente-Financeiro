@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.AboutViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -69,12 +72,10 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun AboutScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val packageInfo = remember(context) {
-        context.packageManager.getPackageInfo(context.packageName, 0)
-    }
-    val versionName = packageInfo.versionName ?: "não informada"
-    @Suppress("DEPRECATION")
-    val versionCode = packageInfo.versionCode
+    val screenViewModel: AboutViewModel = viewModel(
+        factory = ScreenViewModelFactory { AboutViewModel(context) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -127,7 +128,7 @@ internal fun AboutScreen(onBack: () -> Unit) {
                             textAlign = TextAlign.Center,
                         )
                         FinanceStatusPill(
-                            text = "Versão $versionName · código $versionCode",
+                            text = "Versão ${uiState.versionName} · código ${uiState.versionCode}",
                             foreground = MaterialTheme.colorScheme.onPrimaryContainer,
                             background = MaterialTheme.colorScheme.primaryContainer,
                         )

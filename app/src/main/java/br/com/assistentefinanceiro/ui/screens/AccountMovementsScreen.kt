@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.AccountMovementsViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -73,63 +76,14 @@ internal fun AccountMovementsScreen(
     onBack: () -> Unit,
     onChanged: () -> Unit,
 ) {
-    var refresh by remember(account.id) { mutableIntStateOf(0) }
-    var selectedMonth by remember(account.id) { mutableStateOf(YearMonth.now()) }
-    val movements = remember(account.id, refresh) { store.accountMovements(account.id) }
-    val transactions = remember(account.id, refresh) {
-        store.recentTransactions(10_000).filter { it.accountId == account.id }
-    }
-    val balance = remember(account.id, refresh) { store.accountBalance(account) }
-    val ledgerItems = remember(transactions, movements) {
-        val transactionItems = transactions.mapNotNull { transaction ->
-            val occurredAt = runCatching {
-                LocalDateTime.parse(transaction.occurredAt)
-            }.getOrNull() ?: return@mapNotNull null
-            AccountLedgerItem(
-                key = "transaction-${transaction.id}",
-                occurredAt = occurredAt,
-                direction = transaction.direction,
-                amount = transaction.amount.toBigDecimalOrNull() ?: return@mapNotNull null,
-                description = transaction.description,
-                detail = listOf(
-                    transaction.categoryDisplayName,
-                    if (transaction.status == TransactionStatus.PENDING) "Pendente"
-                    else "Realizada",
-                ).joinToString(" · "),
-                transaction = transaction,
-            )
-        }
-        val movementItems = movements.map { movement ->
-            AccountLedgerItem(
-                key = "movement-${movement.id}",
-                // Movimentações criadas no app aparecem antes das importadas no mesmo dia.
-                occurredAt = movement.occurredAt.atTime(23, 59, 59),
-                direction = if (movement.direction == AccountMovementDirection.CREDIT) {
-                    FinancialTransactionDirection.INCOME
-                } else FinancialTransactionDirection.EXPENSE,
-                amount = movement.amount,
-                description = movement.description,
-                detail = listOfNotNull(
-                    movement.relatedAccountName,
-                    if (movement.type == AccountMovementType.TRANSFER) "Transferência"
-                    else "Pagamento de fatura",
-                ).joinToString(" · "),
-                movement = movement,
-            )
-        }
-        (transactionItems + movementItems).sortedWith(
-            compareByDescending<AccountLedgerItem> { it.occurredAt }
-                .thenByDescending { it.transaction?.id ?: it.movement?.id ?: 0L },
-        )
-    }
-    val visibleLedgerItems = remember(ledgerItems, selectedMonth) {
-        ledgerItems.filter { YearMonth.from(it.occurredAt) == selectedMonth }
-    }
-    var addingTransaction by remember { mutableStateOf(false) }
-    var editingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
-    var deletingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
-    var deletingSeriesScope by remember { mutableStateOf(TransactionSeriesScope.ONLY_THIS) }
-    var deletingTransfer by remember { mutableStateOf<AccountMovementRecord?>(null) }
+    val screenViewModel: AccountMovementsViewModel = viewModel(
+        key = "account-movements-${account.id}",
+        factory = ScreenViewModelFactory { AccountMovementsViewModel(store, account) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val selectedMonth = uiState.selectedMonth
+    val balance = uiState.balance
+    val visibleLedgerItems = uiState.visibleLedgerItems
     val semantic = MaterialTheme.financeColors
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -210,7 +164,7 @@ internal fun AccountMovementsScreen(
             }
             item {
                 Button(
-                    onClick = { addingTransaction = true },
+                    onClick = { screenViewModel.setAddingTransaction(true) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Rounded.Add, contentDescription = null)
@@ -221,8 +175,8 @@ internal fun AccountMovementsScreen(
             item {
                 MonthSelector(
                     selectedMonth = selectedMonth,
-                    onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
-                    onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    onPrevious = screenViewModel::showPreviousMonth,
+                    onNext = screenViewModel::showNextMonth,
                 )
             }
             if (visibleLedgerItems.isEmpty()) {
@@ -233,7 +187,7 @@ internal fun AccountMovementsScreen(
                         description = "Não há receitas ou despesas nesta conta em " +
                             "${formatMonth(selectedMonth)}.",
                         actionLabel = "Adicionar movimentação",
-                        onAction = { addingTransaction = true },
+                        onAction = { screenViewModel.setAddingTransaction(true) },
                     )
                 }
             }
@@ -252,7 +206,7 @@ internal fun AccountMovementsScreen(
                     onClick = {
                         ledgerItem.transaction?.takeIf {
                             it.origin == TransactionOrigin.MANUAL
-                        }?.let { editingTransaction = it }
+                        }?.let(screenViewModel::editTransaction)
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.large,
@@ -301,7 +255,9 @@ internal fun AccountMovementsScreen(
                             )
                             if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
                                 IconButton(
-                                    onClick = { deletingTransfer = ledgerItem.movement },
+                                    onClick = {
+                                        screenViewModel.requestDeleteTransfer(ledgerItem.movement)
+                                    },
                                 ) {
                                     Icon(
                                         Icons.Rounded.DeleteOutline,
@@ -316,81 +272,63 @@ internal fun AccountMovementsScreen(
             }
         }
     }
-    if (addingTransaction) {
+    if (uiState.addingTransaction) {
         ManualTransactionDialog(
-            onDismiss = { addingTransaction = false },
+            onDismiss = { screenViewModel.setAddingTransaction(false) },
             onSave = { direction, amount, date, description, status, occurrences ->
-                if (
-                    store.recordManualTransaction(
-                        account.id, direction, amount, date, description, status, occurrences,
-                    )
-                ) {
-                    addingTransaction = false
-                    refresh++
-                    onChanged()
-                }
+                if (screenViewModel.recordManualTransaction(
+                        direction, amount, date, description, status, occurrences,
+                    )) onChanged()
             },
         )
     }
-    editingTransaction?.let { transaction ->
+    uiState.editingTransaction?.let { transaction ->
         EditTransactionDialog(
-            store = store,
             transaction = transaction,
-            onDismiss = { editingTransaction = null },
+            customCategories = uiState.customCategories[transaction.direction].orEmpty(),
+            onDismiss = { screenViewModel.editTransaction(null) },
             onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
-                if (
-                    store.updateTransactionDetails(
-                        transaction.id, description, category, customCategory, subcategory, status,
-                        amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
-                    )
-                ) {
-                    editingTransaction = null
-                    refresh++
-                    onChanged()
-                }
+                if (screenViewModel.saveTransaction(
+                        description, category, customCategory, subcategory, status, amount,
+                        dueDate, plannedDate, paidAt, applyToFuture, scope,
+                    )) onChanged()
             },
             onDelete = { scope ->
-                editingTransaction = null
-                deletingTransaction = transaction
-                deletingSeriesScope = scope
+                screenViewModel.requestDelete(transaction, scope)
             },
         )
     }
-    deletingTransaction?.let { transaction ->
+    uiState.deletingTransaction?.let { transaction ->
         AlertDialog(
-            onDismissRequest = { deletingTransaction = null },
+            onDismissRequest = screenViewModel::dismissDeleteTransaction,
             title = { Text("Excluir movimentação manual?") },
             text = { Text(transaction.description) },
             confirmButton = {
                 TextButton(onClick = {
-                    if (store.deleteManualTransaction(transaction.id, deletingSeriesScope)) {
-                        deletingTransaction = null
-                        refresh++
-                        onChanged()
-                    }
+                    if (screenViewModel.confirmDeleteTransaction()) onChanged()
                 }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { deletingTransaction = null }) { Text("Cancelar") }
+                TextButton(onClick = screenViewModel::dismissDeleteTransaction) {
+                    Text("Cancelar")
+                }
             },
         )
     }
-    deletingTransfer?.let { movement ->
+    uiState.deletingTransfer?.let { movement ->
         AlertDialog(
-            onDismissRequest = { deletingTransfer = null },
+            onDismissRequest = { screenViewModel.requestDeleteTransfer(null) },
             title = { Text("Excluir transferência?") },
             text = { Text("Os lançamentos nas duas contas serão removidos.") },
             confirmButton = {
                 TextButton(onClick = {
-                    if (store.deleteTransfer(movement.id)) {
-                        deletingTransfer = null
-                        refresh++
-                        onChanged()
-                    }
+                    if (screenViewModel.confirmDeleteTransfer()) onChanged()
                 }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { deletingTransfer = null }) { Text("Cancelar") }
+                TextButton(onClick = { screenViewModel.requestDeleteTransfer(null) }) {
+                    Text("Cancelar")
+                }
             },
         )
     }

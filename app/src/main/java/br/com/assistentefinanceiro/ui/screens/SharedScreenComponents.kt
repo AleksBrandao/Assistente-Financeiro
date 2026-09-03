@@ -521,8 +521,8 @@ internal fun CategoryPickerDialog(
 
 @Composable
 internal fun EditTransactionDialog(
-    store: DiagnosticStore,
     transaction: FinancialTransactionRecord,
+    customCategories: List<String>,
     onDismiss: () -> Unit,
     onSave: (
         String, TransactionCategory, String?, String?, TransactionStatus, java.math.BigDecimal,
@@ -580,10 +580,6 @@ internal fun EditTransactionDialog(
     val availableCategories = remember(transaction.direction) {
         TransactionCategory.availableFor(transaction.direction)
     }
-    val customCategories = remember(transaction.direction, transaction.id) {
-        store.customCategories(transaction.direction)
-    }
-
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Editar movimentação") },

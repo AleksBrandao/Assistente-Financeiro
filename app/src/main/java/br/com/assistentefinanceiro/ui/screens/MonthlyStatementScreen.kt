@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
@@ -50,6 +51,8 @@ import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
 import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
 import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
 import br.com.assistentefinanceiro.ui.theme.financeColors
+import br.com.assistentefinanceiro.ui.viewmodels.MonthlyStatementViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -70,208 +73,41 @@ import kotlinx.coroutines.withContext
 internal fun MonthlyStatementScreen(
     store: DiagnosticStore,
 ) {
-    var refresh by remember { mutableIntStateOf(0) }
-    var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
-    var pendingOnly by remember { mutableStateOf(false) }
-    var withoutCategoryOnly by remember { mutableStateOf(false) }
-    var withoutSubcategoryOnly by remember { mutableStateOf(false) }
-    val transactions = remember(refresh) { store.recentTransactions(limit = 10_000) }
-    val creditCardAccounts = remember(refresh) {
-        store.financialAccounts()
-            .filter { it.type == FinancialAccountType.CREDIT_CARD }
-    }
-    val invoicesByAccount = remember(creditCardAccounts, refresh) {
-        creditCardAccounts.flatMap { account ->
-            store.creditCardInvoices(account.id).map { account to it }
-        }
-    }
-    val statementInvoiceItems = remember(invoicesByAccount) {
-        invoicesByAccount.mapNotNull { (account, invoice) ->
-                    val dueDate = invoice.dueDate ?: return@mapNotNull null
-                    if (invoice.total.signum() == 0) return@mapNotNull null
-                    val isCredit = invoice.total.signum() < 0
-                    StatementInvoiceItem(
-                        account = account,
-                        invoice = invoice,
-                        transaction = FinancialTransactionRecord(
-                            id = -invoice.id,
-                            sourceEventId = null,
-                            direction = if (isCredit) {
-                                FinancialTransactionDirection.INCOME
-                            } else FinancialTransactionDirection.EXPENSE,
-                            type = if (isCredit) {
-                                FinancialTransactionType.IMPORTED_INCOME
-                            } else FinancialTransactionType.IMPORTED_EXPENSE,
-                            amount = invoice.total.abs().toPlainString(),
-                            occurredAt = dueDate.atTime(23, 59, 59).toString(),
-                            description = "Fatura ${account.name}",
-                            sourcePackage = "credit-card-invoice",
-                            status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                                TransactionStatus.REALIZED
-                            } else TransactionStatus.PENDING,
-                            account = account.name,
-                            accountId = account.id,
-                            invoiceId = invoice.id,
-                        ),
-                    )
-                }
-    }
-    val invoiceItemByTransactionId = remember(statementInvoiceItems) {
-        statementInvoiceItems.associateBy { it.transaction.id }
-    }
-    val creditCardAccountIds = remember(creditCardAccounts) {
-        creditCardAccounts.map { it.id }.toSet()
-    }
-    val consolidatedInvoiceIds = remember(statementInvoiceItems) {
-        statementInvoiceItems.map { it.invoice.id }.toSet()
-    }
-    val unconsolidatedCardTransactionCount = remember(
-        transactions, creditCardAccountIds, consolidatedInvoiceIds,
-    ) {
-        transactions.count { transaction ->
-            val isCardPurchase = transaction.type == FinancialTransactionType.CARD_PURCHASE ||
-                (transaction.accountId != null &&
-                    transaction.accountId in creditCardAccountIds)
-            isCardPurchase && (
-                transaction.invoiceId == null ||
-                    transaction.invoiceId !in consolidatedInvoiceIds
-                )
-        }
-    }
-    val statementTransactions = remember(
-        transactions, statementInvoiceItems, creditCardAccountIds,
-    ) {
-        transactions.filterNot { transaction ->
-            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
-                (transaction.accountId != null &&
-                    transaction.accountId in creditCardAccountIds)
-        } + statementInvoiceItems.map { it.transaction }
-    }
-    val statement = remember(statementTransactions, selectedMonth) {
-        MonthlyStatementCalculator.calculate(selectedMonth, statementTransactions)
-    }
-    var generalProjectedBalance by remember(refresh, selectedMonth) {
-        mutableStateOf<LoadState<java.math.BigDecimal>>(LoadState.Loading)
-    }
-    LaunchedEffect(refresh, selectedMonth) {
-        generalProjectedBalance = try {
-            LoadState.Ready(
-                withContext(Dispatchers.IO) {
-                    store.generalProjectedBalance(selectedMonth.atEndOfMonth())
-                }
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            LoadState.Failed
-        }
-    }
-    val visibleGroups = remember(
-        statement.groups,
-        pendingOnly,
-        withoutCategoryOnly,
-        withoutSubcategoryOnly,
-    ) {
-        statement.groups.mapNotNull { group ->
-            group.copy(
-                transactions = group.transactions.filter {
-                    (!pendingOnly || it.status == TransactionStatus.PENDING) &&
-                        (
-                            (!withoutCategoryOnly && !withoutSubcategoryOnly) ||
-                                (
-                                    withoutCategoryOnly &&
-                                        it.category == TransactionCategory.UNCATEGORIZED
-                                    ) ||
-                                (
-                                    withoutSubcategoryOnly &&
-                                        it.category != TransactionCategory.UNCATEGORIZED &&
-                                        it.subcategory.isNullOrBlank()
-                                    )
-                            )
-                },
-            ).takeIf { it.transactions.isNotEmpty() }
-        }
-    }
-    var editingTransaction by remember {
-        mutableStateOf<FinancialTransactionRecord?>(null)
-    }
-    var deletingStatementTransaction by remember {
-        mutableStateOf<FinancialTransactionRecord?>(null)
-    }
-    var deletingStatementScope by remember {
-        mutableStateOf(TransactionSeriesScope.ONLY_THIS)
-    }
-    var importPreview by remember { mutableStateOf<MobillsImportPreview?>(null) }
-    var includePossibleDuplicates by remember { mutableStateOf(false) }
-    var importMessage by remember { mutableStateOf<String?>(null) }
-    var importError by remember { mutableStateOf<String?>(null) }
-    var readingImport by remember { mutableStateOf(false) }
-    var selectedStatementInvoice by remember {
-        mutableStateOf<StatementInvoiceItem?>(null)
-    }
+    val screenViewModel: MonthlyStatementViewModel = viewModel(
+        factory = ScreenViewModelFactory { MonthlyStatementViewModel(store) },
+    )
+    val uiState by screenViewModel.uiState.collectAsState()
+    val selectedMonth = uiState.selectedMonth
+    val pendingOnly = uiState.pendingOnly
+    val withoutCategoryOnly = uiState.withoutCategoryOnly
+    val withoutSubcategoryOnly = uiState.withoutSubcategoryOnly
+    val statement = uiState.statement
+    val generalProjectedBalance = uiState.generalProjectedBalance
+    val visibleGroups = uiState.visibleGroups
+    val invoiceItemByTransactionId = uiState.invoiceItemByTransactionId
+    val unconsolidatedCardTransactionCount = uiState.unconsolidatedCardTransactionCount
+    val readingImport = uiState.readingImport
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
-            readingImport = true
-            scope.launch {
-                runCatching {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(uri).use { input ->
-                            requireNotNull(input) { "Não foi possível abrir o arquivo" }
-                            store.markExistingTransactions(
-                                MobillsImportAnalyzer.analyze(
-                                    rawRows = SimpleXlsxReader.readMobillsRows(input),
-                                )
-                            )
-                        }
-                    }
-                }.onSuccess {
-                    importPreview = it
-                    includePossibleDuplicates = false
-                }.onFailure {
-                    importError = it.message ?: "Arquivo Mobills inválido"
-                }
-                readingImport = false
+            screenViewModel.importMobills {
+                context.contentResolver.openInputStream(uri)
             }
         }
     }
 
-    selectedStatementInvoice?.let { selected ->
+    uiState.selectedInvoice?.let { selected ->
         InvoiceDetailScreen(
             store = store,
             account = selected.account,
             invoice = selected.invoice,
-            onBack = { selectedStatementInvoice = null },
-            onPayment = { amount, paidAt, sourceAccountId ->
-                if (store.recordInvoicePayment(
-                        selected.invoice, amount, paidAt, sourceAccountId,
-                    )) {
-                    selectedStatementInvoice = null
-                    refresh++
-                    true
-                } else false
-            },
-            onDeletePayment = { paymentId ->
-                if (store.deleteInvoicePayment(selected.invoice, paymentId)) {
-                    selectedStatementInvoice = null
-                    refresh++
-                    true
-                } else false
-            },
-            onInvoiceAdjustment = { officialTotal ->
-                if (store.adjustInvoiceTotal(selected.invoice, officialTotal)) {
-                    selectedStatementInvoice = null
-                    refresh++
-                    true
-                } else false
-            },
-            onTransactionChanged = {
-                selectedStatementInvoice = null
-                refresh++
-            },
+            onBack = { screenViewModel.selectInvoice(null) },
+            onPayment = screenViewModel::recordInvoicePayment,
+            onDeletePayment = screenViewModel::deleteInvoicePayment,
+            onInvoiceAdjustment = screenViewModel::adjustInvoiceTotal,
+            onTransactionChanged = screenViewModel::onInvoiceChanged,
         )
         return
     }
@@ -283,7 +119,7 @@ internal fun MonthlyStatementScreen(
                 title = { Text("Assistente Financeiro") },
                 actions = {
                     IconButton(
-                        onClick = { refresh++ },
+                        onClick = screenViewModel::refresh,
                     ) {
                         Icon(
                             Icons.Rounded.Sync,
@@ -339,8 +175,8 @@ internal fun MonthlyStatementScreen(
             item {
                 MonthSelector(
                     selectedMonth = selectedMonth,
-                    onPrevious = { selectedMonth = selectedMonth.minusMonths(1) },
-                    onNext = { selectedMonth = selectedMonth.plusMonths(1) },
+                    onPrevious = screenViewModel::showPreviousMonth,
+                    onNext = screenViewModel::showNextMonth,
                 )
             }
             item {
@@ -357,7 +193,7 @@ internal fun MonthlyStatementScreen(
                     ) {
                         FilterChip(
                             selected = pendingOnly,
-                            onClick = { pendingOnly = !pendingOnly },
+                            onClick = screenViewModel::togglePendingOnly,
                             label = { Text("Pendentes") },
                             leadingIcon = {
                                 Icon(
@@ -370,7 +206,7 @@ internal fun MonthlyStatementScreen(
                         )
                         FilterChip(
                             selected = withoutCategoryOnly,
-                            onClick = { withoutCategoryOnly = !withoutCategoryOnly },
+                            onClick = screenViewModel::toggleWithoutCategoryOnly,
                             label = { Text("Sem categoria") },
                             leadingIcon = {
                                 Icon(
@@ -389,7 +225,7 @@ internal fun MonthlyStatementScreen(
                     ) {
                         FilterChip(
                             selected = withoutSubcategoryOnly,
-                            onClick = { withoutSubcategoryOnly = !withoutSubcategoryOnly },
+                            onClick = screenViewModel::toggleWithoutSubcategoryOnly,
                             label = { Text("Sem subcategoria") },
                             leadingIcon = {
                                 Icon(
@@ -402,11 +238,7 @@ internal fun MonthlyStatementScreen(
                         )
                         if (pendingOnly || withoutCategoryOnly || withoutSubcategoryOnly) {
                             TextButton(
-                                onClick = {
-                                    pendingOnly = false
-                                    withoutCategoryOnly = false
-                                    withoutSubcategoryOnly = false
-                                },
+                                onClick = screenViewModel::clearFilters,
                             ) { Text("Limpar") }
                         }
                     }
@@ -448,9 +280,7 @@ internal fun MonthlyStatementScreen(
                         actionLabel = if (filtersActive) "Limpar filtros" else "Importar dados",
                         onAction = {
                             if (filtersActive) {
-                                pendingOnly = false
-                                withoutCategoryOnly = false
-                                withoutSubcategoryOnly = false
+                                screenViewModel.clearFilters()
                             } else {
                                 importLauncher.launch(
                                     arrayOf(
@@ -483,12 +313,12 @@ internal fun MonthlyStatementScreen(
                     if (invoiceItem != null) {
                         StatementInvoiceCard(
                             item = invoiceItem,
-                            onClick = { selectedStatementInvoice = invoiceItem },
+                            onClick = { screenViewModel.selectInvoice(invoiceItem) },
                         )
                     } else {
                         TransactionCard(
                             transaction = transaction,
-                            onClick = { editingTransaction = transaction },
+                            onClick = { screenViewModel.editTransaction(transaction) },
                         )
                     }
                 }
@@ -496,73 +326,51 @@ internal fun MonthlyStatementScreen(
         }
     }
 
-    editingTransaction?.let { transaction ->
+    uiState.editingTransaction?.let { transaction ->
         EditTransactionDialog(
-            store = store,
             transaction = transaction,
-            onDismiss = { editingTransaction = null },
+            customCategories = uiState.customCategories[transaction.direction].orEmpty(),
+            onDismiss = { screenViewModel.editTransaction(null) },
             onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
-                if (
-                    store.updateTransactionDetails(
-                        transactionId = transaction.id,
-                        description = description,
-                        category = category,
-                        customCategory = customCategory,
-                        subcategory = subcategory,
-                        status = status,
-                        amount = amount,
-                        dueDate = dueDate,
-                        plannedPaymentDate = plannedDate,
-                        paidAt = paidAt,
-                        applyToFuture = applyToFuture,
-                        seriesScope = scope,
-                    )
-                ) {
-                    editingTransaction = null
-                    refresh++
-                }
+                screenViewModel.saveTransaction(
+                    description, category, customCategory, subcategory, status, amount,
+                    dueDate, plannedDate, paidAt, applyToFuture, scope,
+                )
             },
             onDelete = if (transaction.origin == TransactionOrigin.MANUAL) {
                 { selectedScope ->
-                    editingTransaction = null
-                    deletingStatementTransaction = transaction
-                    deletingStatementScope = selectedScope
+                    screenViewModel.requestDelete(transaction, selectedScope)
                 }
             } else null,
         )
     }
 
-    deletingStatementTransaction?.let { transaction ->
-        val scopeDescription = when (deletingStatementScope) {
+    uiState.deletingTransaction?.let { transaction ->
+        val scopeDescription = when (uiState.deletingScope) {
             TransactionSeriesScope.ONLY_THIS -> "somente esta movimentação"
             TransactionSeriesScope.THIS_AND_FUTURE -> "esta e as próximas movimentações"
             TransactionSeriesScope.ALL -> "todas as movimentações da série"
         }
         AlertDialog(
-            onDismissRequest = { deletingStatementTransaction = null },
+            onDismissRequest = screenViewModel::dismissDelete,
             title = { Text("Excluir movimentação?") },
             text = { Text("Será excluída $scopeDescription: ${transaction.description}.") },
             confirmButton = {
-                TextButton(onClick = {
-                    if (store.deleteManualTransaction(transaction.id, deletingStatementScope)) {
-                        deletingStatementTransaction = null
-                        refresh++
-                    }
-                }) {
+                TextButton(onClick = screenViewModel::confirmDelete) {
                     Text("Excluir", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { deletingStatementTransaction = null }) {
+                TextButton(onClick = screenViewModel::dismissDelete) {
                     Text("Cancelar")
                 }
             },
         )
     }
 
-    importPreview?.let { preview ->
+    uiState.importPreview?.let { preview ->
         AlertDialog(
-            onDismissRequest = { importPreview = null },
+            onDismissRequest = screenViewModel::dismissImportPreview,
             title = { Text("Prévia da importação Mobills") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
@@ -580,8 +388,8 @@ internal fun MonthlyStatementScreen(
                     if (preview.possibleDuplicateCount > 0) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
-                                checked = includePossibleDuplicates,
-                                onCheckedChange = { includePossibleDuplicates = it },
+                                checked = uiState.includePossibleDuplicates,
+                                onCheckedChange = screenViewModel::setIncludePossibleDuplicates,
                             )
                             Text("Importar também as possíveis duplicidades")
                         }
@@ -594,40 +402,34 @@ internal fun MonthlyStatementScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val result = store.importMobills(preview, includePossibleDuplicates)
-                    importPreview = null
-                    refresh++
-                    importMessage = "${result.imported} movimentações importadas" +
-                        if (result.alreadyImported > 0) {
-                            " · ${result.alreadyImported} já existentes"
-                        } else ""
-                }) { Text("Confirmar importação") }
+                TextButton(onClick = screenViewModel::confirmImport) {
+                    Text("Confirmar importação")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { importPreview = null }) { Text("Cancelar") }
+                TextButton(onClick = screenViewModel::dismissImportPreview) { Text("Cancelar") }
             },
         )
     }
 
-    importMessage?.let { message ->
+    uiState.importMessage?.let { message ->
         AlertDialog(
-            onDismissRequest = { importMessage = null },
+            onDismissRequest = screenViewModel::dismissImportMessage,
             title = { Text("Importação concluída") },
             text = { Text(message) },
             confirmButton = {
-                TextButton(onClick = { importMessage = null }) { Text("OK") }
+                TextButton(onClick = screenViewModel::dismissImportMessage) { Text("OK") }
             },
         )
     }
 
-    importError?.let { message ->
+    uiState.importError?.let { message ->
         AlertDialog(
-            onDismissRequest = { importError = null },
+            onDismissRequest = screenViewModel::dismissImportError,
             title = { Text("Não foi possível importar") },
             text = { Text(message) },
             confirmButton = {
-                TextButton(onClick = { importError = null }) { Text("OK") }
+                TextButton(onClick = screenViewModel::dismissImportError) { Text("OK") }
             },
         )
     }
