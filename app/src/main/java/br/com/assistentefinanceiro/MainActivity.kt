@@ -8,23 +8,31 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -32,6 +40,15 @@ import br.com.assistentefinanceiro.notifications.*
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.importing.SimpleXlsxReader
+import br.com.assistentefinanceiro.ui.financeIcon
+import br.com.assistentefinanceiro.ui.components.FinanceEmptyState
+import br.com.assistentefinanceiro.ui.components.FinanceIconTile
+import br.com.assistentefinanceiro.ui.components.FinanceNoticeCard
+import br.com.assistentefinanceiro.ui.components.FinanceStatusPill
+import br.com.assistentefinanceiro.ui.theme.AssistenteFinanceiroTheme
+import br.com.assistentefinanceiro.ui.theme.FinanceSpacing
+import br.com.assistentefinanceiro.ui.theme.FinanceTextStyles
+import br.com.assistentefinanceiro.ui.theme.financeColors
 import java.text.NumberFormat
 import java.io.File
 import java.time.LocalDate
@@ -96,13 +113,15 @@ private data class CategoryChoice(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF0A7D65))) {
+            AssistenteFinanceiroTheme {
                 val store = remember { DiagnosticStore(applicationContext) }
                 val preferences = remember { BankPackagePreferences(applicationContext) }
                 var screen by remember { mutableStateOf(AppScreen.STATEMENT) }
 
                 Scaffold(
+                    containerColor = MaterialTheme.colorScheme.background,
                     bottomBar = {
                         MainNavigationBar(screen = screen, onNavigate = { screen = it })
                     },
@@ -113,13 +132,9 @@ class MainActivity : ComponentActivity() {
                             AppScreen.DIAGNOSTIC -> DiagnosticScreen(
                                 store = store,
                                 preferences = preferences,
-                                onOpenStatement = { screen = AppScreen.STATEMENT },
+                                onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.ACCOUNTS -> AccountsScreen(
-                                store = store,
-                                onOpenStatement = { screen = AppScreen.STATEMENT },
-                                onOpenDiagnostic = { screen = AppScreen.DIAGNOSTIC },
-                            )
+                            AppScreen.ACCOUNTS -> AccountsScreen(store = store)
                             AppScreen.SEARCH -> TransactionSearchScreen(
                                 store = store,
                                 onBack = { screen = AppScreen.MORE },
@@ -128,18 +143,12 @@ class MainActivity : ComponentActivity() {
                                 store = store,
                                 onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.PLANNING -> PlanningScreen(
-                                store = store,
-                                onBack = { screen = AppScreen.STATEMENT },
-                            )
+                            AppScreen.PLANNING -> PlanningScreen(store = store)
                             AppScreen.DATA -> DataManagementScreen(
                                 store = store,
                                 onBack = { screen = AppScreen.MORE },
                             )
-                            AppScreen.BUDGET -> MonthlyBudgetScreen(
-                                store = store,
-                                onBack = { screen = AppScreen.STATEMENT },
-                            )
+                            AppScreen.BUDGET -> MonthlyBudgetScreen(store = store)
                             AppScreen.MORE -> MoreScreen(
                                 onSearch = { screen = AppScreen.SEARCH },
                                 onSummary = { screen = AppScreen.SUMMARY },
@@ -167,20 +176,37 @@ class MainActivity : ComponentActivity() {
             AppScreen.ACCOUNTS -> AppScreen.ACCOUNTS
             else -> AppScreen.MORE
         }
-        NavigationBar {
-            listOf(
-                Triple(AppScreen.STATEMENT, "▤", "Extrato"),
-                Triple(AppScreen.PLANNING, "◷", "Planejar"),
-                Triple(AppScreen.BUDGET, "R$", "Orçamento"),
-                Triple(AppScreen.ACCOUNTS, "▣", "Contas"),
-                Triple(AppScreen.MORE, "•••", "Mais"),
-            ).forEach { (destination, icon, label) ->
-                NavigationBarItem(
-                    selected = selected == destination,
-                    onClick = { onNavigate(destination) },
-                    icon = { Text(icon) },
-                    label = { Text(label) },
-                )
+        Column {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 0.dp,
+            ) {
+                listOf(
+                    Triple(AppScreen.STATEMENT, Icons.Rounded.ReceiptLong, "Extrato"),
+                    Triple(AppScreen.PLANNING, Icons.Rounded.EventNote, "Planejar"),
+                    Triple(AppScreen.BUDGET, Icons.Rounded.DonutLarge, "Orçamento"),
+                    Triple(AppScreen.ACCOUNTS, Icons.Rounded.AccountBalanceWallet, "Contas"),
+                    Triple(AppScreen.MORE, Icons.Rounded.MoreHoriz, "Mais"),
+                ).forEach { (destination, icon, label) ->
+                    NavigationBarItem(
+                        selected = selected == destination,
+                        onClick = { onNavigate(destination) },
+                        icon = {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = label,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -194,38 +220,125 @@ class MainActivity : ComponentActivity() {
         onDiagnostic: () -> Unit,
         onAbout: () -> Unit,
     ) {
-        Scaffold(topBar = { TopAppBar(title = { Text("Mais") }) }) { padding ->
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                TopAppBar(
+                    title = { Text("Mais") },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
+                )
+            },
+        ) { padding ->
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
                     Text("Consultas e relatórios", style = MaterialTheme.typography.titleMedium)
                 }
-                item { MoreOptionCard("Pesquisar movimentações", "Nome, período e situação", onSearch) }
-                item { MoreOptionCard("Resumo anual", "Entradas, saídas e saldo mês a mês", onSummary) }
                 item {
-                    Text("Segurança e suporte", style = MaterialTheme.typography.titleMedium)
+                    MoreOptionCard(
+                        Icons.Rounded.Search,
+                        "Pesquisar movimentações",
+                        "Nome, período e situação",
+                        onSearch,
+                    )
                 }
-                item { MoreOptionCard("Dados e segurança", "Backup, restauração, CSV e lixeira", onData) }
-                item { MoreOptionCard("Diagnóstico", "Notificações e aplicativos financeiros", onDiagnostic) }
-                item { MoreOptionCard("Sobre", "Versão e informações do aplicativo", onAbout) }
+                item {
+                    MoreOptionCard(
+                        Icons.Rounded.CalendarMonth,
+                        "Resumo anual",
+                        "Entradas, saídas e saldo mês a mês",
+                        onSummary,
+                    )
+                }
+                item {
+                    Text(
+                        "Segurança e suporte",
+                        modifier = Modifier.padding(top = FinanceSpacing.sm),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                item {
+                    MoreOptionCard(
+                        Icons.Rounded.Security,
+                        "Dados e segurança",
+                        "Backup, restauração, CSV e lixeira",
+                        onData,
+                    )
+                }
+                item {
+                    MoreOptionCard(
+                        Icons.Rounded.NotificationsActive,
+                        "Diagnóstico",
+                        "Notificações e aplicativos financeiros",
+                        onDiagnostic,
+                    )
+                }
+                item {
+                    MoreOptionCard(
+                        Icons.Rounded.Info,
+                        "Sobre",
+                        "Versão e informações do aplicativo",
+                        onAbout,
+                    )
+                }
             }
         }
     }
 
     @Composable
-    private fun MoreOptionCard(title: String, description: String, onClick: () -> Unit) {
-        Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+    private fun MoreOptionCard(
+        icon: ImageVector,
+        title: String,
+        description: String,
+        onClick: () -> Unit,
+    ) {
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                Surface(
+                    modifier = Modifier.size(40.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(21.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(FinanceSpacing.sm))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
-                    Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        description,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Text("›", style = MaterialTheme.typography.headlineSmall)
+                Icon(
+                    Icons.Rounded.ChevronRight,
+                    contentDescription = "Abrir $title",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -241,29 +354,60 @@ class MainActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         val versionCode = packageInfo.versionCode
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Sobre") },
-                    actions = { TextButton(onClick = onBack) { Text("Mais") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
-                    Card(modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(20.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(FinanceSpacing.lg),
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
-                            Text("Assistente Financeiro", style = MaterialTheme.typography.headlineSmall)
-                            Text("Versão $versionName")
+                            FinanceIconTile(
+                                icon = Icons.Rounded.AccountBalanceWallet,
+                                contentDescription = null,
+                                size = 64,
+                            )
                             Text(
-                                "Código $versionCode",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                "Assistente Financeiro",
+                                style = MaterialTheme.typography.headlineSmall,
+                                textAlign = TextAlign.Center,
+                            )
+                            FinanceStatusPill(
+                                text = "Versão $versionName · código $versionCode",
+                                foreground = MaterialTheme.colorScheme.onPrimaryContainer,
+                                background = MaterialTheme.colorScheme.primaryContainer,
                             )
                         }
                     }
@@ -285,7 +429,11 @@ class MainActivity : ComponentActivity() {
                             )
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Ver última versão no GitHub") }
+                    ) {
+                        Icon(Icons.Rounded.NewReleases, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Ver última versão no GitHub")
+                    }
                 }
                 item {
                     OutlinedButton(
@@ -298,7 +446,11 @@ class MainActivity : ComponentActivity() {
                             )
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Abrir projeto no GitHub") }
+                    ) {
+                        Icon(Icons.Rounded.OpenInNew, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Abrir projeto no GitHub")
+                    }
                 }
             }
         }
@@ -503,11 +655,20 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Assistente Financeiro") },
                     actions = {
-                        TextButton(
+                        IconButton(
+                            onClick = { refresh++ },
+                        ) {
+                            Icon(
+                                Icons.Rounded.Sync,
+                                contentDescription = "Atualizar movimentações",
+                            )
+                        }
+                        IconButton(
                             onClick = {
                                 importLauncher.launch(
                                     arrayOf(
@@ -517,16 +678,42 @@ class MainActivity : ComponentActivity() {
                             },
                             enabled = !readingImport,
                         ) {
-                            Text(if (readingImport) "Lendo…" else "Importar")
+                            if (readingImport) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Rounded.FileUpload,
+                                    contentDescription = "Importar dados do Mobills",
+                                )
+                            }
                         }
                     },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
+                if (readingImport) {
+                    item {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.primaryContainer,
+                        )
+                    }
+                }
                 item {
                     MonthSelector(
                         selectedMonth = selectedMonth,
@@ -535,92 +722,135 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(
-                                checked = pendingOnly,
-                                onCheckedChange = { pendingOnly = it },
-                            )
-                            Text("Mostrar somente pendentes")
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            FilterChip(
-                                selected = withoutCategoryOnly,
-                                onClick = { withoutCategoryOnly = !withoutCategoryOnly },
-                                label = { Text("Sem categoria") },
-                                modifier = Modifier.weight(1f),
-                            )
-                            FilterChip(
-                                selected = withoutSubcategoryOnly,
-                                onClick = { withoutSubcategoryOnly = !withoutSubcategoryOnly },
-                                label = { Text("Sem subcategoria") },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                        if (withoutCategoryOnly || withoutSubcategoryOnly) {
-                            TextButton(
-                                onClick = {
-                                    withoutCategoryOnly = false
-                                    withoutSubcategoryOnly = false
-                                },
-                            ) { Text("Limpar filtros de classificação") }
-                        }
-                    }
-                }
-                item {
                     StatementSummary(
                         statement = statement,
                         generalProjectedBalance = generalProjectedBalance,
                     )
                 }
-                if (unconsolidatedCardTransactionCount > 0) {
-                    item {
-                        Card {
-                            Text(
-                                "$unconsolidatedCardTransactionCount compras de cartão ainda não " +
-                                    "foram vinculadas a uma fatura com vencimento. " +
-                                    "Revise o cadastro do cartão em Contas.",
-                                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                        ) {
+                            FilterChip(
+                                selected = pendingOnly,
+                                onClick = { pendingOnly = !pendingOnly },
+                                label = { Text("Pendentes") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Rounded.Schedule,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                },
+                                modifier = Modifier.weight(1f),
                             )
+                            FilterChip(
+                                selected = withoutCategoryOnly,
+                                onClick = { withoutCategoryOnly = !withoutCategoryOnly },
+                                label = { Text("Sem categoria") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Rounded.HelpOutline,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            FilterChip(
+                                selected = withoutSubcategoryOnly,
+                                onClick = { withoutSubcategoryOnly = !withoutSubcategoryOnly },
+                                label = { Text("Sem subcategoria") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Rounded.AccountTree,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                },
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (pendingOnly || withoutCategoryOnly || withoutSubcategoryOnly) {
+                                TextButton(
+                                    onClick = {
+                                        pendingOnly = false
+                                        withoutCategoryOnly = false
+                                        withoutSubcategoryOnly = false
+                                    },
+                                ) { Text("Limpar") }
+                            }
                         }
                     }
                 }
-                item {
-                    OutlinedButton(
-                        onClick = { refresh++ },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Atualizar movimentações")
+                if (unconsolidatedCardTransactionCount > 0) {
+                    item {
+                        FinanceNoticeCard(
+                            icon = Icons.Rounded.CreditCardOff,
+                            title = "Compras sem fatura",
+                            description = "$unconsolidatedCardTransactionCount compras de cartão " +
+                                "ainda não foram vinculadas a uma fatura com vencimento. " +
+                                "Revise o cadastro do cartão em Contas.",
+                            foreground = MaterialTheme.colorScheme.onErrorContainer,
+                            background = MaterialTheme.colorScheme.errorContainer,
+                        )
                     }
                 }
                 if (visibleGroups.isEmpty()) {
                     item {
-                        Card {
-                            Text(
-                                text = if (pendingOnly) {
-                                    "Nenhuma movimentação pendente neste mês."
+                        val filtersActive = pendingOnly || withoutCategoryOnly ||
+                            withoutSubcategoryOnly
+                        FinanceEmptyState(
+                            icon = if (filtersActive) {
+                                Icons.Rounded.SearchOff
+                            } else {
+                                Icons.Rounded.ReceiptLong
+                            },
+                            title = if (filtersActive) {
+                                "Nenhuma movimentação com estes filtros"
+                            } else {
+                                "Nenhuma movimentação em ${formatMonth(selectedMonth)}"
+                            },
+                            description = if (filtersActive) {
+                                "Remova um ou mais filtros para ampliar os resultados."
+                            } else {
+                                "As movimentações reconhecidas ou importadas aparecerão aqui."
+                            },
+                            actionLabel = if (filtersActive) "Limpar filtros" else "Importar dados",
+                            onAction = {
+                                if (filtersActive) {
+                                    pendingOnly = false
+                                    withoutCategoryOnly = false
+                                    withoutSubcategoryOnly = false
                                 } else {
-                                    "Nenhuma movimentação reconhecida neste mês."
-                                },
-                                modifier = Modifier.fillMaxWidth().padding(20.dp),
-                                textAlign = TextAlign.Center,
-                            )
-                        }
+                                    importLauncher.launch(
+                                        arrayOf(
+                                            "application/vnd.openxmlformats-officedocument." +
+                                                "spreadsheetml.sheet"
+                                        )
+                                    )
+                                }
+                            },
+                        )
                     }
                 }
                 visibleGroups.forEach { group ->
                     item(key = "date-${group.date}") {
                         Text(
                             text = formatDate(group.date),
-                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(
+                                top = FinanceSpacing.sm,
+                                start = FinanceSpacing.xxs,
+                            ),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     items(
@@ -713,7 +943,7 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { importPreview = null },
                 title = { Text("Prévia da importação Mobills") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                         Text("Realizados: ${preview.readyCount}")
                         Text("Pendentes: ${preview.pendingCount}")
                         Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
@@ -785,8 +1015,6 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AccountsScreen(
         store: DiagnosticStore,
-        onOpenStatement: () -> Unit,
-        onOpenDiagnostic: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         val accounts = remember(refresh) { store.financialAccounts() }
@@ -825,19 +1053,23 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Contas e cartões") },
-                    actions = {
-                        TextButton(onClick = onOpenStatement) { Text("Extrato") }
-                        TextButton(onClick = onOpenDiagnostic) { Text("Diagnóstico") }
-                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 if (bankBalances.isNotEmpty()) {
                     item {
@@ -847,75 +1079,159 @@ class MainActivity : ComponentActivity() {
                         val projected = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
                                 total, balance -> total + balance.projectedBalance
                         }
-                        Card {
+                        val semantic = MaterialTheme.financeColors
+                        Surface(
+                            shape = MaterialTheme.shapes.extraLarge,
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
                             Column(
-                                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                             ) {
-                                Text("Saldo consolidado", style = MaterialTheme.typography.titleMedium)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    FinanceIconTile(
+                                        icon = Icons.Rounded.AccountBalanceWallet,
+                                        contentDescription = null,
+                                    )
+                                    Spacer(Modifier.width(FinanceSpacing.sm))
+                                    Text(
+                                        "Saldo consolidado",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                }
                                 Text(
                                     formatCurrency(realized.toPlainString()),
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    color = if (realized.signum() < 0) Color(0xFFBA3B46)
-                                    else Color(0xFF0A7D65),
+                                    style = FinanceTextStyles.moneyHero,
+                                    color = if (realized.signum() < 0) {
+                                        semantic.expense
+                                    } else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
                                 )
-                                Text("Previsto: ${formatCurrency(projected.toPlainString())}")
+                                SummaryValue(
+                                    label = "Saldo previsto",
+                                    amount = projected.toPlainString(),
+                                    color = if (projected.signum() < 0) {
+                                        semantic.expense
+                                    } else semantic.income,
+                                )
                             }
                         }
                     }
                 }
                 item {
-                    Button(
-                        onClick = { creatingAccount = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Adicionar conta ou cartão") }
-                }
-                if (accounts.count { it.type == FinancialAccountType.BANK_ACCOUNT } >= 2) {
-                    item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
+                        Button(
+                            onClick = { creatingAccount = true },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(
+                                Icons.Rounded.Add,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Adicionar")
+                        }
                         OutlinedButton(
                             onClick = { creatingTransfer = true },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Transferir entre contas") }
+                            enabled = accounts.count {
+                                it.type == FinancialAccountType.BANK_ACCOUNT
+                            } >= 2,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(
+                                Icons.Rounded.SwapHoriz,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Transferir")
+                        }
+                    }
+                }
+                if (accounts.isEmpty()) {
+                    item {
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.AccountBalanceWallet,
+                            title = "Nenhuma conta cadastrada",
+                            description = "Adicione uma conta bancária ou cartão para começar.",
+                            actionLabel = "Adicionar conta",
+                            onAction = { creatingAccount = true },
+                        )
                     }
                 }
                 items(accounts, key = { "account-${it.id}" }) { account ->
                     val balance = bankBalances[account]
-                    Card {
+                    val semantic = MaterialTheme.financeColors
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(account.name, style = MaterialTheme.typography.titleMedium)
+                                FinanceIconTile(
+                                    icon = if (
+                                        account.type == FinancialAccountType.CREDIT_CARD
+                                    ) Icons.Rounded.CreditCard else Icons.Rounded.AccountBalance,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        account.name,
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Text(
+                                        account.type.displayName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                                 if (account.isDefault) {
-                                    Text("Padrão", color = MaterialTheme.colorScheme.primary)
+                                    FinanceStatusPill(
+                                        text = "Padrão",
+                                        foreground = semantic.onRealizedContainer,
+                                        background = semantic.realizedContainer,
+                                        icon = Icons.Rounded.CheckCircle,
+                                    )
                                 }
                             }
-                            Text(
-                                account.type.displayName,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
                             if (account.type == FinancialAccountType.CREDIT_CARD) {
                                 Text(
                                     "Fechamento: ${account.closingDay ?: "não informado"} · " +
                                         "Vencimento: ${account.dueDay ?: "não informado"}",
                                     style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             } else if (balance != null) {
                                 Text(
-                                    "Saldo atual: ${formatCurrency(balance.realizedBalance.toPlainString())}",
+                                    formatCurrency(balance.realizedBalance.toPlainString()),
                                     color = if (balance.realizedBalance.signum() < 0) {
-                                        Color(0xFFBA3B46)
-                                    } else Color(0xFF0A7D65),
-                                    style = MaterialTheme.typography.titleMedium,
+                                        semantic.expense
+                                    } else semantic.income,
+                                    style = FinanceTextStyles.moneyLarge,
+                                    maxLines = 1,
                                 )
                                 if (balance.projectedBalance != balance.realizedBalance) {
                                     Text(
                                         "Previsto: ${formatCurrency(balance.projectedBalance.toPlainString())}",
                                         style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }
@@ -924,14 +1240,32 @@ class MainActivity : ComponentActivity() {
                                 horizontalArrangement = Arrangement.End,
                             ) {
                                 TextButton(onClick = { editingAccount = account }) {
+                                    Icon(
+                                        Icons.Rounded.Edit,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(FinanceSpacing.xxs))
                                     Text("Editar")
                                 }
                                 if (account.type == FinancialAccountType.CREDIT_CARD) {
                                     TextButton(onClick = { viewingInvoicesFor = account }) {
+                                        Icon(
+                                            Icons.Rounded.ReceiptLong,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.width(FinanceSpacing.xxs))
                                         Text("Faturas")
                                     }
                                 } else {
                                     TextButton(onClick = { viewingMovementsFor = account }) {
+                                        Icon(
+                                            Icons.Rounded.ListAlt,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.width(FinanceSpacing.xxs))
                                         Text("Movimentações")
                                     }
                                 }
@@ -1014,7 +1348,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text("Transferir entre contas") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     Box {
                         OutlinedButton(
                             onClick = { sourceExpanded = true },
@@ -1139,42 +1473,79 @@ class MainActivity : ComponentActivity() {
         var deletingTransaction by remember { mutableStateOf<FinancialTransactionRecord?>(null) }
         var deletingSeriesScope by remember { mutableStateOf(TransactionSeriesScope.ONLY_THIS) }
         var deletingTransfer by remember { mutableStateOf<AccountMovementRecord?>(null) }
+        val semantic = MaterialTheme.financeColors
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text(account.name) },
-                    actions = { TextButton(onClick = onBack) { Text("Contas") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
-                item { Text("Movimentações da conta", style = MaterialTheme.typography.headlineSmall) }
                 item {
-                    Card {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(18.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
-                            Text("Saldo atual", style = MaterialTheme.typography.labelLarge)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.AccountBalance,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Text(
+                                    "Saldo atual",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                            }
                             Text(
                                 formatCurrency(balance.realizedBalance.toPlainString()),
-                                style = MaterialTheme.typography.headlineSmall,
+                                style = FinanceTextStyles.moneyHero,
                                 color = if (balance.realizedBalance.signum() < 0) {
-                                    Color(0xFFBA3B46)
-                                } else Color(0xFF0A7D65),
+                                    semantic.expense
+                                } else semantic.income,
+                                maxLines = 1,
                             )
-                            Text(
-                                "Saldo previsto: " +
-                                    formatCurrency(balance.projectedBalance.toPlainString()),
+                            SummaryValue(
+                                label = "Saldo previsto",
+                                amount = balance.projectedBalance.toPlainString(),
+                                color = if (balance.projectedBalance.signum() < 0) {
+                                    semantic.expense
+                                } else semantic.income,
                             )
                             account.openingBalanceDate?.let { date ->
                                 Text(
                                     "Saldo inicial em ${date.format(SHORT_DATE_FORMATTER)}: " +
                                         formatCurrency(account.openingBalance.toPlainString()),
                                     style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -1184,7 +1555,11 @@ class MainActivity : ComponentActivity() {
                     Button(
                         onClick = { addingTransaction = true },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Adicionar receita ou despesa") }
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Adicionar receita ou despesa")
+                    }
                 }
                 item {
                     MonthSelector(
@@ -1195,45 +1570,88 @@ class MainActivity : ComponentActivity() {
                 }
                 if (visibleLedgerItems.isEmpty()) {
                     item {
-                        Card {
-                            Text(
-                                "Nenhuma movimentação nesta conta em ${formatMonth(selectedMonth)}.",
-                                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                            )
-                        }
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.ReceiptLong,
+                            title = "Nenhuma movimentação",
+                            description = "Não há receitas ou despesas nesta conta em " +
+                                "${formatMonth(selectedMonth)}.",
+                            actionLabel = "Adicionar movimentação",
+                            onAction = { addingTransaction = true },
+                        )
                     }
                 }
                 items(visibleLedgerItems, key = { it.key }) { ledgerItem ->
-                    Card(onClick = {
-                        ledgerItem.transaction?.takeIf {
-                            it.origin == TransactionOrigin.MANUAL
-                        }?.let { editingTransaction = it }
-                    }) {
+                    val isExpense = ledgerItem.direction ==
+                        FinancialTransactionDirection.EXPENSE
+                    val valueColor = if (isExpense) semantic.expense else semantic.income
+                    val valueContainer = if (isExpense) {
+                        semantic.expenseContainer
+                    } else semantic.incomeContainer
+                    val itemIcon = ledgerItem.transaction?.category?.financeIcon()
+                        ?: if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
+                            Icons.Rounded.SwapHoriz
+                        } else Icons.Rounded.ReceiptLong
+                    Surface(
+                        onClick = {
+                            ledgerItem.transaction?.takeIf {
+                                it.origin == TransactionOrigin.MANUAL
+                            }?.let { editingTransaction = it }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(FinanceSpacing.md),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            FinanceIconTile(
+                                icon = itemIcon,
+                                contentDescription = null,
+                                containerColor = valueContainer,
+                                iconColor = valueColor,
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.sm))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(ledgerItem.description, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    ledgerItem.description,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                                 Text(
                                     ledgerItem.occurredAt.toLocalDate().format(SHORT_DATE_FORMATTER) +
                                         (ledgerItem.detail.takeIf { it.isNotBlank() }
                                             ?.let { " · $it" } ?: ""),
                                     style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            Text(
-                                (if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
-                                    "- "
-                                } else "+ ") + formatCurrency(ledgerItem.amount.toPlainString()),
-                                color = if (ledgerItem.direction == FinancialTransactionDirection.EXPENSE) {
-                                    Color(0xFFBA3B46)
-                                } else Color(0xFF0A7D65),
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
-                                TextButton(onClick = { deletingTransfer = ledgerItem.movement }) {
-                                    Text("Excluir", color = Color(0xFFBA3B46))
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    (if (isExpense) "− " else "+ ") +
+                                        formatCurrency(ledgerItem.amount.toPlainString()),
+                                    color = valueColor,
+                                    style = FinanceTextStyles.moneyMedium,
+                                    maxLines = 1,
+                                )
+                                if (ledgerItem.movement?.type == AccountMovementType.TRANSFER) {
+                                    IconButton(
+                                        onClick = { deletingTransfer = ledgerItem.movement },
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.DeleteOutline,
+                                            contentDescription = "Excluir transferência",
+                                            tint = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1293,7 +1711,7 @@ class MainActivity : ComponentActivity() {
                             refresh++
                             onChanged()
                         }
-                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                    }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {
                     TextButton(onClick = { deletingTransaction = null }) { Text("Cancelar") }
@@ -1312,7 +1730,7 @@ class MainActivity : ComponentActivity() {
                             refresh++
                             onChanged()
                         }
-                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                    }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {
                     TextButton(onClick = { deletingTransfer = null }) { Text("Cancelar") }
@@ -1344,7 +1762,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text("Nova movimentação") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(
                             selected = direction == FinancialTransactionDirection.EXPENSE,
@@ -1448,7 +1866,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text(if (isNew) "Nova conta ou cartão" else "Editar conta ou cartão") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it.take(60) },
@@ -1482,7 +1900,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     if (type == FinancialAccountType.CREDIT_CARD) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                             OutlinedTextField(
                                 value = closingDay,
                                 onValueChange = { closingDay = it.filter(Char::isDigit).take(2) },
@@ -1618,20 +2036,41 @@ class MainActivity : ComponentActivity() {
             return
         }
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
-                    title = { Text(account.name) },
-                    actions = { TextButton(onClick = onBack) { Text("Contas") } },
+                    title = {
+                        Column {
+                            Text("Faturas")
+                            Text(
+                                account.name,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.Rounded.ArrowBack,
+                                contentDescription = "Voltar para contas",
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
-                item {
-                    Text("Faturas", style = MaterialTheme.typography.headlineSmall)
-                }
                 item {
                     MonthSelector(
                         selectedMonth = selectedMonth,
@@ -1641,53 +2080,121 @@ class MainActivity : ComponentActivity() {
                 }
                 if (visibleInvoice == null) {
                     item {
-                        Card {
-                            Text(
-                                "Nenhuma fatura em ${formatMonth(selectedMonth)}.",
-                                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                            )
-                        }
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.CreditCard,
+                            title = "Nenhuma fatura em ${formatMonth(selectedMonth)}",
+                            description = "As compras vinculadas ao cartão aparecerão aqui.",
+                        )
                     }
                 }
                 visibleInvoice?.let { invoice ->
                 item(key = "invoice-${invoice.id}") {
-                    Card(onClick = { selectedInvoice = invoice }) {
+                    val semantic = MaterialTheme.financeColors
+                    val overdue = invoice.status == CreditCardInvoiceStatus.OVERDUE
+                    val paid = invoice.status == CreditCardInvoiceStatus.PAID
+                    Surface(
+                        onClick = { selectedInvoice = invoice },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 val referenceMonth = invoice.dueDate?.let(YearMonth::from)
                                     ?: invoice.closingPeriod
-                                Text(
-                                    formatMonth(referenceMonth),
-                                    style = MaterialTheme.typography.titleMedium,
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.CreditCard,
+                                    contentDescription = null,
                                 )
-                                Text(
-                                    formatCurrency(invoice.total.toPlainString()),
-                                    color = if (invoice.total.signum() < 0) {
-                                        Color(0xFF0A7D65)
-                                    } else {
-                                        Color(0xFFBA3B46)
-                                    },
-                                    style = MaterialTheme.typography.titleMedium,
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        formatMonth(referenceMonth),
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Text(
+                                        "${invoice.transactionCount} movimentações",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Icon(
+                                    Icons.Rounded.ChevronRight,
+                                    contentDescription = "Abrir fatura",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Text(
-                                invoice.status.displayName + " · " +
-                                    "${invoice.transactionCount} movimentações",
+                                formatCurrency(invoice.total.toPlainString()),
+                                color = if (invoice.total.signum() < 0) {
+                                    semantic.income
+                                } else MaterialTheme.colorScheme.onSurface,
+                                style = FinanceTextStyles.moneyHero,
+                                maxLines = 1,
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                FinanceStatusPill(
+                                    text = invoice.status.displayName,
+                                    foreground = when {
+                                        overdue -> MaterialTheme.colorScheme.onErrorContainer
+                                        paid -> semantic.onRealizedContainer
+                                        else -> semantic.onPendingContainer
+                                    },
+                                    background = when {
+                                        overdue -> MaterialTheme.colorScheme.errorContainer
+                                        paid -> semantic.realizedContainer
+                                        else -> semantic.pendingContainer
+                                    },
+                                    icon = when {
+                                        overdue -> Icons.Rounded.WarningAmber
+                                        paid -> Icons.Rounded.CheckCircle
+                                        else -> Icons.Rounded.Schedule
+                                    },
+                                )
+                                Text(
+                                    "Vence " + (
+                                        invoice.dueDate?.format(SHORT_DATE_FORMATTER)
+                                            ?: "sem data"
+                                        ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Text(
-                                "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
-                                    (invoice.dueDate?.let {
-                                        " · vence em ${it.format(SHORT_DATE_FORMATTER)}"
-                                    } ?: " · vencimento não informado"),
+                                "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (invoice.paidAmount.signum() > 0 && invoice.total.signum() != 0) {
+                                val paidFraction = (
+                                    invoice.paidAmount.toFloat() / invoice.total.abs().toFloat()
+                                ).coerceIn(0f, 1f)
+                                LinearProgressIndicator(
+                                    progress = { paidFraction },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = semantic.realized,
+                                    trackColor = semantic.realizedContainer,
+                                )
+                                Text(
+                                    "Pago ${formatCurrency(invoice.paidAmount.toPlainString())}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -1733,162 +2240,255 @@ class MainActivity : ComponentActivity() {
         var officialTotal by remember(invoice.id, invoice.total) {
             mutableStateOf(invoice.total.toPlainString().replace('.', ','))
         }
+        val semantic = MaterialTheme.financeColors
+        val overdue = invoice.status == CreditCardInvoiceStatus.OVERDUE
+        val paid = invoice.status == CreditCardInvoiceStatus.PAID
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text(formatMonth(referenceMonth)) },
-                    actions = { TextButton(onClick = onBack) { Text("Faturas") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.Rounded.ArrowBack,
+                                contentDescription = "Voltar para faturas",
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
-                    Card {
+                    Surface(
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(18.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                         ) {
-                            Text(account.name, style = MaterialTheme.typography.titleMedium)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.CreditCard,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        account.name,
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Text(
+                                        "${transactions.size} movimentações",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                FinanceStatusPill(
+                                    text = invoice.status.displayName,
+                                    foreground = when {
+                                        overdue -> MaterialTheme.colorScheme.onErrorContainer
+                                        paid -> semantic.onRealizedContainer
+                                        else -> semantic.onPendingContainer
+                                    },
+                                    background = when {
+                                        overdue -> MaterialTheme.colorScheme.errorContainer
+                                        paid -> semantic.realizedContainer
+                                        else -> semantic.pendingContainer
+                                    },
+                                    icon = when {
+                                        overdue -> Icons.Rounded.WarningAmber
+                                        paid -> Icons.Rounded.CheckCircle
+                                        else -> Icons.Rounded.Schedule
+                                    },
+                                )
+                            }
                             Text(
                                 formatCurrency(invoice.total.toPlainString()),
                                 color = if (invoice.total.signum() < 0) {
-                                    Color(0xFF0A7D65)
-                                } else {
-                                    Color(0xFFBA3B46)
-                                },
-                                style = MaterialTheme.typography.headlineSmall,
+                                    semantic.income
+                                } else MaterialTheme.colorScheme.onSurface,
+                                style = FinanceTextStyles.moneyHero,
+                                maxLines = 1,
                             )
-                            Text("${invoice.status.displayName} · ${transactions.size} movimentações")
                             if (invoice.adjustmentAmount.signum() != 0) {
-                                Text(
-                                    (if (invoice.adjustmentAmount.signum() > 0) "Débito" else "Crédito") +
-                                        " de ajuste: " +
-                                        formatCurrency(invoice.adjustmentAmount.abs().toPlainString()),
-                                    style = MaterialTheme.typography.bodySmall,
+                                FinanceNoticeCard(
+                                    icon = Icons.Rounded.Tune,
+                                    title = "Ajuste aplicado",
+                                    description = (
+                                        if (invoice.adjustmentAmount.signum() > 0) {
+                                            "Débito de ajuste: "
+                                        } else {
+                                            "Crédito de ajuste: "
+                                        }
+                                        ) + formatCurrency(
+                                        invoice.adjustmentAmount.abs().toPlainString()
+                                    ),
+                                    foreground = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    background = MaterialTheme.colorScheme.tertiaryContainer,
                                 )
                             }
-                            if (invoice.paidAmount.signum() > 0) {
-                                Text("Pago: ${formatCurrency(invoice.paidAmount.toPlainString())}")
-                            }
-                            if (invoice.outstandingAmount.signum() > 0) {
-                                Text(
-                                    "Saldo: ${formatCurrency(invoice.outstandingAmount.toPlainString())}",
-                                    color = Color(0xFFBA3B46),
-                                )
-                            }
-                            OutlinedButton(
-                                onClick = { adjustingInvoice = true },
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text("Ajustar valor da fatura") }
+                                horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
+                            ) {
+                                SummaryValue(
+                                    label = "Pago",
+                                    amount = invoice.paidAmount.toPlainString(),
+                                    color = semantic.income,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                SummaryValue(
+                                    label = "Em aberto",
+                                    amount = invoice.outstandingAmount.toPlainString(),
+                                    color = if (invoice.outstandingAmount.signum() > 0) {
+                                        semantic.expense
+                                    } else semantic.realized,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                             Text(
                                 "Fecha em ${invoice.closingDate.format(SHORT_DATE_FORMATTER)}" +
                                     (invoice.dueDate?.let {
                                         " · vence em ${it.format(SHORT_DATE_FORMATTER)}"
                                     } ?: " · vencimento não informado"),
                                 style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            if (invoice.outstandingAmount.signum() > 0) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                            ) {
+                                OutlinedButton(
+                                    onClick = { adjustingInvoice = true },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Tune,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(FinanceSpacing.xs))
+                                    Text("Ajustar")
+                                }
                                 Button(
                                     onClick = { addingPayment = true },
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) { Text("Registrar pagamento") }
+                                    enabled = invoice.outstandingAmount.signum() > 0,
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Payments,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(FinanceSpacing.xs))
+                                    Text("Pagar")
+                                }
                             }
                         }
                     }
                 }
                 if (payments.isNotEmpty()) {
-                    item { Text("Pagamentos", style = MaterialTheme.typography.titleLarge) }
+                    item {
+                        Text(
+                            "Pagamentos",
+                            modifier = Modifier.padding(top = FinanceSpacing.sm),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
                     items(payments, key = { "invoice-payment-${it.id}" }) { payment ->
-                        Card {
+                        Surface(
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.CheckCircle,
+                                    contentDescription = null,
+                                    containerColor = semantic.realizedContainer,
+                                    iconColor = semantic.onRealizedContainer,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         formatCurrency(payment.amount.toPlainString()),
-                                        color = Color(0xFF0A7D65),
-                                        style = MaterialTheme.typography.titleMedium,
+                                        color = semantic.income,
+                                        style = FinanceTextStyles.moneyMedium,
                                     )
                                     Text(
                                         payment.paidAt.format(SHORT_DATE_FORMATTER),
                                         style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     payment.sourceAccountName?.let { name ->
                                         Text(
                                             "Pago com $name",
                                             style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
                                 }
-                                TextButton(onClick = { deletingPayment = payment }) {
-                                    Text("Excluir", color = Color(0xFFBA3B46))
+                                IconButton(onClick = { deletingPayment = payment }) {
+                                    Icon(
+                                        Icons.Rounded.DeleteOutline,
+                                        contentDescription = "Excluir pagamento",
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
                                 }
                             }
                         }
                     }
                 }
-                item { Text("Lançamentos", style = MaterialTheme.typography.titleLarge) }
+                item {
+                    Text(
+                        "Lançamentos",
+                        modifier = Modifier.padding(top = FinanceSpacing.sm),
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                }
                 items(transactions, key = { "invoice-transaction-${it.id}" }) { transaction ->
-                    Card(onClick = { editingInvoiceTransaction = transaction }) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(
-                                    transaction.description,
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.titleMedium,
-                                )
-                                Text(
-                                    (if (transaction.direction == FinancialTransactionDirection.EXPENSE) {
-                                        "- "
-                                    } else {
-                                        "+ "
-                                    }) + formatCurrency(transaction.amount),
-                                    color = if (
-                                        transaction.direction == FinancialTransactionDirection.EXPENSE
-                                    ) Color(0xFFBA3B46) else Color(0xFF0A7D65),
-                                )
-                            }
-                            val occurredAt = runCatching {
-                                LocalDateTime.parse(transaction.occurredAt)
-                            }.getOrNull()
-                            val dateLabel = occurredAt?.toLocalDate()?.format(SHORT_DATE_FORMATTER)
-                                ?.let { date ->
-                                    if (transaction.origin == TransactionOrigin.MOBILLS) {
-                                        "Referência $date"
-                                    } else {
-                                        date
-                                    }
-                                }
-                            Text(
-                                listOfNotNull(
-                                    transaction.categoryDisplayName,
-                                    dateLabel,
-                                    if (transaction.origin == TransactionOrigin.MOBILLS) {
-                                        "Mobills"
-                                    } else {
-                                        "Notificação"
-                                    },
-                                    if (transaction.status == TransactionStatus.PENDING) {
-                                        "Pendente"
-                                    } else {
-                                        "Realizada"
-                                    },
-                                ).joinToString(" · "),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                    val occurredAt = runCatching {
+                        LocalDateTime.parse(transaction.occurredAt)
+                    }.getOrNull()
+                    val dateLabel = occurredAt?.toLocalDate()?.format(SHORT_DATE_FORMATTER)
+                        ?.let { date ->
+                            if (transaction.origin == TransactionOrigin.MOBILLS) {
+                                "Referência $date"
+                            } else date
                         }
-                    }
+                    TransactionCard(
+                        transaction = transaction,
+                        onClick = { editingInvoiceTransaction = transaction },
+                        footerText = listOfNotNull(
+                            dateLabel,
+                            if (transaction.origin == TransactionOrigin.MOBILLS) {
+                                "Mobills"
+                            } else "Notificação",
+                        ).joinToString(" · "),
+                    )
                 }
             }
         }
@@ -1901,7 +2501,7 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { adjustingInvoice = false },
                 title = { Text("Ajustar valor da fatura") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                         Text("Compras: ${formatCurrency(invoice.baseTotal.toPlainString())}")
                         OutlinedTextField(
                             value = officialTotal,
@@ -1971,7 +2571,7 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { addingPayment = false },
                 title = { Text("Registrar pagamento") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                         Text(
                             "Saldo da fatura: " +
                                 formatCurrency(invoice.outstandingAmount.toPlainString())
@@ -2055,7 +2655,7 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     TextButton(onClick = {
                         if (onDeletePayment(payment.id)) deletingPayment = null
-                    }) { Text("Excluir", color = Color(0xFFBA3B46)) }
+                    }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {
                     TextButton(onClick = { deletingPayment = null }) { Text("Cancelar") }
@@ -2076,7 +2676,7 @@ class MainActivity : ComponentActivity() {
         val selectedDate = value.takeIf(String::isNotBlank)?.let {
             runCatching { LocalDate.parse(it) }.getOrNull()
         }
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xxs)) {
             OutlinedButton(
                 onClick = { showingPicker = true },
                 modifier = Modifier.fillMaxWidth(),
@@ -2129,7 +2729,11 @@ class MainActivity : ComponentActivity() {
         onNext: () -> Unit,
     ) {
         val swipeThreshold = with(LocalDensity.current) { 72.dp.toPx() }
-        Card {
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2148,17 +2752,27 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                     }
-                    .padding(8.dp),
+                    .padding(horizontal = FinanceSpacing.xxs, vertical = FinanceSpacing.xxs),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onPrevious) { Text("‹") }
+                IconButton(onClick = onPrevious) {
+                    Icon(
+                        Icons.Rounded.ChevronLeft,
+                        contentDescription = "Mês anterior",
+                    )
+                }
                 Text(
                     text = formatMonth(selectedMonth),
                     modifier = Modifier.weight(1f),
                     textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                 )
-                TextButton(onClick = onNext) { Text("›") }
+                IconButton(onClick = onNext) {
+                    Icon(
+                        Icons.Rounded.ChevronRight,
+                        contentDescription = "Próximo mês",
+                    )
+                }
             }
         }
     }
@@ -2168,76 +2782,116 @@ class MainActivity : ComponentActivity() {
         statement: MonthlyStatement,
         generalProjectedBalance: java.math.BigDecimal,
     ) {
-        val balanceColor = if (statement.balance.signum() < 0) {
-            Color(0xFFBA3B46)
-        } else {
-            Color(0xFF0A7D65)
-        }
+        val semantic = MaterialTheme.financeColors
+        val projectedColor = if (generalProjectedBalance.signum() < 0) {
+            semantic.expense
+        } else MaterialTheme.colorScheme.onSurface
 
-        Card {
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
-                Text("Resultado realizado", style = MaterialTheme.typography.labelLarge)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FinanceIconTile(
+                        icon = Icons.Rounded.AccountBalanceWallet,
+                        contentDescription = null,
+                    )
+                    Spacer(Modifier.width(FinanceSpacing.sm))
+                    Column {
+                        Text(
+                            "Saldo geral projetado",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "Até o fim de ${formatMonth(statement.period)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 Text(
-                    text = formatCurrency(statement.balance.toPlainString()),
-                    color = balanceColor,
-                    style = MaterialTheme.typography.headlineMedium,
+                    text = formatCurrency(generalProjectedBalance.toPlainString()),
+                    color = projectedColor,
+                    style = FinanceTextStyles.moneyHero,
+                    maxLines = 1,
                 )
-                Text(
-                    text = "Somente valores pagos ou recebidos",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                HorizontalDivider()
-                Row(Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
+                ) {
                     SummaryValue(
                         label = "Entradas",
                         amount = statement.totalIncome.toPlainString(),
-                        color = Color(0xFF0A7D65),
+                        prefix = "+ ",
+                        color = semantic.income,
                         modifier = Modifier.weight(1f),
                     )
                     SummaryValue(
-                        label = "Despesas",
+                        label = "Saídas",
                         amount = statement.totalExpense.toPlainString(),
-                        color = Color(0xFFBA3B46),
+                        prefix = "− ",
+                        color = semantic.expense,
                         modifier = Modifier.weight(1f),
                     )
                 }
-                HorizontalDivider()
-                Text("Resultado previsto", style = MaterialTheme.typography.labelLarge)
-                Text(
-                    text = formatCurrency(statement.projectedBalance.toPlainString()),
-                    color = if (statement.projectedBalance.signum() < 0) {
-                        Color(0xFFBA3B46)
-                    } else {
-                        Color(0xFF0A7D65)
-                    },
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                Text(
-                    text = "Inclui pendências: + " +
-                        formatCurrency(statement.pendingIncome.toPlainString()) +
-                        " / - " + formatCurrency(statement.pendingExpense.toPlainString()),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                HorizontalDivider()
-                Text("Saldo geral projetado", style = MaterialTheme.typography.labelLarge)
-                Text(
-                    text = formatCurrency(generalProjectedBalance.toPlainString()),
-                    color = if (generalProjectedBalance.signum() < 0) {
-                        Color(0xFFBA3B46)
-                    } else Color(0xFF0A7D65),
-                    style = MaterialTheme.typography.headlineSmall,
-                )
-                Text(
-                    "Saldo acumulado das contas bancárias até o fim de " +
-                        formatMonth(statement.period),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(FinanceSpacing.sm),
+                        horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
+                    ) {
+                        SummaryValue(
+                            label = "Resultado realizado",
+                            amount = statement.balance.toPlainString(),
+                            color = if (statement.balance.signum() < 0) {
+                                semantic.expense
+                            } else semantic.income,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SummaryValue(
+                            label = "Resultado previsto",
+                            amount = statement.projectedBalance.toPlainString(),
+                            color = if (statement.projectedBalance.signum() < 0) {
+                                semantic.expense
+                            } else semantic.income,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                if (
+                    statement.pendingIncome.signum() != 0 ||
+                    statement.pendingExpense.signum() != 0
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xxs),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Rounded.Schedule,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = semantic.pending,
+                        )
+                        Text(
+                            text = "Pendências: + " +
+                                formatCurrency(statement.pendingIncome.toPlainString()) +
+                                " / − " +
+                                formatCurrency(statement.pendingExpense.toPlainString()),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         }
     }
@@ -2248,8 +2902,8 @@ class MainActivity : ComponentActivity() {
     ) {
         Card {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 Text(
                     text = "Despesas por categoria",
@@ -2257,7 +2911,7 @@ class MainActivity : ComponentActivity() {
                 )
                 summaries.forEachIndexed { index, summary ->
                     if (index > 0) HorizontalDivider()
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -2305,13 +2959,19 @@ class MainActivity : ComponentActivity() {
         amount: String,
         color: Color,
         modifier: Modifier = Modifier,
+        prefix: String = "",
     ) {
         Column(modifier) {
-            Text(label, style = MaterialTheme.typography.bodySmall)
             Text(
-                text = formatCurrency(amount),
+                label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = prefix + formatCurrency(amount),
                 color = color,
-                style = MaterialTheme.typography.titleMedium,
+                style = FinanceTextStyles.moneyMedium,
+                maxLines = 1,
             )
         }
     }
@@ -2324,39 +2984,104 @@ class MainActivity : ComponentActivity() {
         val invoice = item.invoice
         val transaction = item.transaction
         val isCredit = transaction.direction == FinancialTransactionDirection.INCOME
-        Card(onClick = onClick) {
+        val semantic = MaterialTheme.financeColors
+        val overdue = invoice.status == CreditCardInvoiceStatus.OVERDUE
+        val paid = invoice.status == CreditCardInvoiceStatus.PAID
+        val statusForeground = when {
+            overdue -> MaterialTheme.colorScheme.onErrorContainer
+            paid -> semantic.onRealizedContainer
+            else -> semantic.onPendingContainer
+        }
+        val statusBackground = when {
+            overdue -> MaterialTheme.colorScheme.errorContainer
+            paid -> semantic.realizedContainer
+            else -> semantic.pendingContainer
+        }
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FinanceIconTile(
+                        icon = Icons.Rounded.CreditCard,
+                        contentDescription = null,
+                    )
+                    Spacer(Modifier.width(FinanceSpacing.sm))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            transaction.description,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        FinanceStatusPill(
+                            text = invoice.status.displayName,
+                            foreground = statusForeground,
+                            background = statusBackground,
+                            icon = when {
+                                overdue -> Icons.Rounded.WarningAmber
+                                paid -> Icons.Rounded.CheckCircle
+                                else -> Icons.Rounded.Schedule
+                            },
+                        )
+                    }
+                    Spacer(Modifier.width(FinanceSpacing.sm))
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            (if (isCredit) "+ " else "− ") +
+                                formatCurrency(transaction.amount),
+                            color = if (isCredit) semantic.income else semantic.expense,
+                            style = FinanceTextStyles.moneyMedium,
+                            maxLines = 1,
+                        )
+                        Icon(
+                            Icons.Rounded.ChevronRight,
+                            contentDescription = "Abrir detalhes da fatura",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
                 ) {
                     Text(
-                        transaction.description,
+                        "Vence ${invoice.dueDate?.format(SHORT_DATE_FORMATTER) ?: "sem data"}",
                         modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        (if (isCredit) "+ " else "- ") +
-                            formatCurrency(transaction.amount),
-                        color = if (isCredit) Color(0xFF0A7D65) else Color(0xFFBA3B46),
-                        style = MaterialTheme.typography.titleMedium,
+                        "${invoice.transactionCount} compras",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(
-                    "${invoice.status.displayName} · ${invoice.transactionCount} compras" +
-                        if (invoice.paidAmount.signum() > 0) {
-                            " · pago ${formatCurrency(invoice.paidAmount.toPlainString())}"
-                        } else "",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "Vencimento ${invoice.dueDate?.format(SHORT_DATE_FORMATTER)} · toque para detalhes",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (invoice.paidAmount.signum() > 0 && invoice.total.signum() != 0) {
+                    val paidFraction = (
+                        invoice.paidAmount.toFloat() / invoice.total.abs().toFloat()
+                    ).coerceIn(0f, 1f)
+                    LinearProgressIndicator(
+                        progress = { paidFraction },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = semantic.realized,
+                        trackColor = semantic.realizedContainer,
+                    )
+                    Text(
+                        "Pago ${formatCurrency(invoice.paidAmount.toPlainString())}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -2365,62 +3090,126 @@ class MainActivity : ComponentActivity() {
     private fun TransactionCard(
         transaction: FinancialTransactionRecord,
         onClick: () -> Unit,
+        footerText: String? = null,
     ) {
         val isIncome = transaction.direction == FinancialTransactionDirection.INCOME
-        val amountPrefix = if (isIncome) "+ " else "- "
-        val amountColor = if (isIncome) Color(0xFF0A7D65) else Color(0xFFBA3B46)
+        val amountPrefix = if (isIncome) "+ " else "− "
+        val semantic = MaterialTheme.financeColors
+        val amountColor = if (isIncome) semantic.income else semantic.expense
+        val needsCategory = transaction.category == TransactionCategory.UNCATEGORIZED
+        val details = listOfNotNull(
+            transaction.categoryDisplayName,
+            transaction.account?.takeIf(String::isNotBlank),
+        ).joinToString(" · ")
 
-        Card(onClick = onClick) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                FinanceIconTile(
+                    icon = transaction.category.financeIcon(),
+                    contentDescription = transaction.categoryDisplayName,
+                    containerColor = if (needsCategory) {
+                        semantic.pendingContainer
+                    } else MaterialTheme.colorScheme.primaryContainer,
+                    iconColor = if (needsCategory) {
+                        semantic.onPendingContainer
+                    } else MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Spacer(Modifier.width(FinanceSpacing.sm))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xxs),
                 ) {
                     Text(
                         text = transaction.description,
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        text = details,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (
+                        transaction.status == TransactionStatus.PENDING || needsCategory ||
+                        transaction.categorySource == TransactionCategorySource.RULE
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xxs),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (transaction.status == TransactionStatus.PENDING) {
+                                FinanceStatusPill(
+                                    text = "Pendente",
+                                    foreground = semantic.onPendingContainer,
+                                    background = semantic.pendingContainer,
+                                    icon = Icons.Rounded.Schedule,
+                                )
+                            }
+                            if (needsCategory) {
+                                FinanceStatusPill(
+                                    text = "Classificar",
+                                    foreground = semantic.onPendingContainer,
+                                    background = semantic.pendingContainer,
+                                )
+                            } else if (
+                                transaction.categorySource == TransactionCategorySource.RULE
+                            ) {
+                                FinanceStatusPill(
+                                    text = "Automática",
+                                    foreground = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    background = MaterialTheme.colorScheme.primaryContainer,
+                                    icon = Icons.Rounded.AutoAwesome,
+                                )
+                            }
+                        }
+                    }
+                    val dates = listOfNotNull(
+                        transaction.dueDate?.let { "Vence $it" },
+                        transaction.plannedPaymentDate?.let { "Previsto $it" },
+                        transaction.paidAt?.let { "Pago $it" },
+                    ).joinToString(" · ")
+                    if (dates.isNotBlank()) {
+                        Text(
+                            dates,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    footerText?.takeIf(String::isNotBlank)?.let { footer ->
+                        Text(
+                            footer,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(FinanceSpacing.sm))
+                Column(horizontalAlignment = Alignment.End) {
                     Text(
                         text = amountPrefix + formatCurrency(transaction.amount),
                         color = amountColor,
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = transactionTypeLabel(transaction.type) +
-                            " · " + transaction.categoryDisplayName +
-                            if (transaction.categorySource == TransactionCategorySource.RULE) {
-                                " · automática"
-                            } else {
-                                ""
-                            } + if (transaction.status == TransactionStatus.PENDING) {
-                                " · pendente"
-                            } else "",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = FinanceTextStyles.moneyMedium,
+                        maxLines = 1,
                     )
                     Text(
                         text = formatTime(transaction.occurredAt),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                if (
-                    transaction.dueDate != null || transaction.plannedPaymentDate != null ||
-                    transaction.paidAt != null
-                ) {
-                    Text(
-                        listOfNotNull(
-                            transaction.dueDate?.let { "Vence $it" },
-                            transaction.plannedPaymentDate?.let { "Previsto $it" },
-                            transaction.paidAt?.let { "Pago $it" },
-                        ).joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -2459,7 +3248,7 @@ class MainActivity : ComponentActivity() {
             text = {
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                 ) {
                     availableCategories.forEach { category ->
                         item(key = category.name) {
@@ -2684,7 +3473,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text("Editar movimentação") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     OutlinedTextField(
                         value = description,
                         onValueChange = { newValue ->
@@ -2866,7 +3655,7 @@ class MainActivity : ComponentActivity() {
                 Row {
                     onDelete?.let {
                         TextButton(onClick = { it(seriesScope) }) {
-                            Text("Excluir", color = Color(0xFFBA3B46))
+                            Text("Excluir", color = MaterialTheme.colorScheme.error)
                         }
                     }
                     TextButton(onClick = onDismiss) {
@@ -2905,16 +3694,31 @@ class MainActivity : ComponentActivity() {
             }.sortedByDescending { transactionEffectiveDate(it) }
         }
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Pesquisar movimentações") },
-                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.Rounded.ArrowBack,
+                                contentDescription = "Voltar para Mais",
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
                     OutlinedTextField(
@@ -2923,10 +3727,13 @@ class MainActivity : ComponentActivity() {
                         label = { Text("Nome ou descrição") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
+                        leadingIcon = {
+                            Icon(Icons.Rounded.Search, contentDescription = null)
+                        },
                     )
                 }
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                         Box(Modifier.weight(1f)) {
                             DatePickerField(
                                 fromDate, "De", allowClear = true,
@@ -2942,27 +3749,72 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                    ) {
                         FilterChip(
                             selected = statusFilter == null,
                             onClick = { statusFilter = null },
                             label = { Text("Todas") },
+                            modifier = Modifier.weight(1f),
                         )
                         FilterChip(
                             selected = statusFilter == TransactionStatus.REALIZED,
                             onClick = { statusFilter = TransactionStatus.REALIZED },
                             label = { Text("Pagas") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Rounded.CheckCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
                         )
                         FilterChip(
                             selected = statusFilter == TransactionStatus.PENDING,
                             onClick = { statusFilter = TransactionStatus.PENDING },
                             label = { Text("Não pagas") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Rounded.Schedule,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
                         )
                     }
                 }
-                item { Text("${results.size} resultados", style = MaterialTheme.typography.labelLarge) }
+                item {
+                    Text(
+                        if (results.size == 1) "1 resultado" else "${results.size} resultados",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (results.isEmpty()) {
+                    item {
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.SearchOff,
+                            title = "Nenhuma movimentação encontrada",
+                            description = "Revise o texto, as datas ou a situação selecionada.",
+                            actionLabel = "Limpar busca",
+                            onAction = {
+                                query = ""
+                                fromDate = ""
+                                toDate = ""
+                                statusFilter = null
+                            },
+                        )
+                    }
+                }
                 items(results, key = { "search-${it.id}" }) { transaction ->
-                    TransactionCard(transaction) { editing = transaction }
+                    TransactionCard(
+                        transaction = transaction,
+                        onClick = { editing = transaction },
+                    )
                 }
             }
         }
@@ -2988,7 +3840,6 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun PlanningScreen(
         store: DiagnosticStore,
-        onBack: () -> Unit,
     ) {
         var horizonDays by remember { mutableIntStateOf(30) }
         val today = remember { LocalDate.now() }
@@ -3016,23 +3867,31 @@ class MainActivity : ComponentActivity() {
         val projectedBalance = remember(horizonDays) {
             store.generalProjectedBalance(today.plusDays(horizonDays.toLong()))
         }
+        val semantic = MaterialTheme.financeColors
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Planejamento") },
-                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                     ) {
                         listOf(30, 60, 90).forEach { days ->
                             FilterChip(
@@ -3045,51 +3904,135 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 item {
-                    Card {
+                    Surface(
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(18.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                         ) {
-                            Text("Pendências do período", style = MaterialTheme.typography.titleMedium)
-                            Text("Entradas: ${formatCurrency(income.toPlainString())}", color = Color(0xFF087F67))
-                            Text("Saídas: - ${formatCurrency(expense.toPlainString())}", color = MaterialTheme.colorScheme.error)
-                            HorizontalDivider()
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.EventNote,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column {
+                                    Text(
+                                        "Saldo geral projetado",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        "Próximos $horizonDays dias",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                             Text(
-                                "Resultado: ${formatCurrency(net.toPlainString())}",
-                                color = financialValueColor(net.signum()),
-                                style = MaterialTheme.typography.titleMedium,
+                                formatCurrency(projectedBalance.toPlainString()),
+                                color = if (projectedBalance.signum() < 0) {
+                                    semantic.expense
+                                } else MaterialTheme.colorScheme.onSurface,
+                                style = FinanceTextStyles.moneyHero,
+                                maxLines = 1,
                             )
-                            Text(
-                                "Saldo geral projetado: ${formatCurrency(projectedBalance.toPlainString())}",
-                                color = financialValueColor(projectedBalance.signum()),
-                                style = MaterialTheme.typography.titleMedium,
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
+                            ) {
+                                SummaryValue(
+                                    label = "Entradas pendentes",
+                                    amount = income.toPlainString(),
+                                    prefix = "+ ",
+                                    color = semantic.income,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                SummaryValue(
+                                    label = "Saídas pendentes",
+                                    amount = expense.toPlainString(),
+                                    prefix = "− ",
+                                    color = semantic.expense,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                            Surface(
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(FinanceSpacing.sm),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        "Resultado do período",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                    Text(
+                                        formatCurrency(net.toPlainString()),
+                                        color = if (net.signum() < 0) {
+                                            semantic.expense
+                                        } else semantic.income,
+                                        style = FinanceTextStyles.moneyMedium,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
                 if (visible.isEmpty()) {
                     item {
-                        Card {
-                            Text(
-                                "Nenhuma pendência nos próximos $horizonDays dias.",
-                                modifier = Modifier.fillMaxWidth().padding(20.dp),
-                                textAlign = TextAlign.Center,
-                            )
-                        }
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.EventAvailable,
+                            title = "Nenhuma pendência",
+                            description = "Não há pagamentos ou recebimentos previstos nos " +
+                                "próximos $horizonDays dias.",
+                        )
                     }
                 }
                 visible.groupBy { YearMonth.from(it.date) }.forEach { (month, monthItems) ->
                     item(key = "planning-month-$month") {
-                        Text(formatMonth(month), style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            formatMonth(month),
+                            modifier = Modifier.padding(top = FinanceSpacing.sm),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
                     }
                     items(monthItems, key = { "planning-${it.transaction.id}" }) { item ->
-                        Card {
+                        Surface(
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                FinanceIconTile(
+                                    icon = item.transaction.category.financeIcon(),
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(item.transaction.description, style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        item.transaction.description,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                     Text(
                                         item.date.format(SHORT_DATE_FORMATTER) +
                                             (item.transaction.account?.let { " · $it" } ?: "") +
@@ -3097,16 +4040,17 @@ class MainActivity : ComponentActivity() {
                                                 " · $index/${item.transaction.seriesTotal}"
                                             } ?: ""),
                                         style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                                 val expenseItem = item.transaction.direction ==
                                     FinancialTransactionDirection.EXPENSE
                                 Text(
-                                    (if (expenseItem) "- " else "+ ") +
+                                    (if (expenseItem) "− " else "+ ") +
                                         formatCurrency(item.transaction.amount),
-                                    color = if (expenseItem) MaterialTheme.colorScheme.error
-                                    else Color(0xFF087F67),
-                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (expenseItem) semantic.expense else semantic.income,
+                                    style = FinanceTextStyles.moneyMedium,
+                                    maxLines = 1,
                                 )
                             }
                         }
@@ -3120,7 +4064,6 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MonthlyBudgetScreen(
         store: DiagnosticStore,
-        onBack: () -> Unit,
     ) {
         var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
         var refresh by remember { mutableIntStateOf(0) }
@@ -3147,16 +4090,23 @@ class MainActivity : ComponentActivity() {
             .toList()
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Orçamento mensal") },
-                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
                     MonthSelector(
@@ -3166,11 +4116,19 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                         Button(
                             onClick = { editingTotal = true },
                             modifier = Modifier.weight(1f),
-                        ) { Text(if (totalProgress == null) "Definir limite total" else "Editar total") }
+                        ) {
+                            Icon(
+                                if (totalProgress == null) Icons.Rounded.Add else Icons.Rounded.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text(if (totalProgress == null) "Limite total" else "Editar total")
+                        }
                         OutlinedButton(
                             onClick = {
                                 val copied = store.copyMonthlyBudgets(
@@ -3182,11 +4140,27 @@ class MainActivity : ComponentActivity() {
                                 if (copied > 0) refresh++
                             },
                             modifier = Modifier.weight(1f),
-                        ) { Text("Copiar mês anterior") }
+                        ) {
+                            Icon(
+                                Icons.Rounded.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Copiar anterior")
+                        }
                     }
                 }
                 message?.let { value ->
-                    item { Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    item {
+                        FinanceNoticeCard(
+                            icon = Icons.Rounded.Info,
+                            title = "Orçamento atualizado",
+                            description = value,
+                            foreground = MaterialTheme.colorScheme.onPrimaryContainer,
+                            background = MaterialTheme.colorScheme.primaryContainer,
+                        )
+                    }
                 }
                 totalProgress?.let { item ->
                     item(key = "budget-total") {
@@ -3194,7 +4168,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (categoryProgress.isNotEmpty()) {
-                    item { Text("Por categoria", style = MaterialTheme.typography.headlineSmall) }
+                    item {
+                        Text(
+                            "Por categoria",
+                            modifier = Modifier.padding(top = FinanceSpacing.sm),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
                     items(categoryProgress, key = { it.categoryKey!! }) { item ->
                         BudgetProgressCard(
                             item,
@@ -3212,12 +4192,26 @@ class MainActivity : ComponentActivity() {
                     "CUSTOM:$it" in configuredKeys
                 }
                 if (missing.isNotEmpty() || missingCustom.isNotEmpty()) {
-                    item { Text("Adicionar categoria", style = MaterialTheme.typography.headlineSmall) }
+                    item {
+                        Text(
+                            "Adicionar categoria",
+                            modifier = Modifier.padding(top = FinanceSpacing.sm),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
                     items(missing, key = { "missing-${it.name}" }) { category ->
                         OutlinedButton(
                             onClick = { editingCategory = CategoryChoice(category) },
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Definir limite para ${category.displayName}") }
+                        ) {
+                            Icon(
+                                category.financeIcon(),
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Definir limite para ${category.displayName}")
+                        }
                     }
                     items(missingCustom, key = { "missing-custom-$it" }) { name ->
                         OutlinedButton(
@@ -3228,10 +4222,18 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Definir limite para $name") }
+                        ) {
+                            Icon(
+                                Icons.Rounded.Category,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Definir limite para $name")
+                        }
                     }
                 }
-                item { Spacer(Modifier.height(24.dp)) }
+                item { Spacer(Modifier.height(FinanceSpacing.lg)) }
             }
         }
 
@@ -3281,36 +4283,91 @@ class MainActivity : ComponentActivity() {
         onEdit: () -> Unit,
     ) {
         val overBudget = progress.remaining.signum() < 0
-        Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
+        val nearLimit = !overBudget && progress.usagePercent >= 80
+        val semantic = MaterialTheme.financeColors
+        val progressColor = when {
+            overBudget -> MaterialTheme.colorScheme.error
+            nearLimit -> semantic.pending
+            else -> MaterialTheme.colorScheme.primary
+        }
+        val stateForeground = when {
+            overBudget -> MaterialTheme.colorScheme.onErrorContainer
+            nearLimit -> semantic.onPendingContainer
+            else -> semantic.onRealizedContainer
+        }
+        val stateBackground = when {
+            overBudget -> MaterialTheme.colorScheme.errorContainer
+            nearLimit -> semantic.pendingContainer
+            else -> semantic.realizedContainer
+        }
+        Surface(
+            onClick = onEdit,
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        progress.displayName,
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f),
+                    FinanceIconTile(
+                        icon = progress.category?.financeIcon() ?: Icons.Rounded.DonutLarge,
+                        contentDescription = null,
                     )
-                    Text(formatCurrency(progress.limit.toPlainString()))
+                    Spacer(Modifier.width(FinanceSpacing.sm))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            progress.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "Limite ${formatCurrency(progress.limit.toPlainString())}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        "${progress.usagePercent}%",
+                        style = FinanceTextStyles.moneyMedium,
+                        color = progressColor,
+                    )
                 }
                 LinearProgressIndicator(
                     progress = { (progress.usagePercent.coerceAtMost(100)) / 100f },
                     modifier = Modifier.fillMaxWidth(),
-                    color = if (overBudget) MaterialTheme.colorScheme.error else Color(0xFF087F67),
+                    color = progressColor,
+                    trackColor = stateBackground,
                 )
-                Text(
-                    "Realizado: ${formatCurrency(progress.realized.toPlainString())} · " +
-                        "Pendente: ${formatCurrency(progress.pending.toPlainString())}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    if (overBudget) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.md),
+                ) {
+                    SummaryValue(
+                        label = "Realizado",
+                        amount = progress.realized.toPlainString(),
+                        color = semantic.expense,
+                        modifier = Modifier.weight(1f),
+                    )
+                    SummaryValue(
+                        label = "Pendente",
+                        amount = progress.pending.toPlainString(),
+                        color = semantic.pending,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                FinanceStatusPill(
+                    text = if (overBudget) {
                         "Excedente previsto: ${formatCurrency(progress.remaining.abs().toPlainString())}"
                     } else {
                         "Disponível previsto: ${formatCurrency(progress.remaining.toPlainString())}"
                     },
-                    color = if (overBudget) MaterialTheme.colorScheme.error else Color(0xFF087F67),
+                    foreground = stateForeground,
+                    background = stateBackground,
+                    icon = if (overBudget) Icons.Rounded.WarningAmber else Icons.Rounded.CheckCircle,
                 )
             }
         }
@@ -3326,6 +4383,7 @@ class MainActivity : ComponentActivity() {
         onDelete: (() -> Unit)?,
     ) {
         var amount by remember(title, initialAmount) { mutableStateOf(initialAmount) }
+        val semantic = MaterialTheme.financeColors
         val parsed = remember(amount) {
             if (',' in amount) amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
             else amount.toBigDecimalOrNull()
@@ -3342,7 +4400,7 @@ class MainActivity : ComponentActivity() {
             text = {
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                 ) {
                     item {
                         OutlinedTextField(
@@ -3356,16 +4414,48 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     item {
-                        Card {
+                        Surface(
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        ) {
                             Column(
-                                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.sm),
+                                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                             ) {
-                                Text("Resumo do mês", style = MaterialTheme.typography.titleMedium)
-                                Text("Realizado: ${formatCurrency(realized.toPlainString())}")
-                                Text("Pendente: ${formatCurrency(pending.toPlainString())}")
-                                Text(
-                                    "Total previsto: ${formatCurrency((realized + pending).toPlainString())}"
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Rounded.Insights,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(Modifier.width(FinanceSpacing.xs))
+                                    Text(
+                                        "Resumo do mês",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
+                                ) {
+                                    SummaryValue(
+                                        label = "Realizado",
+                                        amount = realized.toPlainString(),
+                                        color = semantic.expense,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    SummaryValue(
+                                        label = "Pendente",
+                                        amount = pending.toPlainString(),
+                                        color = semantic.pending,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                SummaryValue(
+                                    label = "Total previsto",
+                                    amount = (realized + pending).toPlainString(),
+                                    color = MaterialTheme.colorScheme.onSurface,
                                 )
                             }
                         }
@@ -3377,28 +4467,52 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     if (transactions.isEmpty()) {
-                        item { Text("Nenhuma movimentação nesta categoria no mês.") }
+                        item {
+                            FinanceEmptyState(
+                                icon = Icons.Rounded.ReceiptLong,
+                                title = "Nenhuma movimentação",
+                                description = "Esta categoria não possui movimentações no mês.",
+                            )
+                        }
                     } else {
                         items(transactions, key = { "budget-transaction-${it.id}" }) { transaction ->
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = FinanceSpacing.xxs),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                FinanceIconTile(
+                                    icon = transaction.category.financeIcon(),
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(transaction.description)
                                     Text(
-                                        if (transaction.status == TransactionStatus.REALIZED) {
-                                            "Realizado"
-                                        } else {
-                                            "Pendente"
-                                        },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        transaction.description,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    FinanceStatusPill(
+                                        text = if (
+                                            transaction.status == TransactionStatus.REALIZED
+                                        ) "Realizado" else "Pendente",
+                                        foreground = if (
+                                            transaction.status == TransactionStatus.REALIZED
+                                        ) semantic.onRealizedContainer
+                                        else semantic.onPendingContainer,
+                                        background = if (
+                                            transaction.status == TransactionStatus.REALIZED
+                                        ) semantic.realizedContainer
+                                        else semantic.pendingContainer,
                                     )
                                 }
                                 Text(
                                     formatCurrency(transaction.amount),
-                                    color = MaterialTheme.colorScheme.error,
+                                    style = FinanceTextStyles.moneyMedium,
+                                    color = semantic.expense,
                                 )
                             }
                         }
@@ -3489,19 +4603,34 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Dados e segurança") },
-                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
-                    Text("Backup e recuperação", style = MaterialTheme.typography.headlineMedium)
+                    Text(
+                        "Backup e recuperação",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
                     Text(
                         "Guarde uma cópia completa antes de trocar de aparelho ou fazer alterações importantes.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3511,13 +4640,21 @@ class MainActivity : ComponentActivity() {
                     Button(
                         onClick = { createBackup.launch("AssistenteFinanceiro-backup-${LocalDate.now()}.json") },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Criar backup completo") }
+                    ) {
+                        Icon(Icons.Rounded.Backup, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Criar backup completo")
+                    }
                 }
                 item {
                     OutlinedButton(
                         onClick = { openBackup.launch(arrayOf("application/json", "text/plain")) },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Restaurar um backup") }
+                    ) {
+                        Icon(Icons.Rounded.Restore, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Restaurar um backup")
+                    }
                 }
                 item {
                     HorizontalDivider()
@@ -3528,7 +4665,11 @@ class MainActivity : ComponentActivity() {
                     OutlinedButton(
                         onClick = { exportCsv.launch("AssistenteFinanceiro-movimentacoes-${LocalDate.now()}.csv") },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Salvar movimentações em CSV") }
+                    ) {
+                        Icon(Icons.Rounded.FileDownload, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Salvar movimentações em CSV")
+                    }
                 }
                 item {
                     OutlinedButton(
@@ -3553,13 +4694,27 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Compartilhar CSV") }
+                    ) {
+                        Icon(Icons.Rounded.Share, contentDescription = null)
+                        Spacer(Modifier.width(FinanceSpacing.xs))
+                        Text("Compartilhar CSV")
+                    }
                 }
                 message?.let { text ->
                     item {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Text(text, modifier = Modifier.padding(16.dp))
-                        }
+                        val failed = text.startsWith("Não ") ||
+                            text.contains("falh", ignoreCase = true)
+                        FinanceNoticeCard(
+                            icon = if (failed) Icons.Rounded.Warning else Icons.Rounded.CheckCircle,
+                            title = if (failed) "Não foi possível concluir" else "Tudo certo",
+                            description = text,
+                            foreground = if (failed) {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            } else MaterialTheme.financeColors.onRealizedContainer,
+                            background = if (failed) {
+                                MaterialTheme.colorScheme.errorContainer
+                            } else MaterialTheme.financeColors.realizedContainer,
+                        )
                     }
                 }
                 item {
@@ -3570,11 +4725,28 @@ class MainActivity : ComponentActivity() {
                         else "Movimentações excluídas manualmente podem ser restauradas.",
                     )
                 }
+                if (deletedGroups.isEmpty()) {
+                    item {
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.DeleteSweep,
+                            title = "Lixeira vazia",
+                            description = "As movimentações excluídas poderão ser recuperadas aqui.",
+                        )
+                    }
+                }
                 items(deletedGroups, key = { it.groupId }) { group ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
                             Text(group.description, style = MaterialTheme.typography.titleMedium)
                             Text(
@@ -3583,7 +4755,7 @@ class MainActivity : ComponentActivity() {
                                         .format(SHORT_DATE_FORMATTER),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
                                 TextButton(onClick = {
                                     if (store.restoreDeletedTransactionGroup(group.groupId)) {
                                         message = "Movimentação restaurada."
@@ -3597,7 +4769,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                item { Spacer(Modifier.height(24.dp)) }
+                item { Spacer(Modifier.height(FinanceSpacing.lg)) }
             }
         }
 
@@ -3669,39 +4841,78 @@ class MainActivity : ComponentActivity() {
             }
         }
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Resumo anual") },
-                    actions = { TextButton(onClick = onBack) { Text("Extrato") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
-                    Card {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(FinanceSpacing.xxs),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            TextButton(onClick = { selectedYear-- }) { Text("‹") }
+                            IconButton(onClick = { selectedYear-- }) {
+                                Icon(
+                                    Icons.Rounded.ChevronLeft,
+                                    contentDescription = "Ano anterior",
+                                )
+                            }
                             Text(
                                 selectedYear.toString(), Modifier.weight(1f),
                                 textAlign = TextAlign.Center,
                                 style = MaterialTheme.typography.titleLarge,
                             )
-                            TextButton(onClick = { selectedYear++ }) { Text("›") }
+                            IconButton(onClick = { selectedYear++ }) {
+                                Icon(
+                                    Icons.Rounded.ChevronRight,
+                                    contentDescription = "Próximo ano",
+                                )
+                            }
                         }
                     }
                 }
                 item {
-                    Card {
+                    Surface(
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
                             modifier = Modifier
                                 .horizontalScroll(rememberScrollState())
-                                .padding(10.dp),
+                                .padding(FinanceSpacing.sm),
                         ) {
                             Row {
                                 AnnualSummaryCell("Mês", header = true, firstColumn = true)
@@ -3759,7 +4970,10 @@ class MainActivity : ComponentActivity() {
             text = text,
             modifier = Modifier
                 .width(if (firstColumn) 130.dp else 112.dp)
-                .padding(horizontal = 8.dp, vertical = 10.dp),
+                .padding(
+                    horizontal = FinanceSpacing.xs,
+                    vertical = FinanceSpacing.sm,
+                ),
             style = if (header) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.bodySmall,
             textAlign = if (firstColumn) TextAlign.Start else TextAlign.End,
@@ -3769,8 +4983,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun financialValueColor(sign: Int): Color = when {
-        sign > 0 -> Color(0xFF087F67)
-        sign < 0 -> MaterialTheme.colorScheme.error
+        sign > 0 -> MaterialTheme.financeColors.income
+        sign < 0 -> MaterialTheme.financeColors.expense
         else -> Color.Unspecified
     }
 
@@ -3827,7 +5041,7 @@ class MainActivity : ComponentActivity() {
     private fun DiagnosticScreen(
         store: DiagnosticStore,
         preferences: BankPackagePreferences,
-        onOpenStatement: () -> Unit,
+        onBack: () -> Unit,
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         val allowed = remember(refresh) { preferences.allowedPackages() }
@@ -3836,47 +5050,105 @@ class MainActivity : ComponentActivity() {
         val enabled = remember(refresh) { notificationAccessEnabled() }
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = { Text("Diagnóstico financeiro") },
-                    actions = {
-                        TextButton(onClick = onOpenStatement) {
-                            Text("Extrato")
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar")
                         }
                     },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
                 )
             },
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.padding(padding).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = FinanceSpacing.md),
+                contentPadding = PaddingValues(vertical = FinanceSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
                 item {
-                    Card {
+                    val semantic = MaterialTheme.financeColors
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
                         ) {
-                            Text(
-                                if (enabled) {
-                                    "Acesso às notificações ativo"
-                                } else {
-                                    "Acesso às notificações desativado"
-                                },
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Text("O conteúdo só é armazenado depois que você autoriza um aplicativo específico.")
-                            Button(
-                                onClick = {
-                                    startActivity(
-                                        Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.NotificationsActive,
+                                    contentDescription = null,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Captura de notificações",
+                                        style = MaterialTheme.typography.titleMedium,
                                     )
-                                },
-                            ) {
-                                Text("Configurar acesso")
+                                    Text(
+                                        "Controle local e por aplicativo",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                FinanceStatusPill(
+                                    text = if (enabled) "Ativa" else "Desativada",
+                                    foreground = if (enabled) {
+                                        semantic.onRealizedContainer
+                                    } else MaterialTheme.colorScheme.onErrorContainer,
+                                    background = if (enabled) {
+                                        semantic.realizedContainer
+                                    } else MaterialTheme.colorScheme.errorContainer,
+                                    icon = if (enabled) {
+                                        Icons.Rounded.CheckCircle
+                                    } else Icons.Rounded.Warning,
+                                )
                             }
-                            OutlinedButton(onClick = { refresh++ }) {
-                                Text("Atualizar")
+                            Text(
+                                "O conteúdo só é armazenado depois que você autoriza um " +
+                                    "aplicativo financeiro específico.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                            ) {
+                                Button(
+                                    onClick = {
+                                        startActivity(
+                                            Intent(
+                                                Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(Icons.Rounded.Settings, contentDescription = null)
+                                    Spacer(Modifier.width(FinanceSpacing.xs))
+                                    Text("Configurar")
+                                }
+                                OutlinedButton(
+                                    onClick = { refresh++ },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(Icons.Rounded.Sync, contentDescription = null)
+                                    Spacer(Modifier.width(FinanceSpacing.xs))
+                                    Text("Atualizar")
+                                }
                             }
                         }
                     }
@@ -3889,18 +5161,45 @@ class MainActivity : ComponentActivity() {
                 }
                 if (candidates.isEmpty()) {
                     item {
-                        Text("Após ativar o acesso, aguarde uma notificação do banco e toque em Atualizar.")
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.Apps,
+                            title = "Nenhum aplicativo detectado",
+                            description = "Após ativar o acesso, aguarde uma notificação do " +
+                                "banco e toque em Atualizar.",
+                        )
                     }
                 }
                 items(candidates) { (packageName, label) ->
-                    Card {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(FinanceSpacing.md),
                             horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            FinanceIconTile(
+                                icon = Icons.Rounded.AccountBalance,
+                                contentDescription = null,
+                            )
+                            Spacer(Modifier.width(FinanceSpacing.sm))
                             Column(Modifier.weight(1f)) {
-                                Text(label)
-                                Text(packageName, style = MaterialTheme.typography.bodySmall)
+                                Text(label, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    packageName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                             Switch(
                                 checked = packageName in allowed,
@@ -3936,16 +5235,34 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (events.isEmpty()) {
-                    item { Text("Nenhum evento armazenado.") }
+                    item {
+                        FinanceEmptyState(
+                            icon = Icons.Rounded.NotificationsNone,
+                            title = "Nenhum evento armazenado",
+                            description = "As notificações autorizadas aparecerão aqui para " +
+                                "você conferir a classificação.",
+                        )
+                    }
                 }
                 items(events, key = { it.id }) { event ->
-                    Card {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
                         Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(FinanceSpacing.md),
+                            verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
                         ) {
                             Text(event.title, style = MaterialTheme.typography.titleMedium)
-                            Text(event.body)
+                            Text(
+                                event.body,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                             val statusText = when (event.classification) {
                                 NotificationClassification.TRANSACTION -> when (event.transactionType) {
                                     FinancialTransactionType.CARD_PURCHASE ->
@@ -3963,13 +5280,34 @@ class MainActivity : ComponentActivity() {
                                     "Ignorada: ${event.classificationReason ?: "promoção"}"
                                 NotificationClassification.PENDING_RULE -> "Aguardando regra"
                             }
-                            val statusColor = when (event.classification) {
-                                NotificationClassification.TRANSACTION -> Color(0xFF0A7D65)
+                            val semantic = MaterialTheme.financeColors
+                            val statusForeground = when (event.classification) {
+                                NotificationClassification.TRANSACTION ->
+                                    semantic.onIncomeContainer
                                 NotificationClassification.IGNORED_PROMOTION ->
                                     MaterialTheme.colorScheme.onSurfaceVariant
-                                NotificationClassification.PENDING_RULE -> Color(0xFFBA3B46)
+                                NotificationClassification.PENDING_RULE ->
+                                    semantic.onPendingContainer
                             }
-                            Text(statusText, color = statusColor)
+                            val statusBackground = when (event.classification) {
+                                NotificationClassification.TRANSACTION ->
+                                    semantic.incomeContainer
+                                NotificationClassification.IGNORED_PROMOTION ->
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                NotificationClassification.PENDING_RULE ->
+                                    semantic.pendingContainer
+                            }
+                            val statusIcon = when (event.classification) {
+                                NotificationClassification.TRANSACTION -> Icons.Rounded.CheckCircle
+                                NotificationClassification.IGNORED_PROMOTION -> Icons.Rounded.Block
+                                NotificationClassification.PENDING_RULE -> Icons.Rounded.Schedule
+                            }
+                            FinanceStatusPill(
+                                text = statusText,
+                                foreground = statusForeground,
+                                background = statusBackground,
+                                icon = statusIcon,
+                            )
                         }
                     }
                 }
