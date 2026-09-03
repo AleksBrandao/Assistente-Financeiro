@@ -836,7 +836,7 @@ class MainActivity : ComponentActivity() {
                                                 "spreadsheetml.sheet"
                                         )
                                     )
-                                },
+                                }
                             },
                         )
                     }
@@ -3811,7 +3811,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 items(results, key = { "search-${it.id}" }) { transaction ->
-                    TransactionCard(transaction) { editing = transaction }
+                    TransactionCard(
+                        transaction = transaction,
+                        onClick = { editing = transaction },
+                    )
                 }
             }
         }
