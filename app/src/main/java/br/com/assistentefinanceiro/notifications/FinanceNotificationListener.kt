@@ -22,14 +22,16 @@ class FinanceNotificationListener : NotificationListenerService() {
 
         if (packageName !in allowedPackages) return
         if (title.isBlank() && body.isBlank()) return
-        store.recordEvent(
-            packageName = packageName,
-            appLabel = appLabel,
-            title = title,
-            body = body,
-            postedAt = notification.postTime,
-            notificationKey = notification.key,
-        )
+        NotificationReceivedAtContext.withPostedAt(notification.postTime) {
+            store.recordEvent(
+                packageName = packageName,
+                appLabel = appLabel,
+                title = title,
+                body = body,
+                postedAt = notification.postTime,
+                notificationKey = notification.key,
+            )
+        }
         BudgetAlertManager(applicationContext, store).evaluateLatestNotificationTransaction()
     }
 }
