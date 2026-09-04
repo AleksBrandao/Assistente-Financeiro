@@ -335,18 +335,22 @@ private fun PluggySandboxScreen(
                     Spacer(Modifier.height(4.dp))
                     Text("Reconciliação local", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Vínculos já confirmados são reutilizados; sugestões fortes continuam sem gravar nada até sua confirmação.",
+                        "Vínculos já confirmados são reutilizados; quando ainda não existe nenhuma conta local compatível, a conta pode ser criada durante a preparação da primeira importação.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 item { ReconciliationSummaryCard(result) }
                 items(result.accounts) { accountResult ->
-                    val canSelect = accountResult.localAccountId != null &&
+                    val canUseExisting = accountResult.localAccountId != null &&
                         accountResult.status in setOf(
                             PluggyReconciliationStatus.CONFIRMED,
                             PluggyReconciliationStatus.STRONG,
                         )
+                    val canCreateLocal = accountResult.localAccountId == null &&
+                        accountResult.status == PluggyReconciliationStatus.UNMATCHED &&
+                        accountResult.compatibleCandidateCount == 0
+                    val canSelect = canUseExisting || canCreateLocal
                     ReconciliationAccountCard(
                         result = accountResult,
                         selected = accountResult.pluggyAccountExternalId in selectedForImport,
@@ -377,14 +381,19 @@ private fun PluggySandboxScreen(
                         enabled = !loading && selectedForImport.isNotEmpty() && preview != null,
                         onClick = {
                             val remote = preview ?: return@Button
-                            val currentReconciliation = reconciliation ?: return@Button
                             loading = true
                             error = null
                             importMessage = null
                             scope.launch {
                                 val planResult = runCatching {
                                     withContext(Dispatchers.IO) {
-                                        PluggyControlledImportPlanner.plan(
+                                        PluggyFirstImportProvisioner.provisionSelectedAccounts(
+                                            repository = repository,
+                                            remote = remote,
+                                            selectedExternalAccountIds = selectedForImport,
+                                        )
+                                        val effectiveReconciliation = buildReconciliation(repository, remote)
+                                        val plan = PluggyControlledImportPlanner.plan(
                                             datasets = remote.accounts.map { accountPreview ->
                                                 PluggyAccountDataset(
                                                     account = accountPreview.account,
@@ -392,14 +401,17 @@ private fun PluggySandboxScreen(
                                                     bills = accountPreview.bills,
                                                 )
                                             },
-                                            reconciliation = currentReconciliation,
+                                            reconciliation = effectiveReconciliation,
                                             selectedExternalAccountIds = selectedForImport,
                                             localTransactions = repository.granularTransactions(),
                                         )
+                                        effectiveReconciliation to plan
                                     }
                                 }
-                                planResult.onSuccess { pendingPlan = it }
-                                    .onFailure { error = it.toSafeMessage() }
+                                planResult.onSuccess { (refreshed, plan) ->
+                                    reconciliation = refreshed
+                                    pendingPlan = plan
+                                }.onFailure { error = it.toSafeMessage() }
                                 loading = false
                             }
                         },
@@ -589,10 +601,12 @@ private fun ReconciliationAccountCard(
                 ) {
                     Checkbox(checked = selected, onCheckedChange = onSelectedChange)
                     Text(
-                        if (result.status == PluggyReconciliationStatus.CONFIRMED) {
-                            "Selecionar para sincronizar/importar"
-                        } else {
-                            "Confirmar vínculo e selecionar para importar"
+                        when (result.status) {
+                            PluggyReconciliationStatus.CONFIRMED ->
+                                "Selecionar para sincronizar/importar"
+                            PluggyReconciliationStatus.UNMATCHED ->
+                                "Criar conta local e selecionar para importar"
+                            else -> "Confirmar vínculo e selecionar para importar"
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -635,7 +649,7 @@ private fun Throwable.toSafeMessage(): String = when (this) {
         append(": ").append(message)
     }
     is IllegalArgumentException -> message ?: "Parâmetro inválido"
-    else -> "Falha ao consultar a Pluggy: ${message ?: this::class.simpleName.orEmpty()}"
+    else -> "Falha no fluxo Pluggy: ${message ?: this::class.simpleName.orEmpty()}"
 }
 
 private fun formatMoney(value: BigDecimal, currencyCode: String): String {
