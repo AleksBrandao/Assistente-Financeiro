@@ -10,7 +10,7 @@ class FinancialNotificationClassifierTest {
     fun classifiesRecognizedPurchase() {
         val result = classify(
             title = "Compra aprovada!",
-            body = "Compra no cartão final 3409, de R$ 10,00, em 26/08/26, às 13:45, em CANTINA IFCH, aprovada.",
+            body = "Compra no cartão final 1234, de R$ 10,00, em 26/08/26, às 13:45, em CANTINA IFCH, aprovada.",
         )
 
         assertEquals(NotificationClassification.TRANSACTION, result.classification)

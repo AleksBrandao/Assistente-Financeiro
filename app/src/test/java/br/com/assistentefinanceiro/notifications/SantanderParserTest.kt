@@ -8,10 +8,10 @@ class SantanderParserTest {
     @Test fun parsesPhysicalCardPurchase() {
         val parsed = SantanderParser.parse(
             "Compra aprovada!",
-            "Compra no cartão final 3409, de R$ 10,00, em 26/08/26, às 13:45, em CANTINA IFCH, aprovada.",
+            "Compra no cartão final 1234, de R$ 10,00, em 26/08/26, às 13:45, em CANTINA IFCH, aprovada.",
         )
         assertNotNull(parsed)
-        assertEquals("3409", parsed?.cardLastFour)
+        assertEquals("1234", parsed?.cardLastFour)
         assertEquals(BigDecimal("10.00"), parsed?.amount)
         assertEquals("CANTINA IFCH", parsed?.merchant)
     }
@@ -19,9 +19,9 @@ class SantanderParserTest {
     @Test fun parsesVirtualCardPurchase() {
         val parsed = SantanderParser.parse(
             "Compra aprovada!",
-            "Compra no cartão final 6101, de R$ 166,80, em 26/08/26, às 09:46, em SHOPEE .qualyce, aprovada.",
+            "Compra no cartão final 5678, de R$ 166,80, em 26/08/26, às 09:46, em SHOPEE .qualyce, aprovada.",
         )
-        assertEquals("6101", parsed?.cardLastFour)
+        assertEquals("5678", parsed?.cardLastFour)
         assertEquals(BigDecimal("166.80"), parsed?.amount)
     }
 
@@ -29,4 +29,3 @@ class SantanderParserTest {
         assertNull(SantanderParser.parse("Pix recebido", "Você recebeu um Pix."))
     }
 }
-

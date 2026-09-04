@@ -102,6 +102,19 @@ class GeneralProjectedBalanceCalculatorTest {
         assertEquals(BigDecimal("700.00"), result)
     }
 
+    @Test
+    fun usesExplicitAccountTypesRegardlessOfAccountNames() {
+        val bank = bankAccount(openingBalance = "1000.00").copy(name = "Cartão principal")
+        val card = creditCard().copy(name = "Conta corrente")
+
+        val result = calculate(
+            accounts = listOf(bank, card),
+            invoices = listOf(invoice(total = "300.00", status = CreditCardInvoiceStatus.OPEN)),
+        )
+
+        assertEquals(BigDecimal("700.00"), result)
+    }
+
     private fun calculate(
         accounts: List<FinancialAccountRecord>,
         transactionsByAccount: Map<Long, List<ProjectedBalanceTransaction>> = emptyMap(),

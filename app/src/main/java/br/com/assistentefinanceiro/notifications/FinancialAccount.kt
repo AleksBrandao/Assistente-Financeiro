@@ -103,12 +103,6 @@ object FinancialAccountIdentity {
         .replace(Regex("[^A-Za-z0-9]"), "")
         .uppercase(Locale.ROOT)
 
-    fun inferredType(name: String): FinancialAccountType = when (normalize(name)) {
-        "CINZA", "VERMELHO", "PRETO", "CARREFOUR", "SEMPARAR", "3409EUR" ->
-            FinancialAccountType.CREDIT_CARD
-        else -> FinancialAccountType.BANK_ACCOUNT
-    }
-
     fun normalizedIdentifiers(value: String?): String? = value
         ?.split(",", "/", ";", " ")
         ?.map { it.filter(Char::isDigit).takeLast(4) }
