@@ -18,10 +18,23 @@ import java.time.YearMonth
 import java.util.Locale
 
 internal object BudgetAlertPolicy {
-    fun crossedLimit(limit: BigDecimal, before: BigDecimal, after: BigDecimal): Boolean =
-        before <= limit && after > limit
+    private val levels = listOf(100, 110, 125, 150, 200)
 
-    fun alertKey(period: YearMonth, categoryKey: String): String = "$period|$categoryKey"
+    fun highestReachedLevel(limit: BigDecimal, projected: BigDecimal): Int? {
+        if (limit.signum() <= 0) return null
+        return levels.lastOrNull { percent ->
+            val threshold = limit.multiply(BigDecimal(percent)).divide(BigDecimal(100))
+            if (percent == 100) projected > threshold else projected >= threshold
+        }
+    }
+
+    fun stateKey(period: YearMonth, categoryKey: String): String =
+        "$period|$categoryKey|highest-level"
+
+    fun legacyAlertKey(period: YearMonth, categoryKey: String): String = "$period|$categoryKey"
+
+    fun notificationKey(period: YearMonth, categoryKey: String, level: Int): String =
+        "$period|$categoryKey|$level"
 }
 
 class BudgetAlertManager(
@@ -46,10 +59,7 @@ class BudgetAlertManager(
         evaluateTransaction(transaction.id)
     }
 
-    fun evaluateTransaction(
-        transactionId: Long,
-        allowBatchCrossing: Boolean = false,
-    ) {
+    fun evaluateTransaction(transactionId: Long) {
         val transactions = store.recentTransactions(MAX_TRANSACTION_SCAN)
         val transaction = transactions.firstOrNull { it.id == transactionId } ?: return
         if (transaction.direction != FinancialTransactionDirection.EXPENSE) return
@@ -59,42 +69,50 @@ class BudgetAlertManager(
             budget.categoryKey != null && matchesBudget(budget, transaction)
         } ?: return
         val categoryKey = matchingBudget.categoryKey ?: return
-        val alertKey = BudgetAlertPolicy.alertKey(period, categoryKey)
-        if (preferences.getBoolean(alertKey, false)) return
 
         val current = MonthlyBudgetCalculator.calculate(
             period = period,
             budgets = listOf(matchingBudget),
             transactions = transactions,
         ).single()
-        val before = MonthlyBudgetCalculator.calculate(
-            period = period,
-            budgets = listOf(matchingBudget),
-            transactions = transactions.filterNot { it.id == transaction.id },
-        ).single()
-
-        val crossed = BudgetAlertPolicy.crossedLimit(
+        val reachedLevel = BudgetAlertPolicy.highestReachedLevel(
             limit = matchingBudget.amount,
-            before = before.projected,
-            after = current.projected,
+            projected = current.projected,
+        ) ?: return
+
+        val stateKey = BudgetAlertPolicy.stateKey(period, categoryKey)
+        val legacyAlreadyAlerted = preferences.getBoolean(
+            BudgetAlertPolicy.legacyAlertKey(period, categoryKey),
+            false,
         )
-        if (!crossed && !(allowBatchCrossing && current.projected > matchingBudget.amount)) return
+        val lastAlertedLevel = preferences.getInt(
+            stateKey,
+            if (legacyAlreadyAlerted) 100 else 0,
+        )
+        if (reachedLevel <= lastAlertedLevel) return
         if (!canPostNotifications()) return
 
+        val notificationKey = BudgetAlertPolicy.notificationKey(period, categoryKey, reachedLevel)
         val notification = Notification.Builder(appContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_budget_alert)
-            .setContentTitle("Orçamento estourado: ${matchingBudget.displayName}")
+            .setContentTitle(
+                if (reachedLevel == 100) {
+                    "Orçamento estourado: ${matchingBudget.displayName}"
+                } else {
+                    "Orçamento em $reachedLevel%: ${matchingBudget.displayName}"
+                },
+            )
             .setContentText(
                 "Gasto projetado ${currency(current.projected)} de " +
-                    "${currency(matchingBudget.amount)} em $period.",
+                    "${currency(matchingBudget.amount)}. Faixa de $reachedLevel% atingida em $period.",
             )
             .setContentIntent(mainActivityPendingIntent())
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_REMINDER)
             .build()
 
-        notificationManager.notify(alertKey.hashCode(), notification)
-        preferences.edit().putBoolean(alertKey, true).apply()
+        notificationManager.notify(notificationKey.hashCode(), notification)
+        preferences.edit().putInt(stateKey, reachedLevel).apply()
     }
 
     private fun matchesBudget(
@@ -134,15 +152,13 @@ class BudgetAlertManager(
         fun ensureChannel(context: Context) {
             val manager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val existing = manager.getNotificationChannel(CHANNEL_ID)
-            if (existing != null) return
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
                     CHANNEL_NAME,
                     NotificationManager.IMPORTANCE_DEFAULT,
                 ).apply {
-                    description = "Avisos locais quando uma categoria ultrapassa o orçamento mensal"
+                    description = "Avisos locais ao atingir novas faixas do orçamento mensal"
                 },
             )
         }
