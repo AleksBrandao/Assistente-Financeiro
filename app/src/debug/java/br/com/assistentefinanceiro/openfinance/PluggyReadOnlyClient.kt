@@ -181,6 +181,24 @@ internal class PluggyReadOnlyClient(
             totalAmount = json.requireBigDecimal("totalAmount"),
             minimumPaymentAmount = json.optBigDecimal("minimumPaymentAmount"),
             allowsInstallments = json.optBooleanOrNull("allowsInstallments"),
+            payments = json.optJSONArray("payments")?.mapObjects { payment ->
+                PluggyBillPaymentSnapshot(
+                    externalId = payment.getString("id"),
+                    amount = payment.requireBigDecimal("amount").abs(),
+                    paymentDate = checkNotNull(payment.optLocalDate("paymentDate")) {
+                        "Bill payment without paymentDate"
+                    },
+                    valueType = payment.optNullableString("valueType"),
+                    paymentMode = payment.optNullableString("paymentMode"),
+                )
+            }.orEmpty(),
+            financeCharges = json.optJSONArray("financeCharges")?.mapObjects { charge ->
+                PluggyBillFinanceChargeSnapshot(
+                    externalId = charge.getString("id"),
+                    type = charge.optNullableString("type") ?: "OTHER",
+                    amount = charge.requireBigDecimal("amount").abs(),
+                )
+            }.orEmpty(),
         )
 
     private fun parseTransaction(
@@ -236,6 +254,10 @@ private fun JSONArray.mapBills(
 private fun JSONArray.mapTransactions(
     transform: (JSONObject) -> PluggyTransactionSnapshot,
 ): List<PluggyTransactionSnapshot> = List(length()) { index -> transform(getJSONObject(index)) }
+
+private fun <T> JSONArray.mapObjects(
+    transform: (JSONObject) -> T,
+): List<T> = List(length()) { index -> transform(getJSONObject(index)) }
 
 private fun JSONObject.optNullableString(name: String): String? =
     if (!has(name) || isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
