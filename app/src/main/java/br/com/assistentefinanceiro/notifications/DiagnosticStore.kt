@@ -163,8 +163,13 @@ class DiagnosticStore(context: Context) :
         if (oldVersion < 18) createDeletedTransactionsTables(db)
         if (oldVersion < 19) createMonthlyBudgetsTable(db)
         if (oldVersion < 21) {
-            db.execSQL("ALTER TABLE transactions ADD COLUMN custom_category TEXT")
-            db.execSQL("ALTER TABLE transactions ADD COLUMN subcategory TEXT")
+            val columns = tableColumns(db, "transactions")
+            if ("custom_category" !in columns) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN custom_category TEXT")
+            }
+            if ("subcategory" !in columns) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN subcategory TEXT")
+            }
         }
         createIndexes(db)
         createCategoryRulesTable(db)
@@ -2290,14 +2295,18 @@ class DiagnosticStore(context: Context) :
             """CREATE INDEX IF NOT EXISTS idx_transactions_invoice
                ON transactions(invoice_id) WHERE invoice_id IS NOT NULL"""
         )
-        db.execSQL(
-            """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
-               ON credit_card_invoices(account_id,due_date DESC)"""
-        )
-        db.execSQL(
-            """CREATE INDEX IF NOT EXISTS idx_movements_account_date
-               ON account_movements(account_id,occurred_at DESC)"""
-        )
+        if (tableExists(db, "credit_card_invoices")) {
+            db.execSQL(
+                """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
+                   ON credit_card_invoices(account_id,due_date DESC)"""
+            )
+        }
+        if (tableExists(db, "account_movements")) {
+            db.execSQL(
+                """CREATE INDEX IF NOT EXISTS idx_movements_account_date
+                   ON account_movements(account_id,occurred_at DESC)"""
+            )
+        }
     }
 
     private fun initializeImportedInstallmentSeries(db: SQLiteDatabase) {
@@ -2385,6 +2394,11 @@ class DiagnosticStore(context: Context) :
             }
         }
     }
+
+    private fun tableExists(db: SQLiteDatabase, table: String): Boolean = db.rawQuery(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        arrayOf(table),
+    ).use { cursor -> cursor.moveToFirst() }
 
     private fun tableColumns(db: SQLiteDatabase, table: String): Set<String> = db.rawQuery(
         "PRAGMA table_info($table)", null,
