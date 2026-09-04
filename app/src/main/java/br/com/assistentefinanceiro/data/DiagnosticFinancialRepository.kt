@@ -5,6 +5,7 @@ import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.notifications.AccountBalanceSummary
 import br.com.assistentefinanceiro.notifications.AccountMovementRecord
 import br.com.assistentefinanceiro.notifications.BackupValidationResult
+import br.com.assistentefinanceiro.notifications.BudgetAlertManager
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceRecord
 import br.com.assistentefinanceiro.notifications.DeletedTransactionGroup
 import br.com.assistentefinanceiro.notifications.DiagnosticEvent
@@ -26,7 +27,9 @@ import java.time.YearMonth
 internal class DiagnosticFinancialRepository(
     context: Context,
 ) : FinancialRepository {
-    private val store = DiagnosticStore(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val store = DiagnosticStore(appContext)
+    private val budgetAlerts = BudgetAlertManager(appContext, store)
 
     override fun candidates(): List<Pair<String, String>> = store.candidates()
     override fun recentEvents(limit: Int): List<DiagnosticEvent> = store.recentEvents(limit)
@@ -51,20 +54,29 @@ internal class DiagnosticFinancialRepository(
         paidAt: LocalDate?,
         applyToFuture: Boolean,
         seriesScope: TransactionSeriesScope,
-    ): Boolean = store.updateTransactionDetails(
-        transactionId,
-        description,
-        category,
-        customCategory,
-        subcategory,
-        status,
-        amount,
-        dueDate,
-        plannedPaymentDate,
-        paidAt,
-        applyToFuture,
-        seriesScope,
-    )
+    ): Boolean {
+        val updated = store.updateTransactionDetails(
+            transactionId,
+            description,
+            category,
+            customCategory,
+            subcategory,
+            status,
+            amount,
+            dueDate,
+            plannedPaymentDate,
+            paidAt,
+            applyToFuture,
+            seriesScope,
+        )
+        if (updated) {
+            budgetAlerts.evaluateTransaction(
+                transactionId = transactionId,
+                allowBatchCrossing = applyToFuture || seriesScope != TransactionSeriesScope.ONLY_THIS,
+            )
+        }
+        return updated
+    }
 
     override fun recordManualTransaction(
         accountId: Long,
