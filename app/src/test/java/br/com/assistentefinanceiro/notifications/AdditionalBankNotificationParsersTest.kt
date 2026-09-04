@@ -7,6 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDateTime
 
 class AdditionalBankNotificationParsersTest {
@@ -38,6 +39,24 @@ class AdditionalBankNotificationParsersTest {
         assertEquals("6652", parsed?.cardLastFour)
         assertEquals("MAMBO VILA LEOPOLDINA", parsed?.merchant)
         assertEquals(receivedAt, parsed?.occurredAt)
+    }
+
+    @Test
+    fun listenerContextMakesClassifierUseAndroidPostedTime() {
+        val postedAt = Instant.parse("2026-09-03T21:25:00Z").toEpochMilli()
+        val expected = NotificationReceivedAtContext.fromPostedAt(postedAt)
+
+        val result = NotificationReceivedAtContext.withPostedAt(postedAt) {
+            FinancialNotificationClassifier.classify(
+                packageName = "com.nu.production",
+                appLabel = "Nubank",
+                title = "Compra no crédito aprovada",
+                body = "Compra de R$ 65,58 APROVADA em MAMBO VILA LEOPOLDINA para o cartão com final 6652.",
+            )
+        }
+
+        assertEquals(NotificationClassification.TRANSACTION, result.classification)
+        assertEquals(expected, result.transaction?.occurredAt)
     }
 
     @Test
