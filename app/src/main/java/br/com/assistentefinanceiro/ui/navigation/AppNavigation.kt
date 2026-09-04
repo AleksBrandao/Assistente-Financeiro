@@ -37,6 +37,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.BankPackagePreferences
+import br.com.assistentefinanceiro.openfinance.PluggySandboxFeature
 import br.com.assistentefinanceiro.ui.screens.AboutScreen
 import br.com.assistentefinanceiro.ui.screens.AccountsScreen
 import br.com.assistentefinanceiro.ui.screens.AnnualSummaryScreen
@@ -61,6 +62,7 @@ private object AppRoute {
     const val BUDGET = "budget"
     const val MORE = "more"
     const val ABOUT = "about"
+    const val PLUGGY_SANDBOX = "pluggy-sandbox"
 }
 
 private data class BottomDestination(
@@ -186,12 +188,26 @@ private fun AppNavHost(
                         navController.navigateReplacingCurrent(AppRoute.DIAGNOSTIC)
                     },
                     onAbout = { navController.navigateReplacingCurrent(AppRoute.ABOUT) },
+                    onPluggySandbox = if (PluggySandboxFeature.isEnabled) {
+                        { navController.navigateReplacingCurrent(AppRoute.PLUGGY_SANDBOX) }
+                    } else {
+                        null
+                    },
                 )
             }
         }
         composable(AppRoute.ABOUT) {
             ActivityScopedDestination(activityViewModelStoreOwner) {
                 AboutScreen(onBack = { navController.navigateReplacingCurrent(AppRoute.MORE) })
+            }
+        }
+        if (PluggySandboxFeature.isEnabled) {
+            composable(AppRoute.PLUGGY_SANDBOX) {
+                ActivityScopedDestination(activityViewModelStoreOwner) {
+                    PluggySandboxFeature.Screen(
+                        onBack = { navController.navigateReplacingCurrent(AppRoute.MORE) },
+                    )
+                }
             }
         }
     }
