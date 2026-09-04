@@ -77,13 +77,13 @@ internal class PluggyReadOnlyClient(
 
     private fun fetchAccounts(apiKey: String, itemId: String): List<PluggyAccountSnapshot> {
         val root = getJson("/accounts?itemId=$itemId", apiKey)
-        return root.getJSONArray("results").mapObjects(::parseAccount)
+        return root.getJSONArray("results").mapAccounts(::parseAccount)
     }
 
     private fun fetchBills(apiKey: String, accountId: String): List<PluggyBillSnapshot> {
         validateUuid(accountId, "accountId")
         val root = getJson("/bills?accountId=$accountId", apiKey)
-        return root.getJSONArray("results").mapObjects(::parseBill)
+        return root.getJSONArray("results").mapBills(::parseBill)
     }
 
     private fun fetchAllTransactions(
@@ -97,7 +97,7 @@ internal class PluggyReadOnlyClient(
         val seenCursors = mutableSetOf<String>()
         repeat(maxPages) {
             val root = getJson("/v2/transactions$suffix", apiKey)
-            transactions += root.getJSONArray("results").mapObjects(::parseTransaction)
+            transactions += root.getJSONArray("results").mapTransactions(::parseTransaction)
             val next = root.optNullableString("next") ?: return transactions
             require(next.startsWith("?")) { "Invalid Pluggy pagination cursor" }
             if (!seenCursors.add(next)) return transactions
@@ -215,14 +215,17 @@ internal class PluggyReadOnlyClient(
     }
 }
 
-private fun JSONArray.mapObjects(transform: (JSONObject) -> PluggyAccountSnapshot): List<PluggyAccountSnapshot> =
-    List(length()) { index -> transform(getJSONObject(index)) }
+private fun JSONArray.mapAccounts(
+    transform: (JSONObject) -> PluggyAccountSnapshot,
+): List<PluggyAccountSnapshot> = List(length()) { index -> transform(getJSONObject(index)) }
 
-private fun JSONArray.mapObjects(transform: (JSONObject) -> PluggyBillSnapshot): List<PluggyBillSnapshot> =
-    List(length()) { index -> transform(getJSONObject(index)) }
+private fun JSONArray.mapBills(
+    transform: (JSONObject) -> PluggyBillSnapshot,
+): List<PluggyBillSnapshot> = List(length()) { index -> transform(getJSONObject(index)) }
 
-private fun JSONArray.mapObjects(transform: (JSONObject) -> PluggyTransactionSnapshot): List<PluggyTransactionSnapshot> =
-    List(length()) { index -> transform(getJSONObject(index)) }
+private fun JSONArray.mapTransactions(
+    transform: (JSONObject) -> PluggyTransactionSnapshot,
+): List<PluggyTransactionSnapshot> = List(length()) { index -> transform(getJSONObject(index)) }
 
 private fun JSONObject.optNullableString(name: String): String? =
     if (!has(name) || isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
