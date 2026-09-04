@@ -3,11 +3,14 @@ package br.com.assistentefinanceiro.ui.viewmodels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import br.com.assistentefinanceiro.data.FinancialRepository
+import br.com.assistentefinanceiro.importing.MobillsImportAccountPlanner
+import br.com.assistentefinanceiro.importing.MobillsImportAccountReview
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.importing.SimpleXlsxReader
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceStatus
 import br.com.assistentefinanceiro.notifications.DailyTransactionGroup
+import br.com.assistentefinanceiro.notifications.FinancialAccountIdentity
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
@@ -46,6 +49,7 @@ internal data class MonthlyStatementUiState(
     val deletingTransaction: FinancialTransactionRecord? = null,
     val deletingScope: TransactionSeriesScope = TransactionSeriesScope.ONLY_THIS,
     val importPreview: MobillsImportPreview? = null,
+    val importAccounts: List<MobillsImportAccountReview> = emptyList(),
     val includePossibleDuplicates: Boolean = false,
     val importMessage: String? = null,
     val importError: String? = null,
@@ -157,22 +161,27 @@ internal class MonthlyStatementViewModel(
     }
 
     fun importMobills(openInputStream: () -> InputStream?) {
-        _uiState.value = _uiState.value.copy(readingImport = true)
+        _uiState.value = _uiState.value.copy(readingImport = true, importError = null)
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
                     openInputStream().use { input ->
                         requireNotNull(input) { "Não foi possível abrir o arquivo" }
-                        repository.markExistingTransactions(
+                        val preview = repository.markExistingTransactions(
                             MobillsImportAnalyzer.analyze(
                                 rawRows = SimpleXlsxReader.readMobillsRows(input),
                             ),
                         )
+                        preview to MobillsImportAccountPlanner.build(
+                            preview = preview,
+                            existingAccounts = repository.financialAccounts(),
+                        )
                     }
                 }
-            }.onSuccess { preview ->
+            }.onSuccess { (preview, accounts) ->
                 _uiState.value = _uiState.value.copy(
                     importPreview = preview,
+                    importAccounts = accounts,
                     includePossibleDuplicates = false,
                 )
             }.onFailure { error ->
@@ -185,24 +194,70 @@ internal class MonthlyStatementViewModel(
         }
     }
 
+    fun setImportAccountType(normalizedName: String, type: FinancialAccountType) {
+        val state = _uiState.value
+        _uiState.value = state.copy(
+            importAccounts = state.importAccounts.map { review ->
+                if (!review.isExisting && review.normalizedName == normalizedName) {
+                    review.copy(selectedType = type)
+                } else {
+                    review
+                }
+            },
+        )
+    }
+
     fun setIncludePossibleDuplicates(include: Boolean) {
         _uiState.value = _uiState.value.copy(includePossibleDuplicates = include)
     }
 
     fun dismissImportPreview() {
-        _uiState.value = _uiState.value.copy(importPreview = null)
+        _uiState.value = _uiState.value.copy(
+            importPreview = null,
+            importAccounts = emptyList(),
+            includePossibleDuplicates = false,
+        )
     }
 
     fun confirmImport() {
         val state = _uiState.value
         val preview = state.importPreview ?: return
-        val result = repository.importMobills(preview, state.includePossibleDuplicates)
-        val message = "${result.imported} movimentações importadas" +
-            if (result.alreadyImported > 0) {
-                " · ${result.alreadyImported} já existentes"
-            } else ""
-        refresh()
-        _uiState.value = _uiState.value.copy(importMessage = message)
+        val unresolvedAccounts = state.importAccounts.filter { review -> review.selectedType == null }
+        if (unresolvedAccounts.isNotEmpty()) {
+            _uiState.value = state.copy(
+                importError = "Classifique todas as contas novas antes de confirmar a importação.",
+            )
+            return
+        }
+
+        _uiState.value = state.copy(readingImport = true, importError = null)
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    ensureImportAccounts(state.importAccounts)
+                    repository.importMobills(preview, state.includePossibleDuplicates)
+                }
+            }.onSuccess { result ->
+                val message = "${result.imported} movimentações importadas" +
+                    if (result.alreadyImported > 0) {
+                        " · ${result.alreadyImported} já existentes"
+                    } else ""
+                refresh()
+                _uiState.value = _uiState.value.copy(
+                    importPreview = null,
+                    importAccounts = emptyList(),
+                    includePossibleDuplicates = false,
+                    importMessage = message,
+                    readingImport = false,
+                )
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                _uiState.value = _uiState.value.copy(
+                    importError = error.message ?: "Não foi possível concluir a importação.",
+                    readingImport = false,
+                )
+            }
+        }
     }
 
     fun dismissImportMessage() {
@@ -241,6 +296,54 @@ internal class MonthlyStatementViewModel(
 
     fun onInvoiceChanged() {
         refresh()
+    }
+
+    private fun ensureImportAccounts(reviews: List<MobillsImportAccountReview>) {
+        var currentByNormalizedName = repository.financialAccounts().associateBy { account ->
+            FinancialAccountIdentity.normalize(account.name)
+        }
+
+        reviews.forEach { review ->
+            val selectedType = requireNotNull(review.selectedType) {
+                "Tipo não informado para ${review.displayName}."
+            }
+            val current = currentByNormalizedName[review.normalizedName]
+            if (current != null) {
+                require(current.type == selectedType) {
+                    "A conta ${review.displayName} já existe como ${current.type.displayName}."
+                }
+                return@forEach
+            }
+
+            val created = repository.saveFinancialAccount(
+                id = null,
+                name = review.displayName,
+                type = selectedType,
+                closingDay = null,
+                dueDay = null,
+                isDefault = false,
+                cardIdentifiers = null,
+                openingBalance = BigDecimal.ZERO,
+                openingBalanceDate = if (selectedType == FinancialAccountType.BANK_ACCOUNT) {
+                    review.firstTransactionDate ?: LocalDate.now()
+                } else {
+                    null
+                },
+            )
+            check(created) { "Não foi possível cadastrar a conta ${review.displayName}." }
+            currentByNormalizedName = repository.financialAccounts().associateBy { account ->
+                FinancialAccountIdentity.normalize(account.name)
+            }
+        }
+
+        reviews.forEach { review ->
+            val expectedType = requireNotNull(review.selectedType)
+            val current = currentByNormalizedName[review.normalizedName]
+                ?: error("A conta ${review.displayName} não foi encontrada após o cadastro.")
+            require(current.type == expectedType) {
+                "A conta ${review.displayName} está cadastrada como ${current.type.displayName}."
+            }
+        }
     }
 
     private fun selectMonth(period: YearMonth) {
