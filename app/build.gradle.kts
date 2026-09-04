@@ -26,6 +26,7 @@ android {
         versionCode = 25
         versionName = "0.22.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["appLabel"] = "Assistente Financeiro"
     }
 
     signingConfigs {
@@ -39,6 +40,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            applicationIdSuffix = ".pluggysandbox"
+            versionNameSuffix = "-pluggy-test"
+            manifestPlaceholders["appLabel"] = "Assistente Financeiro (Teste)"
+        }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.findByName("release")
