@@ -69,7 +69,7 @@ object FinancialNotificationClassifier {
         appLabel: String,
         title: String?,
         body: String?,
-        receivedAt: LocalDateTime = LocalDateTime.now(),
+        receivedAt: LocalDateTime = NotificationReceivedAtContext.currentOrNow(),
     ): NotificationClassificationResult {
         val notification = BankNotification(
             packageName = packageName,
