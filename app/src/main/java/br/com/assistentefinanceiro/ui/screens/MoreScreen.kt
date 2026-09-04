@@ -75,6 +75,7 @@ internal fun MoreScreen(
     onData: () -> Unit,
     onDiagnostic: () -> Unit,
     onAbout: () -> Unit,
+    onPluggySandbox: (() -> Unit)? = null,
 ) {
     val screenViewModel: MoreViewModel = viewModel()
     val uiState by screenViewModel.uiState.collectAsState()
@@ -115,6 +116,23 @@ internal fun MoreScreen(
                     "Entradas, saídas e saldo mês a mês",
                     onSummary,
                 )
+            }
+            if (onPluggySandbox != null) {
+                item {
+                    Text(
+                        "Integrações de teste",
+                        modifier = Modifier.padding(top = FinanceSpacing.sm),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                item {
+                    MoreOptionCard(
+                        Icons.Rounded.AccountBalance,
+                        "Open Finance (Teste)",
+                        "Consulta Pluggy somente leitura, sem importar dados",
+                        onPluggySandbox,
+                    )
+                }
             }
             item {
                 Text(
