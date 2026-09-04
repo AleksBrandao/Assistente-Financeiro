@@ -22,12 +22,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -45,6 +47,8 @@ import br.com.assistentefinanceiro.ui.screens.MonthlyStatementScreen
 import br.com.assistentefinanceiro.ui.screens.MoreScreen
 import br.com.assistentefinanceiro.ui.screens.PlanningScreen
 import br.com.assistentefinanceiro.ui.screens.TransactionSearchScreen
+import br.com.assistentefinanceiro.ui.viewmodels.MonthlyBudgetViewModel
+import br.com.assistentefinanceiro.ui.viewmodels.ScreenViewModelFactory
 
 private object AppRoute {
     const val STATEMENT = "statement"
@@ -161,6 +165,14 @@ private fun AppNavHost(
         }
         composable(AppRoute.BUDGET) {
             ActivityScopedDestination(activityViewModelStoreOwner) {
+                val budgetViewModel: MonthlyBudgetViewModel = viewModel(
+                    factory = ScreenViewModelFactory {
+                        MonthlyBudgetViewModel(repository)
+                    },
+                )
+                LaunchedEffect(budgetViewModel) {
+                    budgetViewModel.refresh()
+                }
                 MonthlyBudgetScreen(repository = repository)
             }
         }

@@ -55,8 +55,6 @@ data class NotificationClassificationResult(
 )
 
 object FinancialNotificationClassifier {
-    private const val SANTANDER_PACKAGE = "com.santander.app"
-
     private val creditAvailablePattern = Regex(
         """cr[eé]dito\s+dispon[ií]vel""",
         RegexOption.IGNORE_CASE,
@@ -71,49 +69,44 @@ object FinancialNotificationClassifier {
         appLabel: String,
         title: String?,
         body: String?,
+        receivedAt: LocalDateTime = NotificationReceivedAtContext.currentOrNow(),
     ): NotificationClassificationResult {
-        if (!isSantander(packageName, appLabel)) {
-            return NotificationClassificationResult(
+        val notification = BankNotification(
+            packageName = packageName,
+            appLabel = appLabel,
+            title = title,
+            body = body,
+            receivedAt = receivedAt,
+        )
+        val parser = BankNotificationParserRegistry.parserFor(notification)
+            ?: return NotificationClassificationResult(
                 classification = NotificationClassification.PENDING_RULE,
                 reason = "Aplicativo ainda sem classificador",
             )
-        }
 
-        SantanderParser.parse(title, body)?.let { purchase ->
+        parser.parse(notification)?.let { transaction ->
             return NotificationClassificationResult(
                 classification = NotificationClassification.TRANSACTION,
-                reason = "Compra aprovada reconhecida",
-                transaction = ParsedFinancialTransaction(
-                    type = FinancialTransactionType.CARD_PURCHASE,
-                    amount = purchase.amount,
-                    occurredAt = purchase.occurredAt,
-                    cardLastFour = purchase.cardLastFour,
-                    merchant = purchase.merchant,
-                ),
+                reason = when (transaction.type) {
+                    FinancialTransactionType.CARD_PURCHASE -> "Compra aprovada reconhecida"
+                    FinancialTransactionType.PIX_RECEIVED -> "PIX recebido reconhecido"
+                    else -> "Transação reconhecida"
+                },
+                transaction = transaction,
             )
         }
 
-        SantanderPixParser.parse(title, body)?.let { pix ->
-            return NotificationClassificationResult(
-                classification = NotificationClassification.TRANSACTION,
-                reason = "PIX recebido reconhecido",
-                transaction = ParsedFinancialTransaction(
-                    type = FinancialTransactionType.PIX_RECEIVED,
-                    amount = pix.amount,
-                    occurredAt = pix.occurredAt,
-                ),
-            )
-        }
-
-        val fullText = "${title.orEmpty()}\n${body.orEmpty()}"
-        if (
-            creditAvailablePattern.containsMatchIn(fullText) &&
-            profileOfferPattern.containsMatchIn(fullText)
-        ) {
-            return NotificationClassificationResult(
-                classification = NotificationClassification.IGNORED_PROMOTION,
-                reason = "Oferta de crédito",
-            )
+        if (parser === SantanderBankNotificationParser) {
+            val fullText = "${title.orEmpty()}\n${body.orEmpty()}"
+            if (
+                creditAvailablePattern.containsMatchIn(fullText) &&
+                profileOfferPattern.containsMatchIn(fullText)
+            ) {
+                return NotificationClassificationResult(
+                    classification = NotificationClassification.IGNORED_PROMOTION,
+                    reason = "Oferta de crédito",
+                )
+            }
         }
 
         return NotificationClassificationResult(
@@ -121,7 +114,4 @@ object FinancialNotificationClassifier {
             reason = "Nenhuma regra compatível",
         )
     }
-
-    private fun isSantander(packageName: String, appLabel: String): Boolean =
-        packageName == SANTANDER_PACKAGE || appLabel.contains("Santander", ignoreCase = true)
 }
