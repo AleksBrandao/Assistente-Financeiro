@@ -17,6 +17,7 @@ import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.InvoicePaymentRecord
 import br.com.assistentefinanceiro.notifications.MobillsImportResult
 import br.com.assistentefinanceiro.notifications.MonthlyBudgetRecord
+import br.com.assistentefinanceiro.notifications.NotificationTimestampRepair
 import br.com.assistentefinanceiro.notifications.TransactionCategory
 import br.com.assistentefinanceiro.notifications.TransactionSeriesScope
 import br.com.assistentefinanceiro.notifications.TransactionStatus
@@ -30,6 +31,10 @@ internal class DiagnosticFinancialRepository(
     private val appContext = context.applicationContext
     private val store = DiagnosticStore(appContext)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
+
+    init {
+        NotificationTimestampRepair.repairOnce(store)
+    }
 
     override fun candidates(): List<Pair<String, String>> = store.candidates()
     override fun recentEvents(limit: Int): List<DiagnosticEvent> = store.recentEvents(limit)
@@ -70,10 +75,7 @@ internal class DiagnosticFinancialRepository(
             seriesScope,
         )
         if (updated) {
-            budgetAlerts.evaluateTransaction(
-                transactionId = transactionId,
-                allowBatchCrossing = applyToFuture || seriesScope != TransactionSeriesScope.ONLY_THIS,
-            )
+            budgetAlerts.evaluateTransaction(transactionId)
         }
         return updated
     }
