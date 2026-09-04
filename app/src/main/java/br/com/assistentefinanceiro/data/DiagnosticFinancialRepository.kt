@@ -30,6 +30,7 @@ internal class DiagnosticFinancialRepository(
 ) : FinancialRepository {
     private val appContext = context.applicationContext
     private val store = DiagnosticStore(appContext)
+    private val externalPersistence = ExternalImportPersistence(store)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
 
     init {
@@ -200,6 +201,16 @@ internal class DiagnosticFinancialRepository(
         preview: MobillsImportPreview,
         includePossibleDuplicates: Boolean,
     ): MobillsImportResult = store.importMobills(preview, includePossibleDuplicates)
+
+    override fun externalAccountLinks(provider: ExternalDataProvider): List<ExternalAccountLinkRecord> =
+        externalPersistence.accountLinks(provider)
+
+    override fun saveExternalAccountLink(link: ExternalAccountLinkRecord): Boolean =
+        externalPersistence.saveAccountLink(link)
+
+    override fun importExternalTransactions(
+        drafts: List<ExternalTransactionImportDraft>,
+    ): ExternalImportResult = externalPersistence.importTransactions(drafts)
 
     override fun deletedTransactionGroups(): List<DeletedTransactionGroup> =
         store.deletedTransactionGroups()

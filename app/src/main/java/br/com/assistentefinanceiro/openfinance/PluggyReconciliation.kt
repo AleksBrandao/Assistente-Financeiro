@@ -20,8 +20,15 @@ data class PluggyAccountDataset(
 )
 
 enum class PluggyReconciliationStatus {
+    CONFIRMED,
     STRONG,
     PROBABLE,
+    REVIEW,
+    UNMATCHED,
+}
+
+enum class PluggyTransactionMatchStatus {
+    MATCHED,
     REVIEW,
     UNMATCHED,
 }
@@ -33,6 +40,7 @@ data class PluggyReconciliationCounts(
 )
 
 data class PluggyAccountReconciliation(
+    val pluggyAccountExternalId: String,
     val pluggyAccountName: String,
     val pluggyAccountType: PluggyAccountType,
     val status: PluggyReconciliationStatus,
@@ -50,6 +58,8 @@ data class PluggyReconciliationPreview(
     val distinctPluggyCategories: Int,
     val directCategoryMatches: Int,
 ) {
+    val confirmedAccounts: Int
+        get() = accounts.count { it.status == PluggyReconciliationStatus.CONFIRMED }
     val strongAccounts: Int get() = accounts.count { it.status == PluggyReconciliationStatus.STRONG }
     val probableAccounts: Int get() = accounts.count { it.status == PluggyReconciliationStatus.PROBABLE }
     val reviewAccounts: Int get() = accounts.count { it.status == PluggyReconciliationStatus.REVIEW }
@@ -61,16 +71,11 @@ data class PluggyReconciliationInput(
     val localAccounts: List<FinancialAccountRecord>,
     val localTransactions: List<FinancialTransactionRecord>,
     val localInvoicesByAccount: Map<Long, List<CreditCardInvoiceRecord>>,
+    val confirmedAccountLinks: Map<String, Long> = emptyMap(),
     val zoneId: ZoneId = ZoneId.systemDefault(),
 )
 
-/**
- * Conservative, read-only reconciliation preview.
- *
- * It intentionally does not persist external ids and never auto-links ambiguous accounts. A local
- * account is used for transaction/bill comparison only when account confidence is STRONG or
- * PROBABLE.
- */
+/** Conservative reconciliation used both for preview and controlled import. */
 object PluggyReconciliationEngine {
     fun reconcile(input: PluggyReconciliationInput): PluggyReconciliationPreview {
         val accountResults = input.pluggyAccounts.map { dataset ->
@@ -92,28 +97,77 @@ object PluggyReconciliationEngine {
         )
     }
 
+    fun transactionMatchStatus(
+        remote: PluggyTransactionSnapshot,
+        local: List<FinancialTransactionRecord>,
+        zoneId: ZoneId = ZoneId.systemDefault(),
+    ): PluggyTransactionMatchStatus {
+        val candidates = local.filter { candidate ->
+            directionMatches(remote, candidate) && amountMatches(remote, candidate)
+        }
+        if (candidates.isEmpty()) return PluggyTransactionMatchStatus.UNMATCHED
+        val dated = candidates.filter { dateMatches(remote, it, zoneId) }
+        return when {
+            dated.size == 1 -> PluggyTransactionMatchStatus.MATCHED
+            dated.size > 1 -> {
+                val descriptions = dated.filter {
+                    descriptionMatches(remote.description, it.description)
+                }
+                if (descriptions.size == 1) {
+                    PluggyTransactionMatchStatus.MATCHED
+                } else {
+                    PluggyTransactionMatchStatus.REVIEW
+                }
+            }
+            else -> {
+                val near = candidates.filter { dateNear(remote, it, zoneId, 3) }
+                if (near.size == 1) PluggyTransactionMatchStatus.REVIEW
+                else PluggyTransactionMatchStatus.UNMATCHED
+            }
+        }
+    }
+
     private fun reconcileAccount(
         dataset: PluggyAccountDataset,
         input: PluggyReconciliationInput,
     ): PluggyAccountReconciliation {
         val compatible = input.localAccounts.filter { isCompatible(dataset.account.type, it.type) }
+        val confirmed = input.confirmedAccountLinks[dataset.account.externalId]?.let { localId ->
+            compatible.firstOrNull { it.id == localId }
+        }
         val scored = compatible.map { local ->
             scoreAccount(dataset, local, compatible.size)
         }.sortedByDescending { it.score }
-
         val top = scored.firstOrNull()
         val second = scored.getOrNull(1)
         val gap = if (top == null) 0 else top.score - (second?.score ?: 0)
-        val status = when {
-            top == null -> PluggyReconciliationStatus.UNMATCHED
-            top.score >= 100 && gap >= 40 -> PluggyReconciliationStatus.STRONG
-            top.score >= 50 && gap >= 20 -> PluggyReconciliationStatus.PROBABLE
-            compatible.isNotEmpty() -> PluggyReconciliationStatus.REVIEW
-            else -> PluggyReconciliationStatus.UNMATCHED
-        }
-        val selected = top?.account?.takeIf {
-            status == PluggyReconciliationStatus.STRONG ||
-                status == PluggyReconciliationStatus.PROBABLE
+
+        val status: PluggyReconciliationStatus
+        val selected: FinancialAccountRecord?
+        val reasons: List<String>
+        if (confirmed != null) {
+            status = PluggyReconciliationStatus.CONFIRMED
+            selected = confirmed
+            reasons = listOf("vínculo confirmado anteriormente")
+        } else {
+            status = when {
+                top == null -> PluggyReconciliationStatus.UNMATCHED
+                top.score >= 100 && gap >= 40 -> PluggyReconciliationStatus.STRONG
+                top.score >= 50 && gap >= 20 -> PluggyReconciliationStatus.PROBABLE
+                compatible.isNotEmpty() -> PluggyReconciliationStatus.REVIEW
+                else -> PluggyReconciliationStatus.UNMATCHED
+            }
+            selected = top?.account?.takeIf {
+                status == PluggyReconciliationStatus.STRONG ||
+                    status == PluggyReconciliationStatus.PROBABLE
+            }
+            reasons = when {
+                top == null -> listOf("Nenhuma conta local do mesmo tipo")
+                selected != null -> top.reasons
+                else -> listOf(
+                    "Há ${compatible.size} conta(s) local(is) compatível(is), mas sem evidência suficiente para vincular",
+                ) + top.reasons
+            }
         }
 
         val localTransactions = selected?.let { account ->
@@ -122,17 +176,14 @@ object PluggyReconciliationEngine {
         val localInvoices = selected?.let { input.localInvoicesByAccount[it.id].orEmpty() }.orEmpty()
 
         return PluggyAccountReconciliation(
+            pluggyAccountExternalId = dataset.account.externalId,
             pluggyAccountName = dataset.account.name,
             pluggyAccountType = dataset.account.type,
             status = status,
             localAccountId = selected?.id,
             localAccountName = selected?.name,
             compatibleCandidateCount = compatible.size,
-            reasons = when {
-                top == null -> listOf("Nenhuma conta local do mesmo tipo")
-                selected != null -> top.reasons
-                else -> listOf("Há ${compatible.size} conta(s) local(is) compatível(is), mas sem evidência suficiente para vincular") + top.reasons
-            },
+            reasons = reasons,
             transactionCounts = if (selected == null) {
                 PluggyReconciliationCounts(0, 0, dataset.transactions.size)
             } else {
@@ -212,33 +263,12 @@ object PluggyReconciliationEngine {
         local: List<FinancialTransactionRecord>,
         zoneId: ZoneId,
     ): PluggyReconciliationCounts {
-        var matched = 0
-        var review = 0
-        var unmatched = 0
-        pluggy.forEach { remote ->
-            val candidates = local.filter { candidate ->
-                directionMatches(remote, candidate) && amountMatches(remote, candidate)
-            }
-            if (candidates.isEmpty()) {
-                unmatched++
-                return@forEach
-            }
-            val dated = candidates.filter { dateMatches(remote, it, zoneId) }
-            when {
-                dated.size == 1 -> matched++
-                dated.size > 1 -> {
-                    val descriptionMatches = dated.filter {
-                        descriptionMatches(remote.description, it.description)
-                    }
-                    if (descriptionMatches.size == 1) matched++ else review++
-                }
-                else -> {
-                    val near = candidates.filter { dateNear(remote, it, zoneId, 3) }
-                    if (near.size == 1) review++ else unmatched++
-                }
-            }
-        }
-        return PluggyReconciliationCounts(matched, review, unmatched)
+        val statuses = pluggy.map { transactionMatchStatus(it, local, zoneId) }
+        return PluggyReconciliationCounts(
+            matched = statuses.count { it == PluggyTransactionMatchStatus.MATCHED },
+            review = statuses.count { it == PluggyTransactionMatchStatus.REVIEW },
+            unmatched = statuses.count { it == PluggyTransactionMatchStatus.UNMATCHED },
+        )
     }
 
     private fun reconcileBills(

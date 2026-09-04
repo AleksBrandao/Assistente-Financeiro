@@ -119,6 +119,12 @@ interface FinancialRepository {
         includePossibleDuplicates: Boolean,
     ): MobillsImportResult
 
+    fun externalAccountLinks(provider: ExternalDataProvider): List<ExternalAccountLinkRecord>
+    fun saveExternalAccountLink(link: ExternalAccountLinkRecord): Boolean
+    fun importExternalTransactions(
+        drafts: List<ExternalTransactionImportDraft>,
+    ): ExternalImportResult
+
     fun deletedTransactionGroups(): List<DeletedTransactionGroup>
     fun restoreDeletedTransactionGroup(groupId: String): Boolean
     fun permanentlyDeleteTransactionGroup(groupId: String): Boolean
