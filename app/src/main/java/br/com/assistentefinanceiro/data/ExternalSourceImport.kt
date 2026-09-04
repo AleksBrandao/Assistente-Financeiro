@@ -46,6 +46,7 @@ data class ExternalTransactionImportDraft(
         require(externalTransactionId.isNotBlank())
         require(externalAccountId.isNotBlank())
         require(localAccountId > 0)
+        require(type.direction == direction) { "type and direction must be consistent" }
         require(amount.signum() > 0)
         require(description.isNotBlank())
         if (installmentNumber != null || totalInstallments != null) {
