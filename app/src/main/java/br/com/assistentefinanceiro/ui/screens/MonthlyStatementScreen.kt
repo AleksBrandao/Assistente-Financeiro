@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -370,11 +371,19 @@ internal fun MonthlyStatementScreen(
     }
 
     uiState.importPreview?.let { preview ->
+        val importableCount = preview.readyCount + preview.pendingCount +
+            if (uiState.includePossibleDuplicates) preview.possibleDuplicateCount else 0
+        val allAccountsTyped = uiState.importAccounts.all { review -> review.selectedType != null }
         AlertDialog(
             onDismissRequest = screenViewModel::dismissImportPreview,
             title = { Text("Prévia da importação Mobills") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                ) {
                     Text("Realizados: ${preview.readyCount}")
                     Text("Pendentes: ${preview.pendingCount}")
                     Text("Possíveis duplicidades: ${preview.possibleDuplicateCount}")
@@ -395,6 +404,90 @@ internal fun MonthlyStatementScreen(
                             Text("Importar também as possíveis duplicidades")
                         }
                     }
+                    if (uiState.importAccounts.isNotEmpty()) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = FinanceSpacing.xs))
+                        Text(
+                            "Contas encontradas",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "As contas já cadastradas mantêm o tipo atual. Para contas novas, " +
+                                "escolha o tipo antes de importar.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        uiState.importAccounts.forEach { account ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(FinanceSpacing.sm),
+                                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                                ) {
+                                    Text(
+                                        account.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    if (account.isExisting) {
+                                        Text(
+                                            "Cadastrada como ${account.selectedType?.displayName}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    } else {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                                        ) {
+                                            FilterChip(
+                                                selected = account.selectedType ==
+                                                    FinancialAccountType.BANK_ACCOUNT,
+                                                onClick = {
+                                                    screenViewModel.setImportAccountType(
+                                                        account.normalizedName,
+                                                        FinancialAccountType.BANK_ACCOUNT,
+                                                    )
+                                                },
+                                                label = { Text("Conta bancária") },
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            FilterChip(
+                                                selected = account.selectedType ==
+                                                    FinancialAccountType.CREDIT_CARD,
+                                                onClick = {
+                                                    screenViewModel.setImportAccountType(
+                                                        account.normalizedName,
+                                                        FinancialAccountType.CREDIT_CARD,
+                                                    )
+                                                },
+                                                label = { Text("Cartão") },
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                        }
+                                        if (account.selectedType == FinancialAccountType.CREDIT_CARD) {
+                                            Text(
+                                                "Depois, informe fechamento e vencimento em Contas " +
+                                                    "para montar as faturas.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!allAccountsTyped) {
+                            Text(
+                                "Classifique todas as contas novas para habilitar a importação.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
                     Text(
                         "Registros rejeitados e duplicidades não selecionadas não serão gravados.",
                         style = MaterialTheme.typography.bodySmall,
@@ -403,12 +496,18 @@ internal fun MonthlyStatementScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = screenViewModel::confirmImport) {
+                TextButton(
+                    onClick = screenViewModel::confirmImport,
+                    enabled = allAccountsTyped && importableCount > 0 && !readingImport,
+                ) {
                     Text("Confirmar importação")
                 }
             },
             dismissButton = {
-                TextButton(onClick = screenViewModel::dismissImportPreview) { Text("Cancelar") }
+                TextButton(
+                    onClick = screenViewModel::dismissImportPreview,
+                    enabled = !readingImport,
+                ) { Text("Cancelar") }
             },
         )
     }
