@@ -69,6 +69,10 @@ internal class MonthlyBudgetViewModel(
     private val _uiState = MutableStateFlow(buildState(YearMonth.now()))
     val uiState: StateFlow<MonthlyBudgetUiState> = _uiState.asStateFlow()
 
+    fun refresh() {
+        reload(_uiState.value.selectedMonth)
+    }
+
     fun showPreviousMonth() = selectMonth(_uiState.value.selectedMonth.minusMonths(1))
 
     fun showNextMonth() = selectMonth(_uiState.value.selectedMonth.plusMonths(1))
