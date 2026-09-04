@@ -31,6 +31,9 @@ internal object BudgetAlertPolicy {
     fun stateKey(period: YearMonth, categoryKey: String): String =
         "$period|$categoryKey|highest-level"
 
+    fun limitKey(period: YearMonth, categoryKey: String): String =
+        "$period|$categoryKey|budget-limit"
+
     fun legacyAlertKey(period: YearMonth, categoryKey: String): String = "$period|$categoryKey"
 
     fun notificationKey(period: YearMonth, categoryKey: String, level: Int): String =
@@ -75,20 +78,32 @@ class BudgetAlertManager(
             budgets = listOf(matchingBudget),
             transactions = transactions,
         ).single()
+
+        val stateKey = BudgetAlertPolicy.stateKey(period, categoryKey)
+        val limitKey = BudgetAlertPolicy.limitKey(period, categoryKey)
+        val storedLimit = preferences.getString(limitKey, null)?.toBigDecimalOrNull()
+        val budgetChanged = storedLimit != null && storedLimit.compareTo(matchingBudget.amount) != 0
+        val legacyAlreadyAlerted = storedLimit == null && preferences.getBoolean(
+            BudgetAlertPolicy.legacyAlertKey(period, categoryKey),
+            false,
+        )
+        val lastAlertedLevel = if (budgetChanged) {
+            0
+        } else {
+            preferences.getInt(stateKey, if (legacyAlreadyAlerted) 100 else 0)
+        }
+
+        if (storedLimit == null || budgetChanged) {
+            preferences.edit().apply {
+                putString(limitKey, matchingBudget.amount.stripTrailingZeros().toPlainString())
+                if (budgetChanged) remove(stateKey)
+            }.apply()
+        }
+
         val reachedLevel = BudgetAlertPolicy.highestReachedLevel(
             limit = matchingBudget.amount,
             projected = current.projected,
         ) ?: return
-
-        val stateKey = BudgetAlertPolicy.stateKey(period, categoryKey)
-        val legacyAlreadyAlerted = preferences.getBoolean(
-            BudgetAlertPolicy.legacyAlertKey(period, categoryKey),
-            false,
-        )
-        val lastAlertedLevel = preferences.getInt(
-            stateKey,
-            if (legacyAlreadyAlerted) 100 else 0,
-        )
         if (reachedLevel <= lastAlertedLevel) return
         if (!canPostNotifications()) return
 
