@@ -83,7 +83,9 @@ internal class PluggyReadOnlyClient(
     private fun fetchBills(apiKey: String, accountId: String): List<PluggyBillSnapshot> {
         validateUuid(accountId, "accountId")
         val root = getJson("/bills?accountId=$accountId", apiKey)
-        return root.getJSONArray("results").mapBills(::parseBill)
+        return root.getJSONArray("results").mapBills { bill ->
+            parseBill(bill, accountId)
+        }
     }
 
     private fun fetchAllTransactions(
@@ -97,7 +99,9 @@ internal class PluggyReadOnlyClient(
         val seenCursors = mutableSetOf<String>()
         repeat(maxPages) {
             val root = getJson("/v2/transactions$suffix", apiKey)
-            transactions += root.getJSONArray("results").mapTransactions(::parseTransaction)
+            transactions += root.getJSONArray("results").mapTransactions { transaction ->
+                parseTransaction(transaction, accountId)
+            }
             val next = root.optNullableString("next") ?: return transactions
             require(next.startsWith("?")) { "Invalid Pluggy pagination cursor" }
             if (!seenCursors.add(next)) return transactions
@@ -166,22 +170,26 @@ internal class PluggyReadOnlyClient(
         )
     }
 
-    private fun parseBill(json: JSONObject): PluggyBillSnapshot = PluggyBillSnapshot(
-        externalId = json.getString("id"),
-        accountExternalId = json.getString("accountId"),
-        dueDate = checkNotNull(json.optLocalDate("dueDate")) { "Bill without dueDate" },
-        closingDate = json.optLocalDate("billClosingDate"),
-        totalAmount = json.requireBigDecimal("totalAmount"),
-        minimumPaymentAmount = json.optBigDecimal("minimumPaymentAmount"),
-        allowsInstallments = json.optBooleanOrNull("allowsInstallments"),
-    )
+    private fun parseBill(json: JSONObject, accountId: String): PluggyBillSnapshot =
+        PluggyBillSnapshot(
+            externalId = json.getString("id"),
+            accountExternalId = json.optNullableString("accountId") ?: accountId,
+            dueDate = checkNotNull(json.optLocalDate("dueDate")) { "Bill without dueDate" },
+            closingDate = json.optLocalDate("billClosingDate"),
+            totalAmount = json.requireBigDecimal("totalAmount"),
+            minimumPaymentAmount = json.optBigDecimal("minimumPaymentAmount"),
+            allowsInstallments = json.optBooleanOrNull("allowsInstallments"),
+        )
 
-    private fun parseTransaction(json: JSONObject): PluggyTransactionSnapshot {
+    private fun parseTransaction(
+        json: JSONObject,
+        accountId: String,
+    ): PluggyTransactionSnapshot {
         val card = json.optJSONObjectOrNull("creditCardMetadata")
         val payment = json.optJSONObjectOrNull("paymentData")
         return PluggyTransactionSnapshot(
             externalId = json.getString("id"),
-            accountExternalId = json.getString("accountId"),
+            accountExternalId = json.optNullableString("accountId") ?: accountId,
             amount = json.requireBigDecimal("amount"),
             date = Instant.parse(json.getString("date")),
             purchaseDate = card?.optInstant("purchaseDate"),
