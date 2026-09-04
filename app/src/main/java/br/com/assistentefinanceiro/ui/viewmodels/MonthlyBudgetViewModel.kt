@@ -74,10 +74,14 @@ internal class MonthlyBudgetViewModel(
     fun showNextMonth() = selectMonth(_uiState.value.selectedMonth.plusMonths(1))
 
     fun editTotal() {
+        val period = _uiState.value.selectedMonth
+        reload(period)
         _uiState.value = _uiState.value.copy(editingTotal = true, editingCategory = null)
     }
 
     fun editCategory(choice: CategoryChoice) {
+        val period = _uiState.value.selectedMonth
+        reload(period)
         _uiState.value = _uiState.value.copy(editingCategory = choice, editingTotal = false)
     }
 
@@ -125,7 +129,7 @@ internal class MonthlyBudgetViewModel(
     }
 
     private fun selectMonth(period: YearMonth) {
-        _uiState.value = buildState(period)
+        reload(period)
     }
 
     private fun reload(period: YearMonth, message: String? = null) {
