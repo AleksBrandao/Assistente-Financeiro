@@ -117,7 +117,6 @@ class DiagnosticStore(context: Context) :
                 db.execSQL("ALTER TABLE transactions ADD COLUMN invoice_id INTEGER")
                 db.execSQL("ALTER TABLE financial_accounts ADD COLUMN card_identifiers TEXT")
             }
-            initializeCardIdentifiers(db)
             linkNotificationTransactionsToAccounts(db)
             rebuildAllCreditCardInvoices(db)
         }
@@ -2075,35 +2074,16 @@ class DiagnosticStore(context: Context) :
             arrayOf(normalized),
         ).use { cursor -> if (cursor.moveToFirst()) return cursor.getLong(0) }
 
-        val preset = knownAccountPreset(normalized)
         return db.insertOrThrow(
             "financial_accounts",
             null,
             ContentValues().apply {
                 put("name", trimmed)
                 put("normalized_name", normalized)
-                put("type", (preset?.type ?: FinancialAccountIdentity.inferredType(trimmed)).name)
-                preset?.closingDay?.let { put("closing_day", it) }
-                preset?.dueDay?.let { put("due_day", it) }
-                put("is_default", if (preset?.isDefault == true) 1 else 0)
-                preset?.cardIdentifiers?.let { put("card_identifiers", it) }
+                put("type", FinancialAccountType.BANK_ACCOUNT.name)
+                put("is_default", 0)
             },
         )
-    }
-
-    private fun initializeCardIdentifiers(db: SQLiteDatabase) {
-        listOf(
-            "CINZA" to "6426,5253",
-            "PRETO" to "3409,6101",
-            "VERMELHO" to "7107,7691",
-        ).forEach { (normalizedName, identifiers) ->
-            db.update(
-                "financial_accounts",
-                ContentValues().apply { put("card_identifiers", identifiers) },
-                "normalized_name = ? AND card_identifiers IS NULL",
-                arrayOf(normalizedName),
-            )
-        }
     }
 
     private fun linkNotificationTransactionsToAccounts(db: SQLiteDatabase) {
@@ -2285,14 +2265,6 @@ class DiagnosticStore(context: Context) :
         }
     }
 
-    private fun knownAccountPreset(normalizedName: String): KnownAccountPreset? = when (normalizedName) {
-        "CINZA" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 26, 5, true, "6426,5253")
-        "VERMELHO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 11, null, false, "7107,7691")
-        "PRETO" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 8, null, false, "3409,6101")
-        "CARREFOUR" -> KnownAccountPreset(FinancialAccountType.CREDIT_CARD, 20, null, false, null)
-        else -> null
-    }
-
     private fun createIndexes(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_events_fingerprint
@@ -2454,14 +2426,6 @@ class DiagnosticStore(context: Context) :
         val ruleKey: String?,
         val seriesId: String?,
         val seriesIndex: Int?,
-    )
-
-    private data class KnownAccountPreset(
-        val type: FinancialAccountType,
-        val closingDay: Int?,
-        val dueDay: Int?,
-        val isDefault: Boolean,
-        val cardIdentifiers: String?,
     )
 
     private companion object {

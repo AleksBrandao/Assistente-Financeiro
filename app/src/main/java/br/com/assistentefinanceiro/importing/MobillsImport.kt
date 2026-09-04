@@ -9,6 +9,11 @@ import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 import java.util.Locale
 
+class MobillsImportFormatException(
+    message: String,
+    cause: Throwable? = null,
+) : IllegalArgumentException(message, cause)
+
 enum class ImportDisposition {
     READY,
     PENDING,
@@ -45,26 +50,37 @@ data class MobillsImportPreview(val rows: List<MobillsImportRow>) {
 }
 
 object MobillsImportAnalyzer {
-    private val dateFormatter = DateTimeFormatter
-        .ofPattern("dd/MM/uuuu", Locale("pt", "BR"))
-        .withResolverStyle(ResolverStyle.STRICT)
+    private val requiredHeaders = listOf(
+        "data", "descricao", "valor", "conta", "situacao", "categoria",
+    )
+    private val dateFormatters = listOf(
+        DateTimeFormatter.ofPattern("dd/MM/uuuu", Locale("pt", "BR")),
+        DateTimeFormatter.ofPattern("dd-MM-uuuu", Locale("pt", "BR")),
+        DateTimeFormatter.ISO_LOCAL_DATE,
+    ).map { it.withResolverStyle(ResolverStyle.STRICT) }
 
     fun analyze(rawRows: List<List<String>>): MobillsImportPreview {
-        if (rawRows.isEmpty()) return MobillsImportPreview(emptyList())
-        val header = rawRows.first().map { normalizeHeader(it) }
-        val required = listOf("data", "descricao", "valor", "conta", "situacao", "categoria")
-        val indexes = required.associateWith { header.indexOf(it) }
-        if (indexes.values.any { it < 0 }) {
-            return MobillsImportPreview(
-                listOf(
-                    rejectedRow(
-                        sourceRow = 1,
-                        reason = "Cabeçalhos obrigatórios ausentes: " +
-                            required.filter { indexes[it] == -1 }.joinToString(),
-                    )
-                )
+        if (rawRows.isEmpty() || rawRows.all { row -> row.all(String::isBlank) }) {
+            throw MobillsImportFormatException(
+                "Arquivo Mobills inválido: a planilha está vazia.",
             )
         }
+        val header = rawRows.first().map { normalizeHeader(it) }
+        val missingHeaders = requiredHeaders.filterNot(header::contains)
+        if (missingHeaders.isNotEmpty()) {
+            throw MobillsImportFormatException(
+                "Arquivo Mobills inválido: cabeçalhos obrigatórios ausentes: " +
+                    missingHeaders.joinToString(),
+            )
+        }
+        val duplicateHeaders = requiredHeaders.filter { required -> header.count { it == required } > 1 }
+        if (duplicateHeaders.isNotEmpty()) {
+            throw MobillsImportFormatException(
+                "Arquivo Mobills inválido: cabeçalhos obrigatórios duplicados: " +
+                    duplicateHeaders.joinToString(),
+            )
+        }
+        val indexes = requiredHeaders.associateWith(header::indexOf)
 
         val parsed = rawRows.drop(1).mapIndexedNotNull { index, cells ->
             if (cells.all { it.isBlank() }) return@mapIndexedNotNull null
@@ -107,15 +123,16 @@ object MobillsImportAnalyzer {
         val account = value("conta")
         val situation = value("situacao")
         val originalCategory = value("categoria")
-        val date = runCatching { LocalDate.parse(dateText, dateFormatter) }.getOrNull()
-        val amount = amountText.replace(",", ".").toBigDecimalOrNull()
+        val date = parseDate(dateText)
+        val amount = parseAmount(amountText)
 
         val normalizedSituation = normalizeHeader(situation)
         val reason = when {
-            date == null -> "Data inválida"
+            date == null -> "Data inválida (use DD/MM/AAAA, DD-MM-AAAA ou AAAA-MM-DD)"
             description.isBlank() -> "Descrição vazia"
             amount == null -> "Valor inválido"
             amount.signum() == 0 -> "Valor igual a zero"
+            account.isBlank() -> "Conta vazia"
             normalizedSituation !in setOf("paga", "pendente") -> "Situação inválida"
             else -> null
         }
@@ -213,7 +230,35 @@ object MobillsImportAnalyzer {
         .replace(Regex("\\p{M}+"), "")
         .lowercase(Locale.ROOT)
 
+    private fun parseDate(value: String): LocalDate? = dateFormatters.firstNotNullOfOrNull {
+        formatter -> runCatching { LocalDate.parse(value, formatter) }.getOrNull()
+    }
+
+    private fun parseAmount(value: String): BigDecimal? {
+        var normalized = value
+            .trim()
+            .replace("\u00A0", "")
+            .replace(" ", "")
+            .removePrefix("R$")
+        val negativeInParentheses = normalized.startsWith('(') && normalized.endsWith(')')
+        if (negativeInParentheses) normalized = normalized.substring(1, normalized.lastIndex)
+        if (normalized.isBlank() || (negativeInParentheses && normalized.startsWith('-'))) return null
+
+        normalized = when {
+            PT_BR_GROUPED_AMOUNT.matches(normalized) -> normalized.replace(".", "").replace(',', '.')
+            EN_US_GROUPED_AMOUNT.matches(normalized) -> normalized.replace(",", "")
+            PLAIN_AMOUNT.matches(normalized) -> normalized.replace(',', '.')
+            else -> return null
+        }
+        val amount = normalized.toBigDecimalOrNull() ?: return null
+        return if (negativeInParentheses) amount.negate() else amount
+    }
+
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
+
+    private val PT_BR_GROUPED_AMOUNT = Regex("^[+-]?\\d{1,3}(?:\\.\\d{3})+,\\d+$")
+    private val EN_US_GROUPED_AMOUNT = Regex("^[+-]?\\d{1,3}(?:,\\d{3})+\\.\\d+$")
+    private val PLAIN_AMOUNT = Regex("^[+-]?\\d+(?:[.,]\\d+)?$")
 }

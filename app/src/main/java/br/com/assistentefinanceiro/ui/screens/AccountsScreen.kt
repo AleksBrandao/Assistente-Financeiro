@@ -545,7 +545,7 @@ private fun EditAccountDialog(
                             }.take(40)
                         },
                         label = { Text("Finais do cartão") },
-                        supportingText = { Text("Ex.: 6426, 5253") },
+                        supportingText = { Text("Ex.: 1234, 5678") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                         modifier = Modifier.fillMaxWidth(),
