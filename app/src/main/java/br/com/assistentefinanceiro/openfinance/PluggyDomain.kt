@@ -55,6 +55,30 @@ data class PluggyAccountSnapshot(
     }
 }
 
+data class PluggyBillPaymentSnapshot(
+    val externalId: String,
+    val amount: BigDecimal,
+    val paymentDate: LocalDate,
+    val valueType: String? = null,
+    val paymentMode: String? = null,
+) {
+    init {
+        require(externalId.isNotBlank()) { "externalId must not be blank" }
+        require(amount.signum() >= 0) { "payment amount must not be negative" }
+    }
+}
+
+data class PluggyBillFinanceChargeSnapshot(
+    val externalId: String,
+    val type: String,
+    val amount: BigDecimal,
+) {
+    init {
+        require(externalId.isNotBlank()) { "externalId must not be blank" }
+        require(amount.signum() >= 0) { "finance charge amount must not be negative" }
+    }
+}
+
 data class PluggyBillSnapshot(
     val externalId: String,
     val accountExternalId: String,
@@ -63,6 +87,8 @@ data class PluggyBillSnapshot(
     val totalAmount: BigDecimal,
     val minimumPaymentAmount: BigDecimal?,
     val allowsInstallments: Boolean?,
+    val payments: List<PluggyBillPaymentSnapshot> = emptyList(),
+    val financeCharges: List<PluggyBillFinanceChargeSnapshot> = emptyList(),
 ) {
     init {
         require(externalId.isNotBlank()) { "externalId must not be blank" }
