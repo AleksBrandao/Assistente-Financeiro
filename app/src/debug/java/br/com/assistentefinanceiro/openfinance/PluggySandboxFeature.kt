@@ -36,8 +36,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import br.com.assistentefinanceiro.data.FinancialRepository
+import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.util.Currency
@@ -50,20 +53,27 @@ internal object PluggySandboxFeature {
     const val isEnabled: Boolean = true
 
     @Composable
-    fun Screen(onBack: () -> Unit) {
-        PluggySandboxScreen(onBack = onBack)
+    fun Screen(
+        repository: FinancialRepository,
+        onBack: () -> Unit,
+    ) {
+        PluggySandboxScreen(repository = repository, onBack = onBack)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PluggySandboxScreen(onBack: () -> Unit) {
+private fun PluggySandboxScreen(
+    repository: FinancialRepository,
+    onBack: () -> Unit,
+) {
     val client = remember { PluggyReadOnlyClient() }
     val scope = rememberCoroutineScope()
     var apiKey by remember { mutableStateOf("") }
     var itemId by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<PluggySandboxPreview?>(null) }
+    var reconciliation by remember { mutableStateOf<PluggyReconciliationPreview?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
@@ -101,6 +111,13 @@ private fun PluggySandboxScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "A reconciliação abaixo compara somente com os dados existentes neste " +
+                        "Assistente Financeiro (Teste). Nenhum vínculo é salvo.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             item {
@@ -133,15 +150,39 @@ private fun PluggySandboxScreen(onBack: () -> Unit) {
                         val item = itemId.trim()
                         loading = true
                         preview = null
+                        reconciliation = null
                         error = null
                         scope.launch {
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    client.fetchPreview(key, item)
+                                    val remote = client.fetchPreview(key, item)
+                                    val localAccounts = repository.financialAccounts()
+                                    val localTransactions = repository.granularTransactions()
+                                    val invoicesByAccount = localAccounts
+                                        .filter { it.type == FinancialAccountType.CREDIT_CARD }
+                                        .associate { account ->
+                                            account.id to repository.creditCardInvoices(account.id)
+                                        }
+                                    val localPreview = PluggyReconciliationEngine.reconcile(
+                                        PluggyReconciliationInput(
+                                            pluggyAccounts = remote.accounts.map { accountPreview ->
+                                                PluggyAccountDataset(
+                                                    account = accountPreview.account,
+                                                    transactions = accountPreview.transactions,
+                                                    bills = accountPreview.bills,
+                                                )
+                                            },
+                                            localAccounts = localAccounts,
+                                            localTransactions = localTransactions,
+                                            localInvoicesByAccount = invoicesByAccount,
+                                        ),
+                                    )
+                                    remote to localPreview
                                 }
                             }
-                            result.onSuccess {
-                                preview = it
+                            result.onSuccess { (remote, localPreview) ->
+                                preview = remote
+                                reconciliation = localPreview
                                 apiKey = ""
                             }.onFailure { throwable ->
                                 error = throwable.toSafeMessage()
@@ -198,10 +239,32 @@ private fun PluggySandboxScreen(onBack: () -> Unit) {
                 items(result.accounts) { accountPreview ->
                     PluggyAccountPreviewCard(accountPreview)
                 }
+            }
 
+            reconciliation?.let { result ->
+                item {
+                    HorizontalDivider()
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Reconciliação local (prévia)",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "Somente análise. Nenhuma conta, transação, fatura ou categoria foi alterada.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                item {
+                    ReconciliationSummaryCard(result)
+                }
+                items(result.accounts) { accountResult ->
+                    ReconciliationAccountCard(accountResult)
+                }
                 item {
                     Text(
-                        "Preview concluído. Ainda não existe importação ou alteração do SQLite nesta etapa.",
+                        "Fase 3 concluída em modo somente leitura. Correspondências marcadas como " +
+                            "'Revisar' ou 'Sem correspondência' não são inferidas como duplicidade.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -268,6 +331,87 @@ private fun PluggyAccountPreviewCard(preview: PluggySandboxAccountPreview) {
             }
         }
     }
+}
+
+@Composable
+private fun ReconciliationSummaryCard(result: PluggyReconciliationPreview) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            KeyValueRow("Vínculo forte", result.strongAccounts.toString())
+            KeyValueRow("Vínculo provável", result.probableAccounts.toString())
+            KeyValueRow("Revisar", result.reviewAccounts.toString())
+            KeyValueRow("Sem correspondência", result.unmatchedAccounts.toString())
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            KeyValueRow("Categorias Pluggy distintas", result.distinctPluggyCategories.toString())
+            KeyValueRow("Correspondência direta de categoria", result.directCategoryMatches.toString())
+        }
+    }
+}
+
+@Composable
+private fun ReconciliationAccountCard(result: PluggyAccountReconciliation) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(result.pluggyAccountName, style = MaterialTheme.typography.titleMedium)
+            Text(
+                reconciliationStatusLabel(result.status),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = when (result.status) {
+                    PluggyReconciliationStatus.STRONG,
+                    PluggyReconciliationStatus.PROBABLE -> MaterialTheme.colorScheme.primary
+                    PluggyReconciliationStatus.REVIEW -> MaterialTheme.colorScheme.tertiary
+                    PluggyReconciliationStatus.UNMATCHED -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+            result.localAccountName?.let {
+                KeyValueRow("Conta local sugerida", it)
+            }
+            if (result.localAccountName == null && result.compatibleCandidateCount > 0) {
+                KeyValueRow("Contas locais compatíveis", result.compatibleCandidateCount.toString())
+            }
+            result.reasons.take(3).forEach { reason ->
+                Text(
+                    "• $reason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            KeyValueRow(
+                "Transações coincidem / revisar / sem correspondência",
+                "${result.transactionCounts.matched} / ${result.transactionCounts.review} / ${result.transactionCounts.unmatched}",
+            )
+            if (result.pluggyAccountType == PluggyAccountType.CREDIT) {
+                KeyValueRow(
+                    "Faturas coincidem / revisar / sem correspondência",
+                    "${result.billCounts.matched} / ${result.billCounts.review} / ${result.billCounts.unmatched}",
+                )
+            }
+            KeyValueRow("Categorias Pluggy nesta conta", result.pluggyCategoryCount.toString())
+        }
+    }
+}
+
+private fun reconciliationStatusLabel(status: PluggyReconciliationStatus): String = when (status) {
+    PluggyReconciliationStatus.STRONG -> "Vínculo forte"
+    PluggyReconciliationStatus.PROBABLE -> "Vínculo provável"
+    PluggyReconciliationStatus.REVIEW -> "Revisar"
+    PluggyReconciliationStatus.UNMATCHED -> "Sem correspondência"
 }
 
 @Composable

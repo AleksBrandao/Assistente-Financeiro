@@ -17,6 +17,7 @@ internal data class PluggySandboxAccountPreview(
     val pendingCount: Int,
     val installmentCount: Int,
     val pixCount: Int,
+    val transactions: List<PluggyTransactionSnapshot>,
     val bills: List<PluggyBillSnapshot>,
 )
 
@@ -64,6 +65,7 @@ internal class PluggyReadOnlyClient(
                     it.operationType.equals("PIX", ignoreCase = true) ||
                         it.paymentMethod.equals("PIX", ignoreCase = true)
                 },
+                transactions = transactions,
                 bills = bills,
             )
         }
