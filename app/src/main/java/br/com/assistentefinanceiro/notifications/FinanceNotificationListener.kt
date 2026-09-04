@@ -30,5 +30,6 @@ class FinanceNotificationListener : NotificationListenerService() {
             postedAt = notification.postTime,
             notificationKey = notification.key,
         )
+        BudgetAlertManager(applicationContext, store).evaluateLatestNotificationTransaction()
     }
 }
