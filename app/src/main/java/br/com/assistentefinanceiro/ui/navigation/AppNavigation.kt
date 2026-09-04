@@ -205,6 +205,7 @@ private fun AppNavHost(
             composable(AppRoute.PLUGGY_SANDBOX) {
                 ActivityScopedDestination(activityViewModelStoreOwner) {
                     PluggySandboxFeature.Screen(
+                        repository = repository,
                         onBack = { navController.navigateReplacingCurrent(AppRoute.MORE) },
                     )
                 }
