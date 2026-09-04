@@ -93,6 +93,16 @@ class BudgetAlertPolicyTest {
     }
 
     @Test
+    fun budgetLimitStateIsSeparateFromAlertLevelState() {
+        val period = YearMonth.of(2026, 9)
+        val category = TransactionCategory.FOOD.name
+        assertNotEquals(
+            BudgetAlertPolicy.stateKey(period, category),
+            BudgetAlertPolicy.limitKey(period, category),
+        )
+    }
+
+    @Test
     fun notificationKeyChangesForEachBand() {
         val period = YearMonth.of(2026, 9)
         val category = TransactionCategory.FOOD.name
