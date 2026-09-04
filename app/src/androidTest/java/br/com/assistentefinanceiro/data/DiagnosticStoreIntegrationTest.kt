@@ -8,12 +8,16 @@ import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionType
+import br.com.assistentefinanceiro.notifications.NotificationTimestampRepair
 import br.com.assistentefinanceiro.notifications.TransactionCategory
 import br.com.assistentefinanceiro.notifications.TransactionCategorySource
 import br.com.assistentefinanceiro.notifications.TransactionOrigin
 import br.com.assistentefinanceiro.notifications.TransactionStatus
 import java.math.BigDecimal
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.YearMonth
+import java.time.ZoneId
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -117,6 +121,54 @@ class DiagnosticStoreIntegrationTest {
             val transactionColumns = tableColumns(db = db, table = "transactions")
             assertTrue("custom_category" in transactionColumns)
             assertTrue("subcategory" in transactionColumns)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun repairsNubankTimestampAndRebuildsInvoicePeriod() {
+        val store = DiagnosticStore(context)
+        try {
+            assertTrue(
+                store.saveFinancialAccount(
+                    id = null,
+                    name = "Cartão Nubank teste",
+                    type = FinancialAccountType.CREDIT_CARD,
+                    closingDay = 20,
+                    dueDay = 27,
+                    isDefault = false,
+                    cardIdentifiers = "6652",
+                    openingBalance = BigDecimal.ZERO,
+                    openingBalanceDate = null,
+                ),
+            )
+            val account = store.financialAccounts().single { it.name == "Cartão Nubank teste" }
+            val expectedOccurredAt = LocalDateTime.of(2026, 1, 10, 12, 0)
+            val postedAt = expectedOccurredAt
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+
+            store.recordEvent(
+                packageName = "com.nu.production",
+                appLabel = "Nubank",
+                title = "Compra no crédito aprovada",
+                body = "Compra de R$ 65,58 APROVADA em MAMBO VILA LEOPOLDINA para o cartão com final 6652.",
+                postedAt = postedAt,
+                notificationKey = "nubank-integration-test",
+            )
+
+            assertEquals(1, NotificationTimestampRepair.repair(store))
+
+            val event = store.recentEvents(10).single()
+            val transaction = store.recentTransactions(10).single()
+            assertEquals(expectedOccurredAt.toString(), event.occurredAt)
+            assertEquals(expectedOccurredAt.toString(), transaction.occurredAt)
+
+            val invoices = store.creditCardInvoices(account.id)
+            assertEquals(1, invoices.size)
+            assertEquals(YearMonth.of(2026, 1), invoices.single().closingPeriod)
         } finally {
             store.close()
         }
