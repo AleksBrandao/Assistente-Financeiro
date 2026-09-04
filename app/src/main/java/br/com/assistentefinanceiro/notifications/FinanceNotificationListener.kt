@@ -9,18 +9,18 @@ class FinanceNotificationListener : NotificationListenerService() {
         val packageName = notification.packageName ?: return
         val applicationInfo = runCatching { packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
         val appLabel = applicationInfo?.let { packageManager.getApplicationLabel(it).toString() } ?: packageName
-        val allowedPackages = BankPackagePreferences(applicationContext).allowedPackages()
-        if (packageName !in allowedPackages &&
-            !appLabel.contains("Santander", ignoreCase = true)
-        ) return
-        val store = DiagnosticStore(applicationContext)
-        store.recordCandidate(packageName, appLabel, notification.postTime)
-
-        if (packageName !in allowedPackages) return
         val extras = notification.notification.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val body = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val allowedPackages = BankPackagePreferences(applicationContext).allowedPackages()
+        val supportedBank = BankNotificationParserRegistry.supports(packageName, appLabel)
+        if (packageName !in allowedPackages && !supportedBank) return
+
+        val store = DiagnosticStore(applicationContext)
+        store.recordCandidate(packageName, appLabel, notification.postTime)
+
+        if (packageName !in allowedPackages) return
         if (title.isBlank() && body.isBlank()) return
         store.recordEvent(
             packageName = packageName,
