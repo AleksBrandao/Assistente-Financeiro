@@ -135,6 +135,7 @@ interface FinancialRepository {
     fun previewBackup(content: String): BackupValidationResult
     fun restoreBackup(content: String): Boolean
     fun exportTransactionsCsv(): String
+    fun exportInvoiceDiagnosticsCsv(): String
 
     fun granularTransactions(): List<FinancialTransactionRecord> = recentTransactions(10_000)
 
