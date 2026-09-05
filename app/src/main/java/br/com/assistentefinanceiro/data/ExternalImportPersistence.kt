@@ -371,15 +371,18 @@ internal class ExternalImportPersistence(
         val forecastPeriod = draft.billForecastPeriod
         val closingDay = account.closingDay
         if (forecastPeriod != null && closingDay != null) {
-            val closingDate = dateAtDay(forecastPeriod, closingDay)
-            val dueDate = account.dueDay?.let { dueDay ->
-                val duePeriod = if (dueDay <= closingDay) forecastPeriod.plusMonths(1) else forecastPeriod
-                dateAtDay(duePeriod, dueDay)
+            val dueDay = account.dueDay
+            val closingPeriod = if (dueDay != null && dueDay <= closingDay) {
+                forecastPeriod.minusMonths(1)
+            } else {
+                forecastPeriod
             }
+            val closingDate = dateAtDay(closingPeriod, closingDay)
+            val dueDate = dueDay?.let { dateAtDay(forecastPeriod, it) }
             return ensureInvoiceByDates(
                 db,
                 draft.localAccountId,
-                forecastPeriod,
+                closingPeriod,
                 closingDate,
                 dueDate,
             )
