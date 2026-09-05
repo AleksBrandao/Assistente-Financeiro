@@ -96,6 +96,13 @@ internal fun DataManagementScreen(
             context.contentResolver.openOutputStream(uri)
         }
     }
+    val exportInvoiceDiagnosticsCsv = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv"),
+    ) { uri ->
+        if (uri != null) screenViewModel.exportInvoiceDiagnosticsCsv {
+            context.contentResolver.openOutputStream(uri)
+        }
+    }
     val openBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -183,6 +190,40 @@ internal fun DataManagementScreen(
                     Icon(Icons.Rounded.Share, contentDescription = null)
                     Spacer(Modifier.width(FinanceSpacing.xs))
                     Text("Compartilhar CSV")
+                }
+            }
+            item {
+                HorizontalDivider()
+                Text("Diagnóstico de faturas", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Exporta vínculos entre faturas, compras, pagamentos e Bills do Open Finance sem alterar os dados.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            item {
+                OutlinedButton(
+                    onClick = {
+                        exportInvoiceDiagnosticsCsv.launch(
+                            "AssistenteFinanceiro-diagnostico-faturas-${LocalDate.now()}.csv",
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.BugReport, contentDescription = null)
+                    Spacer(Modifier.width(FinanceSpacing.xs))
+                    Text("Salvar diagnóstico de faturas")
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = {
+                        screenViewModel.prepareShareInvoiceDiagnosticsCsv(context::startActivity)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.Share, contentDescription = null)
+                    Spacer(Modifier.width(FinanceSpacing.xs))
+                    Text("Compartilhar diagnóstico de faturas")
                 }
             }
             uiState.message?.let { text ->
