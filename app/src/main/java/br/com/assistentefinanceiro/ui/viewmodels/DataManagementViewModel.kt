@@ -51,6 +51,13 @@ internal class DataManagementViewModel(
         "Planilha CSV exportada com sucesso."
     }
 
+    fun exportInvoiceDiagnosticsCsv(openOutputStream: () -> OutputStream?) = runFileOperation {
+        openOutputStream()?.bufferedWriter()?.use { writer ->
+            writer.write(repository.exportInvoiceDiagnosticsCsv())
+        } ?: error("arquivo indisponível")
+        "Diagnóstico de faturas exportado com sucesso."
+    }
+
     fun readBackup(openInputStream: () -> InputStream?) {
         viewModelScope.launch {
             val result = runCatching {
@@ -96,6 +103,25 @@ internal class DataManagementViewModel(
             startActivity(Intent.createChooser(intent, "Compartilhar movimentações"))
         }
         "Arquivo preparado para compartilhamento."
+    }
+
+    fun prepareShareInvoiceDiagnosticsCsv(startActivity: (Intent) -> Unit) = runFileOperation {
+        val file = File(applicationContext.cacheDir, "AssistenteFinanceiro-diagnostico-faturas.csv")
+        file.writeText(repository.exportInvoiceDiagnosticsCsv())
+        val uri = FileProvider.getUriForFile(
+            applicationContext,
+            "${applicationContext.packageName}.files",
+            file,
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/csv"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        withContext(Dispatchers.Main) {
+            startActivity(Intent.createChooser(intent, "Compartilhar diagnóstico de faturas"))
+        }
+        "Diagnóstico preparado para compartilhamento."
     }
 
     fun restoreDeletedGroup(groupId: String) {
