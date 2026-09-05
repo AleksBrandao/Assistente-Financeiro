@@ -5,16 +5,18 @@ import android.database.sqlite.SQLiteDatabase
 import br.com.assistentefinanceiro.notifications.CreditCardBillingCycle
 import br.com.assistentefinanceiro.notifications.DiagnosticStore
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.YearMonth
+import java.time.ZoneId
 
 /**
  * Reconciles the additive Open Finance metadata with the core invoice tables after a Bill sync.
  *
  * Two invariants are enforced here:
  * 1. a transaction whose externalBillId points to an official Bill is linked to that Bill only
- *    when its accounting date is not after the Bill closing date;
+ *    when its purchase/effective date is not after the Bill closing date;
  * 2. a payment reported by Bill N+1 can settle only a previous invoice that is itself backed by an
  *    official external Bill link, never an unrelated provisional invoice.
  *
@@ -53,7 +55,7 @@ internal class ExternalInvoiceConsistencyRepair(
         val cycle = accountCycle(db, bill.localAccountId)
         val linked = db.rawQuery(
             """SELECT transactions.id,transactions.occurred_at,
-                      metadata.bill_forecast_period
+                      metadata.purchase_at,metadata.bill_forecast_period
                FROM external_transaction_metadata AS metadata
                INNER JOIN transactions ON transactions.id = metadata.transaction_id
                WHERE metadata.provider = ?
@@ -71,7 +73,8 @@ internal class ExternalInvoiceConsistencyRepair(
                         LinkedTransaction(
                             id = cursor.getLong(0),
                             occurredAt = cursor.getString(1),
-                            billForecastPeriod = if (cursor.isNull(2)) null else cursor.getString(2),
+                            purchaseAt = if (cursor.isNull(2)) null else cursor.getString(2),
+                            billForecastPeriod = if (cursor.isNull(3)) null else cursor.getString(3),
                         ),
                     )
                 }
@@ -82,14 +85,15 @@ internal class ExternalInvoiceConsistencyRepair(
             val occurredDate = runCatching {
                 LocalDateTime.parse(transaction.occurredAt).toLocalDate()
             }.getOrNull() ?: return@forEach
-            val targetInvoiceId = if (!occurredDate.isAfter(official.closingDate)) {
+            val effectivePurchaseDate = parsePurchaseDate(transaction.purchaseAt) ?: occurredDate
+            val targetInvoiceId = if (!effectivePurchaseDate.isAfter(official.closingDate)) {
                 official.id
             } else {
                 fallbackInvoice(
                     db = db,
                     accountId = bill.localAccountId,
                     cycle = cycle,
-                    occurredDate = occurredDate,
+                    purchaseDate = effectivePurchaseDate,
                     billForecastPeriod = transaction.billForecastPeriod,
                 )
             }
@@ -218,7 +222,7 @@ internal class ExternalInvoiceConsistencyRepair(
         db: SQLiteDatabase,
         accountId: Long,
         cycle: AccountCycle?,
-        occurredDate: LocalDate,
+        purchaseDate: LocalDate,
         billForecastPeriod: String?,
     ): Long? {
         val accountCycle = cycle ?: return null
@@ -240,7 +244,7 @@ internal class ExternalInvoiceConsistencyRepair(
             )
         } else {
             val calculated = CreditCardBillingCycle.calculate(
-                purchaseDate = occurredDate,
+                purchaseDate = purchaseDate,
                 closingDay = closingDay,
                 dueDay = accountCycle.dueDay,
             )
@@ -336,6 +340,14 @@ internal class ExternalInvoiceConsistencyRepair(
         )
     }
 
+    private fun parsePurchaseDate(value: String?): LocalDate? {
+        if (value.isNullOrBlank()) return null
+        return runCatching { Instant.parse(value).atZone(ZoneId.systemDefault()).toLocalDate() }
+            .recoverCatching { LocalDateTime.parse(value).toLocalDate() }
+            .recoverCatching { LocalDate.parse(value.take(10)) }
+            .getOrNull()
+    }
+
     private fun tableExists(db: SQLiteDatabase, table: String): Boolean = db.rawQuery(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
         arrayOf(table),
@@ -347,6 +359,7 @@ internal class ExternalInvoiceConsistencyRepair(
     private data class LinkedTransaction(
         val id: Long,
         val occurredAt: String,
+        val purchaseAt: String?,
         val billForecastPeriod: String?,
     )
 
