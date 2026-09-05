@@ -124,6 +124,9 @@ interface FinancialRepository {
     fun importExternalTransactions(
         drafts: List<ExternalTransactionImportDraft>,
     ): ExternalImportResult
+    fun importExternalBills(
+        drafts: List<ExternalBillImportDraft>,
+    ): ExternalBillImportResult
 
     fun deletedTransactionGroups(): List<DeletedTransactionGroup>
     fun restoreDeletedTransactionGroup(groupId: String): Boolean
