@@ -1,5 +1,6 @@
 package br.com.assistentefinanceiro.notifications
 
+import java.math.BigDecimal
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.LocalDate
@@ -127,6 +128,36 @@ class MonthlyStatementCalculatorTest {
             MonthlyStatementCalculator.calculate(YearMonth.of(2026, 10), listOf(transaction))
                 .transactionCount,
         )
+    }
+
+    @Test
+    fun partiallyPaidInvoiceCountsOnlyOutstandingAmountAsPending() {
+        val invoice = transaction(
+            id = -55,
+            direction = FinancialTransactionDirection.EXPENSE,
+            type = FinancialTransactionType.IMPORTED_EXPENSE,
+            amount = "5739.65",
+            occurredAt = "2025-12-21T23:59:59",
+            status = TransactionStatus.PENDING,
+            dueDate = "2025-12-21",
+        ).copy(sourcePackage = "credit-card-invoice")
+
+        val statement = MonthlyStatementCalculator.calculateEntries(
+            period = YearMonth.of(2025, 12),
+            entries = listOf(
+                StatementCalculationEntry(
+                    transaction = invoice,
+                    realizedAmount = BigDecimal("5739.60"),
+                    pendingAmount = BigDecimal("0.05"),
+                ),
+            ),
+        )
+
+        assertEquals("5739.60", statement.totalExpense.toPlainString())
+        assertEquals("0.05", statement.pendingExpense.toPlainString())
+        assertEquals("5739.65", statement.projectedExpense.toPlainString())
+        assertEquals(1, statement.transactionCount)
+        assertEquals(LocalDate.of(2025, 12, 21), statement.groups.single().date)
     }
 
     private fun transaction(
