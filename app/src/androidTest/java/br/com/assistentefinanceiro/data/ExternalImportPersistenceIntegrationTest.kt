@@ -121,6 +121,38 @@ class ExternalImportPersistenceIntegrationTest {
     }
 
     @Test
+    fun forecastPeriodRepresentsDueMonthWhenDueDayPrecedesClosingDay() {
+        val repository = DiagnosticFinancialRepository(context)
+        val account = createCard(repository, closingDay = 25, dueDay = 5)
+        val pending = ExternalTransactionImportDraft(
+            provider = ExternalDataProvider.PLUGGY,
+            externalTransactionId = "forecast-tx",
+            externalAccountId = "remote-card",
+            localAccountId = account.id,
+            direction = FinancialTransactionDirection.EXPENSE,
+            type = FinancialTransactionType.CARD_PURCHASE,
+            amount = BigDecimal("80.00"),
+            occurredAt = LocalDateTime.parse("2026-08-26T12:00:00"),
+            description = "Compra pendente",
+            status = TransactionStatus.PENDING,
+            category = TransactionCategory.OTHER_EXPENSE,
+            customCategory = "Shopping",
+            originalCategory = "Shopping",
+            origin = TransactionOrigin.PLUGGY,
+            billForecastPeriod = YearMonth.of(2026, 9),
+        )
+
+        repository.importExternalTransactions(listOf(pending))
+
+        val invoice = repository.creditCardInvoices(account.id).single()
+        val transaction = repository.recentTransactions(10).single()
+        assertEquals(YearMonth.of(2026, 8), invoice.closingPeriod)
+        assertEquals(LocalDate.of(2026, 8, 25), invoice.closingDate)
+        assertEquals(LocalDate.of(2026, 9, 5), invoice.dueDate)
+        assertEquals(invoice.id, transaction.invoiceId)
+    }
+
+    @Test
     fun officialBillPaymentFromFollowingCycleSettlesPreviousInvoice() {
         val repository = DiagnosticFinancialRepository(context)
         val account = createCard(repository)
@@ -167,14 +199,18 @@ class ExternalImportPersistenceIntegrationTest {
         assertEquals(2, second.billsSynced)
     }
 
-    private fun createCard(repository: DiagnosticFinancialRepository) = run {
+    private fun createCard(
+        repository: DiagnosticFinancialRepository,
+        closingDay: Int = 14,
+        dueDay: Int = 21,
+    ) = run {
         assertTrue(
             repository.saveFinancialAccount(
                 id = null,
                 name = "Cartão Pluggy teste",
                 type = FinancialAccountType.CREDIT_CARD,
-                closingDay = 14,
-                dueDay = 21,
+                closingDay = closingDay,
+                dueDay = dueDay,
                 isDefault = false,
                 cardIdentifiers = "1234",
                 openingBalance = BigDecimal.ZERO,
