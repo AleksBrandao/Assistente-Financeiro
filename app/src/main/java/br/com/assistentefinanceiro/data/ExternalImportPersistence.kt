@@ -164,27 +164,43 @@ internal class ExternalImportPersistence(
                     billsSynced++
                 }
 
-                // Open Finance Regulado reports payment of Bill N in the following bill cycle.
-                // Therefore each payment carried by the current bill is attached to the latest
-                // earlier local invoice, never blindly to the current bill itself.
+                // In regulated Open Finance, payments carried by Bill N+1 settle Bill N. Charges
+                // carried by N+1 must be satisfied first, so only the remaining payment amount is
+                // applied to the previous invoice's principal balance.
                 accountDrafts.sortedBy { it.dueDate }.forEach paymentSourceLoop@ { sourceBill ->
                     if (sourceBill.payments.isEmpty()) return@paymentSourceLoop
                     val target = previousInvoice(db, accountId, sourceBill.dueDate)
                         ?: return@paymentSourceLoop
-                    sourceBill.payments.forEach { payment ->
-                        if (
-                            upsertExternalBillPayment(
-                                db = db,
-                                provider = sourceBill.provider,
-                                sourceExternalBillId = sourceBill.externalBillId,
-                                targetAccountId = accountId,
-                                targetClosingPeriod = target.closingPeriod,
-                                payment = payment,
-                            )
-                        ) {
-                            paymentsSynced++
+                    deleteExternalBillPaymentsForSource(
+                        db = db,
+                        provider = sourceBill.provider,
+                        sourceExternalBillId = sourceBill.externalBillId,
+                    )
+                    var remainingCharges = sourceBill.financeChargeTotal.max(BigDecimal.ZERO)
+                    sourceBill.payments
+                        .sortedBy { it.paidAt }
+                        .forEach paymentLoop@ { payment ->
+                            val chargePortion = if (remainingCharges.signum() > 0) {
+                                payment.amount.min(remainingCharges)
+                            } else {
+                                BigDecimal.ZERO
+                            }
+                            remainingCharges -= chargePortion
+                            val appliedAmount = payment.amount - chargePortion
+                            if (appliedAmount.signum() <= 0) return@paymentLoop
+                            if (
+                                upsertExternalBillPayment(
+                                    db = db,
+                                    provider = sourceBill.provider,
+                                    sourceExternalBillId = sourceBill.externalBillId,
+                                    targetAccountId = accountId,
+                                    targetClosingPeriod = target.closingPeriod,
+                                    payment = payment.copy(amount = appliedAmount),
+                                )
+                            ) {
+                                paymentsSynced++
+                            }
                         }
-                    }
                 }
             }
             db.setTransactionSuccessful()
@@ -540,6 +556,30 @@ internal class ExternalImportPersistence(
     ).use { cursor ->
         if (!cursor.moveToFirst()) null
         else StoredInvoice(cursor.getLong(0), YearMonth.parse(cursor.getString(1)))
+    }
+
+    private fun deleteExternalBillPaymentsForSource(
+        db: SQLiteDatabase,
+        provider: ExternalDataProvider,
+        sourceExternalBillId: String,
+    ) {
+        val paymentIds = db.rawQuery(
+            """SELECT invoice_payment_id FROM external_bill_payment_links
+               WHERE provider = ? AND source_external_bill_id = ?""",
+            arrayOf(provider.name, sourceExternalBillId),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getLong(0))
+            }
+        }
+        db.delete(
+            "external_bill_payment_links",
+            "provider = ? AND source_external_bill_id = ?",
+            arrayOf(provider.name, sourceExternalBillId),
+        )
+        paymentIds.forEach { paymentId ->
+            db.delete("invoice_payments", "id = ?", arrayOf(paymentId.toString()))
+        }
     }
 
     private fun upsertExternalBillPayment(
