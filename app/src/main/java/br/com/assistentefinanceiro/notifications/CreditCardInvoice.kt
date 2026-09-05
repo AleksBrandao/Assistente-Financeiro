@@ -91,10 +91,17 @@ object CreditCardBillingCycle {
         dueDate: LocalDate?,
         today: LocalDate,
     ): CreditCardInvoiceStatus {
-        if (total.signum() <= 0 || paidAmount >= total) return CreditCardInvoiceStatus.PAID
+        // An invoice that has not closed yet remains open even when the current balance is zero or
+        // negative. New purchases may still arrive before closing, so "paid" is not meaningful yet.
+        if (today.isBefore(closingDate)) return CreditCardInvoiceStatus.OPEN
+        // A closed invoice with a credit balance is closed, not paid: there was no positive debt to
+        // settle. Zero-balance closed invoices can safely be considered paid.
+        if (total.signum() < 0) return CreditCardInvoiceStatus.CLOSED
+        if (total.signum() == 0) return CreditCardInvoiceStatus.PAID
+        if (paidAmount >= total) return CreditCardInvoiceStatus.PAID
         if (dueDate != null && today.isAfter(dueDate)) return CreditCardInvoiceStatus.OVERDUE
         if (paidAmount.signum() > 0) return CreditCardInvoiceStatus.PARTIALLY_PAID
-        return status(closingDate, today)
+        return CreditCardInvoiceStatus.CLOSED
     }
 
     fun fromImportedInvoiceDate(
