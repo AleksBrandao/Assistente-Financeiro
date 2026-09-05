@@ -110,4 +110,37 @@ class CreditCardBillingCycleTest {
             ),
         )
     }
+
+    @Test
+    fun futureCreditBalanceRemainsOpenInsteadOfPaid() {
+        val closing = LocalDate.of(2026, 9, 11)
+        val due = LocalDate.of(2026, 9, 18)
+        val today = LocalDate.of(2026, 9, 5)
+
+        assertEquals(
+            CreditCardInvoiceStatus.OPEN,
+            CreditCardBillingCycle.paymentStatus(
+                BigDecimal("-1.75"), BigDecimal.ZERO, closing, due, today,
+            ),
+        )
+        assertEquals(
+            CreditCardInvoiceStatus.OPEN,
+            CreditCardBillingCycle.paymentStatus(
+                BigDecimal.ZERO, BigDecimal.ZERO, closing, due, today,
+            ),
+        )
+    }
+
+    @Test
+    fun closedCreditBalanceIsClosedRatherThanPaid() {
+        val closing = LocalDate.of(2026, 8, 11)
+        val due = LocalDate.of(2026, 8, 18)
+
+        assertEquals(
+            CreditCardInvoiceStatus.CLOSED,
+            CreditCardBillingCycle.paymentStatus(
+                BigDecimal("-1.75"), BigDecimal.ZERO, closing, due, LocalDate.of(2026, 8, 12),
+            ),
+        )
+    }
 }

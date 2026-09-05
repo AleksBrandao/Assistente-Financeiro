@@ -34,27 +34,37 @@ internal class PluggyApiException(
 ) : Exception(message)
 
 /**
- * Debug-only, read-only Pluggy client.
+ * Debug-only client for the Assistente Financeiro Pluggy backend.
  *
- * The apiKey is supplied at runtime and never persisted by this class. The clientSecret is not
- * accepted at all, so it cannot accidentally be embedded in the Android application.
+ * Pluggy CLIENT_ID, CLIENT_SECRET and apiKey never reach the Android app. The app only keeps its
+ * backend pairing code and the Item ID returned by Pluggy Connect.
  */
-internal class PluggyReadOnlyClient(
-    private val baseUrl: String = "https://api.pluggy.ai",
-) {
-    fun fetchPreview(apiKey: String, itemId: String): PluggySandboxPreview {
-        require(apiKey.isNotBlank()) { "apiKey must not be blank" }
+internal class PluggyReadOnlyClient {
+    fun fetchPreview(
+        backendUrl: String,
+        accessCode: String,
+        itemId: String,
+    ): PluggySandboxPreview {
+        val normalizedBackend = PluggyConnectionStore.normalizeBackendUrl(backendUrl)
+        require(accessCode.isNotBlank()) { "Código de acesso obrigatório" }
         validateUuid(itemId, "itemId")
 
-        val item = getJson("/items/$itemId", apiKey)
-        val accounts = fetchAccounts(apiKey, itemId)
-        val accountPreviews = accounts.map { account ->
-            val transactions = fetchAllTransactions(apiKey, account.externalId)
-            val bills = if (account.type == PluggyAccountType.CREDIT) {
-                fetchBills(apiKey, account.externalId)
-            } else {
-                emptyList()
-            }
+        val root = getJson(
+            "$normalizedBackend/api/snapshot?itemId=${itemId.trim()}",
+            accessCode.trim(),
+        )
+        val item = root.getJSONObject("item")
+        val datasets = root.getJSONArray("datasets")
+        val accounts = List(datasets.length()) { index ->
+            val dataset = datasets.getJSONObject(index)
+            val accountJson = dataset.getJSONObject("account")
+            val account = parseAccount(accountJson)
+            val transactions = dataset.optJSONArray("transactions")
+                ?.mapTransactions { transaction -> parseTransaction(transaction, account.externalId) }
+                .orEmpty()
+            val bills = dataset.optJSONArray("bills")
+                ?.mapBills { bill -> parseBill(bill, account.externalId) }
+                .orEmpty()
             PluggySandboxAccountPreview(
                 account = account,
                 transactionCount = transactions.size,
@@ -73,54 +83,17 @@ internal class PluggyReadOnlyClient(
         return PluggySandboxPreview(
             itemStatus = item.optNullableString("status") ?: "UNKNOWN",
             executionStatus = item.optNullableString("executionStatus"),
-            accounts = accountPreviews,
+            accounts = accounts,
         )
     }
 
-    private fun fetchAccounts(apiKey: String, itemId: String): List<PluggyAccountSnapshot> {
-        val root = getJson("/accounts?itemId=$itemId", apiKey)
-        return root.getJSONArray("results").mapAccounts(::parseAccount)
-    }
-
-    private fun fetchBills(apiKey: String, accountId: String): List<PluggyBillSnapshot> {
-        validateUuid(accountId, "accountId")
-        val root = getJson("/bills?accountId=$accountId", apiKey)
-        return root.getJSONArray("results").mapBills { bill ->
-            parseBill(bill, accountId)
-        }
-    }
-
-    private fun fetchAllTransactions(
-        apiKey: String,
-        accountId: String,
-        maxPages: Int = 100,
-    ): List<PluggyTransactionSnapshot> {
-        validateUuid(accountId, "accountId")
-        val transactions = mutableListOf<PluggyTransactionSnapshot>()
-        var suffix = "?accountId=$accountId"
-        val seenCursors = mutableSetOf<String>()
-        repeat(maxPages) {
-            val root = getJson("/v2/transactions$suffix", apiKey)
-            transactions += root.getJSONArray("results").mapTransactions { transaction ->
-                parseTransaction(transaction, accountId)
-            }
-            val next = root.optNullableString("next") ?: return transactions
-            require(next.startsWith("?")) { "Invalid Pluggy pagination cursor" }
-            if (!seenCursors.add(next)) return transactions
-            suffix = next
-        }
-        throw IllegalStateException("Pluggy pagination exceeded $maxPages pages")
-    }
-
-    private fun getJson(path: String, apiKey: String): JSONObject {
-        require(path.startsWith("/")) { "Only relative Pluggy API paths are allowed" }
-        val connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+    private fun getJson(url: String, accessCode: String): JSONObject {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
-            readTimeout = 30_000
+            readTimeout = 60_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("X-API-KEY", apiKey)
+            setRequestProperty("Authorization", "Bearer $accessCode")
             instanceFollowRedirects = false
         }
         return try {
@@ -132,7 +105,7 @@ internal class PluggyReadOnlyClient(
                 throw PluggyApiException(
                     httpStatus = status,
                     codeDescription = error?.optNullableString("codeDescription"),
-                    message = error?.optNullableString("message") ?: "Pluggy HTTP $status",
+                    message = error?.optNullableString("message") ?: "Backend HTTP $status",
                 )
             }
             JSONObject(body)
@@ -242,10 +215,6 @@ internal class PluggyReadOnlyClient(
             .getOrElse { throw IllegalArgumentException("$field must be a valid UUID") }
     }
 }
-
-private fun JSONArray.mapAccounts(
-    transform: (JSONObject) -> PluggyAccountSnapshot,
-): List<PluggyAccountSnapshot> = List(length()) { index -> transform(getJSONObject(index)) }
 
 private fun JSONArray.mapBills(
     transform: (JSONObject) -> PluggyBillSnapshot,
