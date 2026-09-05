@@ -46,12 +46,12 @@ internal class AnnualSummaryViewModel(
     }
 
     private fun buildState(year: Int): AnnualSummaryUiState {
-        val transactions = repository.granularTransactions()
+        val entries = repository.statementEntries()
         val periods = periodsFor(year)
         return AnnualSummaryUiState(
             selectedYear = year,
             rows = periods.map { period ->
-                period to MonthlyStatementCalculator.calculate(period, transactions)
+                period to MonthlyStatementCalculator.calculateEntries(period, entries)
             },
         )
     }

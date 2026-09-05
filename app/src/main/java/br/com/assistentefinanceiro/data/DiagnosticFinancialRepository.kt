@@ -31,6 +31,7 @@ internal class DiagnosticFinancialRepository(
     private val appContext = context.applicationContext
     private val store = DiagnosticStore(appContext)
     private val externalPersistence = ExternalImportPersistence(store)
+    private val externalInvoiceConsistencyRepair = ExternalInvoiceConsistencyRepair(store)
     private val invoiceDiagnosticExporter = InvoiceDiagnosticCsvExporter(store)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
 
@@ -215,7 +216,11 @@ internal class DiagnosticFinancialRepository(
 
     override fun importExternalBills(
         drafts: List<ExternalBillImportDraft>,
-    ): ExternalBillImportResult = externalPersistence.importBills(drafts)
+    ): ExternalBillImportResult {
+        val result = externalPersistence.importBills(drafts)
+        externalInvoiceConsistencyRepair.repairAfterBillImport(drafts)
+        return result
+    }
 
     override fun deletedTransactionGroups(): List<DeletedTransactionGroup> =
         store.deletedTransactionGroups()
