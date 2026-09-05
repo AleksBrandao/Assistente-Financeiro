@@ -148,22 +148,29 @@ internal class ExternalImportPersistence(
         var paymentsSynced = 0
         db.beginTransaction()
         try {
-            drafts.groupBy { it.localAccountId }.forEach { (accountId, accountDrafts) ->
-                val account = queryAccount(db, accountId) ?: return@forEach
-                if (account.type != FinancialAccountType.CREDIT_CARD) return@forEach
+            drafts.groupBy { it.localAccountId }.forEach accountLoop@ { (accountId, accountDrafts) ->
+                val account = queryAccount(db, accountId) ?: return@accountLoop
+                if (account.type != FinancialAccountType.CREDIT_CARD) return@accountLoop
                 accountDrafts.sortedBy { it.dueDate }.forEach { bill ->
                     val invoice = ensureOfficialInvoice(db, accountId, account, bill)
                     saveExternalBillLink(db, bill, invoice.closingPeriod)
-                    synchronizeOfficialTotal(db, invoice.id, accountId, invoice.closingPeriod, bill.totalAmount)
+                    synchronizeOfficialTotal(
+                        db,
+                        invoice.id,
+                        accountId,
+                        invoice.closingPeriod,
+                        bill.totalAmount,
+                    )
                     billsSynced++
                 }
 
                 // Open Finance Regulado reports payment of Bill N in the following bill cycle.
                 // Therefore each payment carried by the current bill is attached to the latest
                 // earlier local invoice, never blindly to the current bill itself.
-                accountDrafts.sortedBy { it.dueDate }.forEach { sourceBill ->
-                    if (sourceBill.payments.isEmpty()) return@forEach
-                    val target = previousInvoice(db, accountId, sourceBill.dueDate) ?: return@forEach
+                accountDrafts.sortedBy { it.dueDate }.forEach paymentSourceLoop@ { sourceBill ->
+                    if (sourceBill.payments.isEmpty()) return@paymentSourceLoop
+                    val target = previousInvoice(db, accountId, sourceBill.dueDate)
+                        ?: return@paymentSourceLoop
                     sourceBill.payments.forEach { payment ->
                         if (
                             upsertExternalBillPayment(
@@ -352,17 +359,30 @@ internal class ExternalImportPersistence(
                 else -> null
             }
             if (dates != null) {
-                return ensureInvoiceByDates(db, draft.localAccountId, dates.first, dates.second, dates.third)
+                return ensureInvoiceByDates(
+                    db,
+                    draft.localAccountId,
+                    dates.first,
+                    dates.second,
+                    dates.third,
+                )
             }
         }
-        draft.billForecastPeriod?.let { period ->
-            val closingDay = account.closingDay ?: return@let
-            val closingDate = dateAtDay(period, closingDay)
+        val forecastPeriod = draft.billForecastPeriod
+        val closingDay = account.closingDay
+        if (forecastPeriod != null && closingDay != null) {
+            val closingDate = dateAtDay(forecastPeriod, closingDay)
             val dueDate = account.dueDay?.let { dueDay ->
-                val duePeriod = if (dueDay <= closingDay) period.plusMonths(1) else period
+                val duePeriod = if (dueDay <= closingDay) forecastPeriod.plusMonths(1) else forecastPeriod
                 dateAtDay(duePeriod, dueDay)
             }
-            return ensureInvoiceByDates(db, draft.localAccountId, period, closingDate, dueDate)
+            return ensureInvoiceByDates(
+                db,
+                draft.localAccountId,
+                forecastPeriod,
+                closingDate,
+                dueDate,
+            )
         }
         return ensureInvoice(
             db = db,
@@ -460,14 +480,15 @@ internal class ExternalImportPersistence(
         officialTotal: BigDecimal,
     ) {
         val baseTotal = db.rawQuery(
-            """SELECT COALESCE(SUM(CASE
-                   WHEN direction = 'EXPENSE' THEN CAST(amount AS REAL)
-                   ELSE -CAST(amount AS REAL) END),0)
-               FROM transactions WHERE invoice_id = ?""",
+            "SELECT direction,amount FROM transactions WHERE invoice_id = ?",
             arrayOf(invoiceId.toString()),
         ).use { cursor ->
-            if (!cursor.moveToFirst()) BigDecimal.ZERO
-            else cursor.getString(0)?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+            var total = BigDecimal.ZERO
+            while (cursor.moveToNext()) {
+                val amount = cursor.getString(1).toBigDecimalOrNull() ?: BigDecimal.ZERO
+                total = if (cursor.getString(0) == "EXPENSE") total + amount else total - amount
+            }
+            total
         }
         val adjustment = officialTotal - baseTotal
         db.insertWithOnConflict(
