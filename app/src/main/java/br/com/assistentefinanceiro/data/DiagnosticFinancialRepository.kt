@@ -31,6 +31,7 @@ internal class DiagnosticFinancialRepository(
     private val appContext = context.applicationContext
     private val store = DiagnosticStore(appContext)
     private val externalPersistence = ExternalImportPersistence(store)
+    private val invoiceDiagnosticExporter = InvoiceDiagnosticCsvExporter(store)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
 
     init {
@@ -229,4 +230,5 @@ internal class DiagnosticFinancialRepository(
     override fun previewBackup(content: String): BackupValidationResult = store.previewBackup(content)
     override fun restoreBackup(content: String): Boolean = store.restoreBackup(content)
     override fun exportTransactionsCsv(): String = store.exportTransactionsCsv()
+    override fun exportInvoiceDiagnosticsCsv(): String = invoiceDiagnosticExporter.export()
 }
