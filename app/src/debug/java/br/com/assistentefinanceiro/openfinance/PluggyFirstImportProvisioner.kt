@@ -20,10 +20,15 @@ internal object PluggyFirstImportProvisioner {
         remote: PluggySandboxPreview,
         selectedExternalAccountIds: Set<String>,
         today: LocalDate = LocalDate.now(),
-        lookbackDays: Long = 90,
+        lookbackDays: Long? = 90,
+        startDate: LocalDate? = null,
+        endDate: LocalDate = today,
         zoneId: ZoneId = ZoneId.systemDefault(),
     ): Int {
-        require(lookbackDays > 0)
+        require(lookbackDays == null || lookbackDays > 0)
+        require(!endDate.isAfter(today))
+        val earliest = startDate ?: lookbackDays?.let { today.minusDays(it) }
+        require(earliest == null || !earliest.isAfter(endDate))
         if (selectedExternalAccountIds.isEmpty()) return 0
 
         val initialAccounts = repository.financialAccounts()
@@ -69,7 +74,8 @@ internal object PluggyFirstImportProvisioner {
                     PluggyAccountType.BANK -> bankOpeningSnapshot(
                         accountPreview = accountPreview,
                         today = today,
-                        lookbackDays = lookbackDays,
+                        earliest = earliest,
+                        endDate = endDate,
                         zoneId = zoneId,
                     )
                     PluggyAccountType.CREDIT -> OpeningSnapshot(BigDecimal.ZERO, null)
@@ -121,22 +127,21 @@ internal object PluggyFirstImportProvisioner {
     )
 
     /**
-     * Pluggy supplies the current balance. To preserve the imported history, reverse the net change
-     * of the same 90-day POSTED window and store the resulting balance immediately before the first
-     * imported transaction.
+     * Pluggy supplies the current balance. Reverse the net change of the selected POSTED history
+     * to place the local opening balance immediately before the first imported movement.
      */
     private fun bankOpeningSnapshot(
         accountPreview: PluggySandboxAccountPreview,
         today: LocalDate,
-        lookbackDays: Long,
+        earliest: LocalDate?,
+        endDate: LocalDate,
         zoneId: ZoneId,
     ): OpeningSnapshot {
-        val earliestAllowed = today.minusDays(lookbackDays)
         val postedInWindow = accountPreview.transactions.filter { transaction ->
             val accountingDate = transaction.date.atZone(zoneId).toLocalDate()
             transaction.status == PluggyTransactionStatus.POSTED &&
-                !accountingDate.isBefore(earliestAllowed) &&
-                !accountingDate.isAfter(today)
+                (earliest == null || !accountingDate.isBefore(earliest)) &&
+                !accountingDate.isAfter(endDate)
         }
         if (postedInWindow.isEmpty()) {
             return OpeningSnapshot(accountPreview.account.balance, today)

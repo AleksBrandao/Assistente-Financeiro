@@ -562,6 +562,8 @@ internal fun EditTransactionDialog(
     var seriesScope by remember(transaction.id) {
         mutableStateOf(TransactionSeriesScope.ONLY_THIS)
     }
+    val isCardInvoiceMovement =
+        transaction.invoiceId != null || transaction.type == FinancialTransactionType.CARD_PURCHASE
     val amountValue = if (',' in amount) {
         amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
     } else amount.toBigDecimalOrNull()
@@ -574,9 +576,10 @@ internal fun EditTransactionDialog(
     val plannedPaymentDateValue = plannedPaymentDate.takeIf(String::isNotBlank)?.let {
         runCatching { LocalDate.parse(it) }.getOrNull()
     }
-    val datesValid = (dueDate.isBlank() || dueDateValue != null) &&
-        (plannedPaymentDate.isBlank() || plannedPaymentDateValue != null) &&
-        (paidAt.isBlank() || paidAtValue != null)
+    val datesValid = isCardInvoiceMovement ||
+        ((dueDate.isBlank() || dueDateValue != null) &&
+            (plannedPaymentDate.isBlank() || plannedPaymentDateValue != null) &&
+            (paidAt.isBlank() || paidAtValue != null))
     val availableCategories = remember(transaction.direction) {
         TransactionCategory.availableFor(transaction.direction)
     }
@@ -609,23 +612,31 @@ internal fun EditTransactionDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                DatePickerField(
-                    dueDate, "Vencimento", allowClear = true,
-                    onValueChange = { dueDate = it },
-                )
-                DatePickerField(
-                    plannedPaymentDate, "Pagamento previsto", allowClear = true,
-                    onValueChange = { plannedPaymentDate = it },
-                )
-                DatePickerField(
-                    paidAt, "Pagamento", allowClear = true,
-                    onValueChange = {
-                        paidAt = it
-                        selectedStatus = if (it.isNotBlank()) {
-                            TransactionStatus.REALIZED
-                        } else TransactionStatus.PENDING
-                    },
-                )
+                if (isCardInvoiceMovement) {
+                    Text(
+                        "Vencimento, situação e pagamento pertencem à fatura do cartão.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    DatePickerField(
+                        dueDate, "Vencimento", allowClear = true,
+                        onValueChange = { dueDate = it },
+                    )
+                    DatePickerField(
+                        plannedPaymentDate, "Pagamento previsto", allowClear = true,
+                        onValueChange = { plannedPaymentDate = it },
+                    )
+                    DatePickerField(
+                        paidAt, "Pagamento", allowClear = true,
+                        onValueChange = {
+                            paidAt = it
+                            selectedStatus = if (it.isNotBlank()) {
+                                TransactionStatus.REALIZED
+                            } else TransactionStatus.PENDING
+                        },
+                    )
+                }
                 transaction.originalAmount?.let {
                     Text(
                         "Valor original: ${formatCurrency(it)}",
@@ -695,37 +706,39 @@ internal fun EditTransactionDialog(
                         },
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Switch(
-                        checked = selectedStatus == TransactionStatus.REALIZED,
-                        onCheckedChange = { checked ->
-                            selectedStatus = if (checked) {
-                                TransactionStatus.REALIZED
+                if (!isCardInvoiceMovement) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Switch(
+                            checked = selectedStatus == TransactionStatus.REALIZED,
+                            onCheckedChange = { checked ->
+                                selectedStatus = if (checked) {
+                                    TransactionStatus.REALIZED
+                                } else {
+                                    paidAt = ""
+                                    TransactionStatus.PENDING
+                                }
+                            },
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (transaction.direction == FinancialTransactionDirection.INCOME) {
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Recebido"
+                                } else {
+                                    "Não recebido"
+                                }
                             } else {
-                                paidAt = ""
-                                TransactionStatus.PENDING
+                                if (selectedStatus == TransactionStatus.REALIZED) {
+                                    "Pago"
+                                } else {
+                                    "Não pago"
+                                }
                             }
-                        },
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        if (transaction.direction == FinancialTransactionDirection.INCOME) {
-                            if (selectedStatus == TransactionStatus.REALIZED) {
-                                "Recebido"
-                            } else {
-                                "Não recebido"
-                            }
-                        } else {
-                            if (selectedStatus == TransactionStatus.REALIZED) {
-                                "Pago"
-                            } else {
-                                "Não pago"
-                            }
-                        }
-                    )
+                        )
+                    }
                 }
                 if (
                     TransactionCategoryRule.canApplyToFuture(
@@ -751,9 +764,16 @@ internal fun EditTransactionDialog(
             TextButton(
                 onClick = {
                     onSave(
-                        description, selectedCategory, customCategory, subcategory, selectedStatus,
-                        checkNotNull(amountValue), dueDateValue, plannedPaymentDateValue,
-                        paidAtValue, applyToFuture,
+                        description,
+                        selectedCategory,
+                        customCategory,
+                        subcategory,
+                        selectedStatus,
+                        checkNotNull(amountValue),
+                        if (isCardInvoiceMovement) null else dueDateValue,
+                        if (isCardInvoiceMovement) null else plannedPaymentDateValue,
+                        if (isCardInvoiceMovement) null else paidAtValue,
+                        applyToFuture,
                         seriesScope,
                     )
                 },

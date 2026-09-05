@@ -212,6 +212,10 @@ internal class DiagnosticFinancialRepository(
         drafts: List<ExternalTransactionImportDraft>,
     ): ExternalImportResult = externalPersistence.importTransactions(drafts)
 
+    override fun importExternalBills(
+        drafts: List<ExternalBillImportDraft>,
+    ): ExternalBillImportResult = externalPersistence.importBills(drafts)
+
     override fun deletedTransactionGroups(): List<DeletedTransactionGroup> =
         store.deletedTransactionGroups()
 

@@ -26,6 +26,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -48,6 +49,7 @@ import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import java.math.BigDecimal
 import java.text.NumberFormat
+import java.time.LocalDate
 import java.util.Currency
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +66,14 @@ internal object PluggySandboxFeature {
     ) {
         PluggySandboxScreen(repository = repository, onBack = onBack)
     }
+}
+
+private enum class PluggyImportPeriodOption(val label: String) {
+    LAST_90_DAYS("Últimos 90 dias"),
+    LAST_6_MONTHS("Últimos 6 meses"),
+    LAST_12_MONTHS("Últimos 12 meses"),
+    ALL_AVAILABLE("Todo o período disponível"),
+    CUSTOM("Período personalizado"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,6 +93,20 @@ private fun PluggySandboxScreen(
     var pendingPlan by remember { mutableStateOf<PluggyControlledImportPlan?>(null) }
     var importMessage by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var importPeriod by remember { mutableStateOf(PluggyImportPeriodOption.LAST_90_DAYS) }
+    var customStartDate by remember { mutableStateOf("") }
+    var customEndDate by remember { mutableStateOf(LocalDate.now().toString()) }
+
+    val parsedCustomStart = customStartDate.takeIf(String::isNotBlank)?.let {
+        runCatching { LocalDate.parse(it) }.getOrNull()
+    }
+    val parsedCustomEnd = customEndDate.takeIf(String::isNotBlank)?.let {
+        runCatching { LocalDate.parse(it) }.getOrNull()
+    }
+    val customPeriodValid = importPeriod != PluggyImportPeriodOption.CUSTOM ||
+        (parsedCustomStart != null && parsedCustomEnd != null &&
+            !parsedCustomStart.isAfter(parsedCustomEnd) &&
+            !parsedCustomEnd.isAfter(LocalDate.now()))
 
     fun launchQuery(key: String, item: String) {
         loading = true
@@ -117,16 +141,35 @@ private fun PluggySandboxScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("${plan.selectedAccounts} conta(s) selecionada(s)")
-                    Text("${plan.importable} transação(ões) nova(s) serão gravadas no app de teste.")
-                    Text("${plan.matchedExisting} já possuem correspondência local.")
+                    Text("${plan.importable} transação(ões) serão sincronizadas.")
+                    if (plan.billDrafts.isNotEmpty()) {
+                        Text("${plan.billDrafts.size} fatura(s) oficial(is) serão sincronizadas.")
+                    }
+                    Text("${plan.matchedExisting} já possuem correspondência local não-Pluggy.")
                     Text("${plan.skippedReview} ficaram em Revisar e não serão importadas.")
-                    Text("${plan.skippedPending} PENDING foram ignoradas nesta fase.")
-                    if (plan.skippedCreditCardCredits > 0) {
-                        Text("${plan.skippedCreditCardCredits} crédito(s) de cartão foram ignorados para evitar tratar pagamento/reembolso como compra.")
+                    if (plan.skippedCreditCardPayments > 0) {
+                        Text(
+                            "${plan.skippedCreditCardPayments} crédito(s) do cartão coincidem com " +
+                                "pagamento(s) informado(s) na fatura e serão tratados como pagamento, não compra.",
+                        )
                     }
                     if (plan.skippedOutsideWindow > 0) {
-                        Text("${plan.skippedOutsideWindow} ficaram fora da janela de 90 dias.")
+                        Text("${plan.skippedOutsideWindow} ficaram fora do período selecionado.")
                     }
+                    Text(
+                        "Período: " + (plan.windowStartDate?.toString() ?: "início disponível") +
+                            " a ${plan.windowEndDate}.",
+                    )
+                    Text(
+                        "Base local antes da sincronização: ${plan.localTransactionCount} movimentação(ões), " +
+                            "${plan.localPluggyTransactionCount} de origem Pluggy.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "POSTED será Realizado; PENDING será Pendente. As categorias recebidas da Pluggy " +
+                            "serão mantidas até o usuário alterá-las.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Text(
                         "Os vínculos selecionados também serão confirmados. Esta ação afeta somente o Assistente Financeiro (Teste).",
                         style = MaterialTheme.typography.bodySmall,
@@ -166,16 +209,20 @@ private fun PluggySandboxScreen(
                                         ) { "Não foi possível confirmar um vínculo de conta" }
                                     }
                                     val imported = repository.importExternalTransactions(plan.drafts)
+                                    val bills = repository.importExternalBills(plan.billDrafts)
                                     val refreshed = buildReconciliation(repository, remote)
-                                    imported to refreshed
+                                    Triple(imported, bills, refreshed)
                                 }
                             }
-                            result.onSuccess { (imported, refreshed) ->
+                            result.onSuccess { (imported, bills, refreshed) ->
                                 reconciliation = refreshed
                                 selectedForImport = emptySet()
                                 importMessage =
-                                    "Importação concluída: ${imported.imported} nova(s), " +
-                                        "${imported.alreadyImported} já existente(s)."
+                                    "Sincronização concluída: ${imported.imported} nova(s), " +
+                                        "${imported.updated} atualizada(s), " +
+                                        "${imported.alreadyImported} já existente(s); " +
+                                        "${bills.billsSynced} fatura(s) e " +
+                                        "${bills.paymentsSynced} pagamento(s) sincronizado(s)."
                             }.onFailure { throwable ->
                                 error = throwable.toSafeMessage()
                             }
@@ -371,16 +418,70 @@ private fun PluggySandboxScreen(
                     Spacer(Modifier.height(4.dp))
                     Text("Importação controlada", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Somente POSTED, sem correspondência local e dos últimos 90 dias. Itens em Revisar, PENDING e créditos de cartão ficam de fora.",
+                        "POSTED e PENDING podem ser sincronizados. Categorias da Pluggy são preservadas; " +
+                            "faturas e pagamentos oficiais são reconciliados separadamente.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
+                    Text("Período para importar", style = MaterialTheme.typography.labelLarge)
+                    PluggyImportPeriodOption.entries.forEach { option ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = importPeriod == option,
+                                onClick = { importPeriod = option },
+                                enabled = !loading,
+                            )
+                            Text(option.label)
+                        }
+                    }
+                    if (importPeriod == PluggyImportPeriodOption.CUSTOM) {
+                        OutlinedTextField(
+                            value = customStartDate,
+                            onValueChange = { customStartDate = it.take(10) },
+                            label = { Text("Data inicial (AAAA-MM-DD)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !loading,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = customEndDate,
+                            onValueChange = { customEndDate = it.take(10) },
+                            label = { Text("Data final (AAAA-MM-DD)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !loading,
+                        )
+                        if (!customPeriodValid) {
+                            Text(
+                                "Informe datas válidas; a data final não pode ser futura.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
                     Button(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !loading && selectedForImport.isNotEmpty() && preview != null,
+                        enabled = !loading && selectedForImport.isNotEmpty() && preview != null &&
+                            customPeriodValid,
                         onClick = {
                             val remote = preview ?: return@Button
+                            val today = LocalDate.now()
+                            val periodParameters = when (importPeriod) {
+                                PluggyImportPeriodOption.LAST_90_DAYS -> Triple(90L, null, today)
+                                PluggyImportPeriodOption.LAST_6_MONTHS ->
+                                    Triple(null, today.minusMonths(6), today)
+                                PluggyImportPeriodOption.LAST_12_MONTHS ->
+                                    Triple(null, today.minusMonths(12), today)
+                                PluggyImportPeriodOption.ALL_AVAILABLE -> Triple(null, null, today)
+                                PluggyImportPeriodOption.CUSTOM ->
+                                    Triple(null, checkNotNull(parsedCustomStart), checkNotNull(parsedCustomEnd))
+                            }
                             loading = true
                             error = null
                             importMessage = null
@@ -391,6 +492,10 @@ private fun PluggySandboxScreen(
                                             repository = repository,
                                             remote = remote,
                                             selectedExternalAccountIds = selectedForImport,
+                                            today = today,
+                                            lookbackDays = periodParameters.first,
+                                            startDate = periodParameters.second,
+                                            endDate = periodParameters.third,
                                         )
                                         val effectiveReconciliation = buildReconciliation(repository, remote)
                                         val plan = PluggyControlledImportPlanner.plan(
@@ -404,6 +509,10 @@ private fun PluggySandboxScreen(
                                             reconciliation = effectiveReconciliation,
                                             selectedExternalAccountIds = selectedForImport,
                                             localTransactions = repository.granularTransactions(),
+                                            today = today,
+                                            lookbackDays = periodParameters.first,
+                                            startDate = periodParameters.second,
+                                            endDate = periodParameters.third,
                                         )
                                         effectiveReconciliation to plan
                                     }
@@ -422,7 +531,7 @@ private fun PluggySandboxScreen(
 
                 item {
                     Text(
-                        "Fase 4 permanece exclusiva do Assistente Financeiro (Teste). Nenhum item marcado como Revisar é importado automaticamente.",
+                        "A sincronização permanece exclusiva do Assistente Financeiro (Teste). Nenhum item marcado como Revisar é unido automaticamente.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -507,7 +616,11 @@ private fun PluggyAccountPreviewCard(preview: PluggySandboxAccountPreview) {
             KeyValueRow("Parceladas", preview.installmentCount.toString())
             KeyValueRow("PIX", preview.pixCount.toString())
             if (account.type == PluggyAccountType.CREDIT) {
-                KeyValueRow("Faturas fechadas", preview.bills.size.toString())
+                KeyValueRow("Faturas oficiais", preview.bills.size.toString())
+                KeyValueRow(
+                    "Pagamentos em faturas",
+                    preview.bills.sumOf { it.payments.size }.toString(),
+                )
                 preview.bills.maxByOrNull { it.dueDate }?.let { bill ->
                     KeyValueRow(
                         "Última fatura retornada",
