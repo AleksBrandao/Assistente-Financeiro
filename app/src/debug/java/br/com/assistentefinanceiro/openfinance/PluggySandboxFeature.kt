@@ -492,6 +492,10 @@ private fun PluggySandboxScreen(
                                             repository = repository,
                                             remote = remote,
                                             selectedExternalAccountIds = selectedForImport,
+                                            today = today,
+                                            lookbackDays = periodParameters.first,
+                                            startDate = periodParameters.second,
+                                            endDate = periodParameters.third,
                                         )
                                         val effectiveReconciliation = buildReconciliation(repository, remote)
                                         val plan = PluggyControlledImportPlanner.plan(
