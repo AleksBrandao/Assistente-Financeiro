@@ -5,7 +5,6 @@ import br.com.assistentefinanceiro.notifications.AccountBalanceSummary
 import br.com.assistentefinanceiro.notifications.AccountMovementRecord
 import br.com.assistentefinanceiro.notifications.BackupValidationResult
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceRecord
-import br.com.assistentefinanceiro.notifications.CreditCardInvoiceStatus
 import br.com.assistentefinanceiro.notifications.DeletedTransactionGroup
 import br.com.assistentefinanceiro.notifications.DiagnosticEvent
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
@@ -16,6 +15,7 @@ import br.com.assistentefinanceiro.notifications.FinancialTransactionType
 import br.com.assistentefinanceiro.notifications.InvoicePaymentRecord
 import br.com.assistentefinanceiro.notifications.MobillsImportResult
 import br.com.assistentefinanceiro.notifications.MonthlyBudgetRecord
+import br.com.assistentefinanceiro.notifications.StatementCalculationEntry
 import br.com.assistentefinanceiro.notifications.TransactionCategory
 import br.com.assistentefinanceiro.notifications.TransactionSeriesScope
 import br.com.assistentefinanceiro.notifications.TransactionStatus
@@ -139,43 +139,90 @@ interface FinancialRepository {
 
     fun granularTransactions(): List<FinancialTransactionRecord> = recentTransactions(10_000)
 
-    fun consolidatedTransactions(): List<FinancialTransactionRecord> {
+    /**
+     * Cash-flow statement source. Card purchases stay granular for budgets, but statements replace
+     * them with one invoice row in the due-month competence. A partially paid invoice contributes
+     * the settled amount to realized totals and only the remaining balance to pending totals.
+     */
+    fun statementEntries(): List<StatementCalculationEntry> {
         val transactions = recentTransactions(10_000)
         val cards = financialAccounts().filter {
             it.type == FinancialAccountType.CREDIT_CARD
         }
         val cardIds = cards.map { it.id }.toSet()
-        val invoices = cards.flatMap { account ->
+        val nonCardEntries = transactions.filterNot { transaction ->
+            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                (transaction.accountId != null && transaction.accountId in cardIds)
+        }.map { transaction -> StatementCalculationEntry(transaction) }
+
+        val invoiceEntries = cards.flatMap { account ->
             creditCardInvoices(account.id).mapNotNull { invoice ->
                 val due = invoice.dueDate ?: return@mapNotNull null
                 if (invoice.total.signum() == 0) return@mapNotNull null
-                val paidAt = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                    invoicePayments(invoice).maxOfOrNull { it.paidAt }
-                } else null
-                FinancialTransactionRecord(
+                val isCredit = invoice.total.signum() < 0
+                val absoluteTotal = invoice.total.abs()
+                val realizedAmount: BigDecimal
+                val pendingAmount: BigDecimal
+                if (isCredit) {
+                    realizedAmount = BigDecimal.ZERO
+                    pendingAmount = absoluteTotal
+                } else {
+                    realizedAmount = invoice.paidAmount
+                        .max(BigDecimal.ZERO)
+                        .min(absoluteTotal)
+                    pendingAmount = (absoluteTotal - realizedAmount).max(BigDecimal.ZERO)
+                }
+                val transaction = FinancialTransactionRecord(
                     id = -invoice.id,
                     sourceEventId = null,
-                    direction = if (invoice.total.signum() < 0) {
+                    direction = if (isCredit) {
                         FinancialTransactionDirection.INCOME
                     } else FinancialTransactionDirection.EXPENSE,
-                    type = if (invoice.total.signum() < 0) {
+                    type = if (isCredit) {
                         FinancialTransactionType.IMPORTED_INCOME
                     } else FinancialTransactionType.IMPORTED_EXPENSE,
-                    amount = invoice.total.abs().toPlainString(),
-                    occurredAt = due.atStartOfDay().toString(),
+                    amount = absoluteTotal.toPlainString(),
+                    occurredAt = due.atTime(23, 59, 59).toString(),
                     description = "Fatura ${account.name}",
                     sourcePackage = "credit-card-invoice",
-                    status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                    status = if (pendingAmount.signum() == 0) {
                         TransactionStatus.REALIZED
                     } else TransactionStatus.PENDING,
+                    account = account.name,
+                    accountId = account.id,
+                    invoiceId = invoice.id,
                     dueDate = due.toString(),
-                    paidAt = paidAt?.toString(),
+                )
+                StatementCalculationEntry(
+                    transaction = transaction,
+                    realizedAmount = realizedAmount,
+                    pendingAmount = pendingAmount,
                 )
             }
         }
-        return transactions.filterNot { transaction ->
-            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
-                (transaction.accountId != null && transaction.accountId in cardIds)
-        } + invoices
+        return nonCardEntries + invoiceEntries
+    }
+
+    /**
+     * Pending-oriented consolidated view retained for planning screens. For a partially paid
+     * invoice the synthetic row carries only the amount still outstanding, preventing the full
+     * invoice from being counted as pending again.
+     */
+    fun consolidatedTransactions(): List<FinancialTransactionRecord> = statementEntries().mapNotNull { entry ->
+        val hasSplit = entry.realizedAmount != null || entry.pendingAmount != null
+        if (!hasSplit) return@mapNotNull entry.transaction
+        val pending = entry.pendingAmount ?: BigDecimal.ZERO
+        val realized = entry.realizedAmount ?: BigDecimal.ZERO
+        when {
+            pending.signum() > 0 -> entry.transaction.copy(
+                amount = pending.toPlainString(),
+                status = TransactionStatus.PENDING,
+            )
+            realized.signum() > 0 -> entry.transaction.copy(
+                amount = realized.toPlainString(),
+                status = TransactionStatus.REALIZED,
+            )
+            else -> null
+        }
     }
 }
