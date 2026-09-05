@@ -82,6 +82,7 @@ object PluggyControlledImportPlanner {
             val localForMatching = localForAccount.filter { it.origin != TransactionOrigin.PLUGGY }
             val billsById = dataset.bills.associateBy { it.externalId }
             val billPayments = dataset.bills.flatMap { it.payments }
+            val referencedBillIds = mutableSetOf<String>()
 
             dataset.transactions.forEach { remote ->
                 val accountingDate = remote.date.atZone(zoneId).toLocalDate()
@@ -122,6 +123,7 @@ object PluggyControlledImportPlanner {
                 val type = transactionType(dataset.account.type, remote, direction)
                 val (category, customCategory) = importedCategory(remote.category, direction)
                 val officialBill = remote.billExternalId?.let(billsById::get)
+                remote.billExternalId?.let(referencedBillIds::add)
                 drafts += ExternalTransactionImportDraft(
                     provider = ExternalDataProvider.PLUGGY,
                     externalTransactionId = remote.externalId,
@@ -154,7 +156,10 @@ object PluggyControlledImportPlanner {
             }
 
             dataset.bills
-                .filter { insideWindow(it.dueDate) }
+                // A transaction selected for import may already reference the next/open Bill even
+                // when that Bill's due date is just outside the requested date window. Import the
+                // referenced Bill too so externalBillId can always be resolved locally.
+                .filter { insideWindow(it.dueDate) || it.externalId in referencedBillIds }
                 .forEach { bill ->
                     billDrafts += ExternalBillImportDraft(
                         provider = ExternalDataProvider.PLUGGY,
@@ -165,7 +170,9 @@ object PluggyControlledImportPlanner {
                         closingDate = bill.closingDate,
                         totalAmount = bill.totalAmount.abs(),
                         payments = bill.payments
-                            .filter { it.amount.signum() > 0 }
+                            .filter {
+                                it.amount.signum() > 0 && !it.paymentDate.isAfter(today)
+                            }
                             .map { payment ->
                                 ExternalBillPaymentDraft(
                                     externalPaymentId = payment.externalId,
