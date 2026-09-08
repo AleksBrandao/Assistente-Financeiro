@@ -34,6 +34,9 @@ data class PluggyControlledImportPlan(
  * Builds an explicit import plan. PENDING movements are retained as pending, already imported
  * Pluggy movements are sent through again so persistence can update them idempotently, and card
  * credits are retained unless they match a payment explicitly reported by a Pluggy Bill.
+ *
+ * The selected window controls historical import. Records whose own date is in the future are also
+ * retained when Pluggy explicitly supplied them; the app does not synthesize missing installments.
  */
 object PluggyControlledImportPlanner {
     fun plan(
@@ -48,7 +51,6 @@ object PluggyControlledImportPlanner {
         zoneId: ZoneId = ZoneId.systemDefault(),
     ): PluggyControlledImportPlan {
         require(lookbackDays == null || lookbackDays > 0)
-        require(!endDate.isAfter(today)) { "endDate cannot be in the future" }
         val earliest = startDate ?: lookbackDays?.let(today::minusDays)
         require(earliest == null || !earliest.isAfter(endDate))
 
@@ -69,8 +71,13 @@ object PluggyControlledImportPlanner {
         }
         val datasetsById = datasets.associateBy { it.account.externalId }
 
-        fun insideWindow(date: LocalDate): Boolean =
+        fun insideRequestedWindow(date: LocalDate): Boolean =
             (earliest == null || !date.isBefore(earliest)) && !date.isAfter(endDate)
+
+        // A future record is imported only when it exists in the Pluggy payload. This does not
+        // infer or generate any missing future transaction.
+        fun shouldImportProviderDate(date: LocalDate): Boolean =
+            insideRequestedWindow(date) || date.isAfter(today)
 
         selectedResults.forEach { accountResult ->
             val dataset = datasetsById[accountResult.pluggyAccountExternalId] ?: return@forEach
@@ -86,7 +93,7 @@ object PluggyControlledImportPlanner {
 
             dataset.transactions.forEach { remote ->
                 val accountingDate = remote.date.atZone(zoneId).toLocalDate()
-                if (!insideWindow(accountingDate)) {
+                if (!shouldImportProviderDate(accountingDate)) {
                     skippedOutsideWindow++
                     return@forEach
                 }
@@ -156,10 +163,11 @@ object PluggyControlledImportPlanner {
             }
 
             dataset.bills
-                // A transaction selected for import may already reference the next/open Bill even
-                // when that Bill's due date is just outside the requested date window. Import the
-                // referenced Bill too so externalBillId can always be resolved locally.
-                .filter { insideWindow(it.dueDate) || it.externalId in referencedBillIds }
+                // Keep Bills explicitly returned by Pluggy for future dates as well as Bills
+                // referenced by an imported transaction. No future Bill is created synthetically.
+                .filter {
+                    shouldImportProviderDate(it.dueDate) || it.externalId in referencedBillIds
+                }
                 .forEach { bill ->
                     billDrafts += ExternalBillImportDraft(
                         provider = ExternalDataProvider.PLUGGY,
