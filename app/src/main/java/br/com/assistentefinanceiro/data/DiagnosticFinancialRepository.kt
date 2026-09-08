@@ -38,6 +38,9 @@ internal class DiagnosticFinancialRepository(
 
     init {
         NotificationTimestampRepair.repairOnce(store)
+        // Repair data imported by older builds too. This removes the dependency on running another
+        // Open Finance Bill sync after installing a version that knows how to reconcile the debit.
+        bankInvoicePaymentReconciler.reconcile()
     }
 
     override fun candidates(): List<Pair<String, String>> = store.candidates()
@@ -172,11 +175,23 @@ internal class DiagnosticFinancialRepository(
     ): Boolean = store.deleteInvoicePayment(invoice, paymentId)
 
     override fun generalProjectedBalance(throughDate: LocalDate): BigDecimal =
-        store.generalProjectedBalance(throughDate)
+        generalProjectedBalances(listOf(throughDate)).getValue(throughDate)
 
     override fun generalProjectedBalances(
         throughDates: Collection<LocalDate>,
-    ): Map<LocalDate, BigDecimal> = store.generalProjectedBalances(throughDates)
+    ): Map<LocalDate, BigDecimal> {
+        val dates = throughDates.distinct()
+        if (dates.isEmpty()) return emptyMap()
+        val base = store.generalProjectedBalances(dates)
+        val projections = futureCardInstallmentProjections()
+        return dates.associateWith { throughDate ->
+            val futureInstallmentsDue = projections
+                .asSequence()
+                .filter { projection -> !projection.dueDate.isAfter(throughDate) }
+                .fold(BigDecimal.ZERO) { total, projection -> total + projection.amount }
+            base.getValue(throughDate) - futureInstallmentsDue
+        }
+    }
 
     override fun monthlyBudgets(period: YearMonth): List<MonthlyBudgetRecord> =
         store.monthlyBudgets(period)
@@ -235,7 +250,11 @@ internal class DiagnosticFinancialRepository(
 
     override fun createBackupJson(): String = store.createBackupJson()
     override fun previewBackup(content: String): BackupValidationResult = store.previewBackup(content)
-    override fun restoreBackup(content: String): Boolean = store.restoreBackup(content)
+    override fun restoreBackup(content: String): Boolean {
+        val restored = store.restoreBackup(content)
+        if (restored) bankInvoicePaymentReconciler.reconcile()
+        return restored
+    }
     override fun exportTransactionsCsv(): String = store.exportTransactionsCsv()
     override fun exportInvoiceDiagnosticsCsv(): String = invoiceDiagnosticExporter.export()
 }
