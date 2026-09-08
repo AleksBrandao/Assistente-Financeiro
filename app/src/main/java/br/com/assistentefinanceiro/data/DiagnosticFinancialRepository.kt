@@ -175,23 +175,11 @@ internal class DiagnosticFinancialRepository(
     ): Boolean = store.deleteInvoicePayment(invoice, paymentId)
 
     override fun generalProjectedBalance(throughDate: LocalDate): BigDecimal =
-        generalProjectedBalances(listOf(throughDate)).getValue(throughDate)
+        store.generalProjectedBalance(throughDate)
 
     override fun generalProjectedBalances(
         throughDates: Collection<LocalDate>,
-    ): Map<LocalDate, BigDecimal> {
-        val dates = throughDates.distinct()
-        if (dates.isEmpty()) return emptyMap()
-        val base = store.generalProjectedBalances(dates)
-        val projections = futureCardInstallmentProjections()
-        return dates.associateWith { throughDate ->
-            val futureInstallmentsDue = projections
-                .asSequence()
-                .filter { projection -> !projection.dueDate.isAfter(throughDate) }
-                .fold(BigDecimal.ZERO) { total, projection -> total + projection.amount }
-            base.getValue(throughDate) - futureInstallmentsDue
-        }
-    }
+    ): Map<LocalDate, BigDecimal> = store.generalProjectedBalances(throughDates)
 
     override fun monthlyBudgets(period: YearMonth): List<MonthlyBudgetRecord> =
         store.monthlyBudgets(period)
