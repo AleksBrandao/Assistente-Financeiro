@@ -16,7 +16,6 @@ const SDK_URLS=[
   'https://cdn.pluggy.ai/pluggy-connect/v2.7.0/pluggy-connect.js'
 ];
 const ACCESS_KEY='assistfinanceiro.pluggy.accessCode';
-const TOKEN_KEY='assistfinanceiro.pluggy.connectToken';
 const ITEM_KEY='assistfinanceiro.pluggy.updateItem';
 const statusEl=document.getElementById('status');
 const params=new URLSearchParams(location.search);
@@ -25,7 +24,7 @@ const hashAccessCode=hash.get('accessCode')||'';
 const queryItemId=params.get('itemId')||'';
 function storageGet(key){try{return sessionStorage.getItem(key)||''}catch(_){return ''}}
 function storageSet(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key)}catch(_){}}
-function clearSession(){storageSet(TOKEN_KEY,'');storageSet(ITEM_KEY,'')}
+function clearSession(){storageSet(ACCESS_KEY,'');storageSet(ITEM_KEY,'')}
 function fail(message,error){
   const item=error&&error.data&&error.data.item?error.data.item:null;
   const code=error&&(error.codeDescription||(error.data&&error.data.codeDescription))||'';
@@ -54,11 +53,10 @@ if(hashAccessCode){
 }
 if(queryItemId)storageSet(ITEM_KEY,queryItemId);
 const accessCode=hashAccessCode||storageGet(ACCESS_KEY);
-const itemId=queryItemId||storageGet(ITEM_KEY);
+let itemId=queryItemId||storageGet(ITEM_KEY);
 function openWidget(connectToken){
   if(!connectToken)return fail('Connect Token ausente.');
   if(typeof window.PluggyConnect!=='function')return fail('Pluggy Connect não foi carregado.');
-  storageSet(TOKEN_KEY,connectToken);
   const config={
     connectToken,
     includeSandbox:false,
@@ -76,33 +74,54 @@ function openWidget(connectToken){
   if(itemId)config.updateItem=itemId;
   new window.PluggyConnect(config).init();
 }
+async function requestConnectToken(body,authorization){
+  const headers={'Accept':'application/json','Content-Type':'application/json'};
+  if(authorization)headers.Authorization='Bearer '+authorization;
+  const response=await fetch('/api/connect-token',{
+    method:'POST',
+    headers,
+    credentials:'same-origin',
+    body:JSON.stringify(body||{})
+  });
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)throw Object.assign(new Error(result.message||'Falha ao obter Connect Token'),result);
+  return result;
+}
 async function start(){
-  if(!accessCode){
-    fail('Código de acesso ausente. Volte ao aplicativo e tente novamente.');
-    return;
-  }
   try{
     await loadSdk();
   }catch(error){
     fail(error.message,error);
     return;
   }
+
   const isOauthReturn=params.get('oauth')==='return';
-  const storedToken=storageGet(TOKEN_KEY);
-  if(isOauthReturn&&storedToken){
+  if(isOauthReturn){
     statusEl.textContent='Retomando autorização…';
-    openWidget(storedToken);
+    try{
+      const resumed=await requestConnectToken({resume:true},'');
+      if(resumed.itemId)itemId=resumed.itemId;
+      openWidget(resumed.accessToken);
+      return;
+    }catch(error){
+      if(!accessCode){
+        fail(error.message||'Não foi possível retomar a autorização. Volte ao aplicativo e tente novamente.',error);
+        return;
+      }
+    }
+  }
+
+  if(!accessCode){
+    fail('Código de acesso ausente. Volte ao aplicativo e tente novamente.');
     return;
   }
-  fetch('/api/connect-token',{
-    method:'POST',
-    headers:{'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+accessCode},
-    body:JSON.stringify(itemId?{itemId}:{})
-  }).then(async r=>{
-    const body=await r.json().catch(()=>({}));
-    if(!r.ok)throw Object.assign(new Error(body.message||'Falha ao obter Connect Token'),body);
-    return body;
-  }).then(({accessToken})=>openWidget(accessToken)).catch(error=>fail(error.message,error));
+
+  try{
+    const result=await requestConnectToken(itemId?{itemId}:{},accessCode);
+    openWidget(result.accessToken);
+  }catch(error){
+    fail(error.message,error);
+  }
 }
 start();
 </script></body></html>`)
