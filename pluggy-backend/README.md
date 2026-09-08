@@ -15,15 +15,15 @@ Backend serverless mínimo para manter `PLUGGY_CLIENT_ID` e `PLUGGY_CLIENT_SECRE
 
 ## Rotas
 
-- `GET /api/connect` — abre o Pluggy Connect no navegador. O código de pareamento é enviado apenas no fragmento (`#accessCode=...`) e usado pelo JavaScript para solicitar um Connect Token. O navegador guarda temporariamente o Connect Token em `sessionStorage` para retomar o mesmo fluxo após retornos OAuth no celular.
-- `POST /api/connect-token` — cria Connect Token com credenciais guardadas somente no servidor. O token inclui um `oauthRedirectUri` HTTPS apontando de volta para `/api/connect?oauth=return` e mantém `avoidDuplicates=true`.
+- `GET /api/connect` — abre o Pluggy Connect no navegador. O código de pareamento é enviado apenas no fragmento (`#accessCode=...`) e usado pelo JavaScript para solicitar um Connect Token.
+- `POST /api/connect-token` — cria Connect Token com credenciais guardadas somente no servidor. O token inclui um `oauthRedirectUri` HTTPS apontando de volta para `/api/connect?oauth=return` e mantém `avoidDuplicates=true`. Ao criar o token, o backend também guarda temporariamente o próprio Connect Token em cookie `HttpOnly`, `Secure` e `SameSite=Lax` por até 30 minutos. No retorno OAuth, `POST /api/connect-token` com `{ "resume": true }` recupera a mesma sessão sem depender de `sessionStorage`, que pode se perder quando o navegador móvel retorna em outra aba/contexto.
 - `GET /api/snapshot?itemId=...` — lê Item, contas, transações e faturas com uma API Key gerada no backend.
 
 O aplicativo não recebe `CLIENT_ID`, `CLIENT_SECRET` nem `apiKey` da Pluggy.
 
 ## MeuPluggy
 
-Para uso individual, as instituições reais são mantidas no MeuPluggy e compartilhadas com a aplicação de desenvolvimento pelo conector MeuPluggy. O fluxo móvel precisa retornar ao mesmo navegador após a autorização OAuth; por isso o backend configura `oauthRedirectUri` e reutiliza o Connect Token da sessão até que `onSuccess` devolva o `itemId` ao aplicativo.
+Para uso individual, as instituições reais são mantidas no MeuPluggy e compartilhadas com a aplicação de desenvolvimento pelo conector MeuPluggy. O fluxo móvel pode voltar da autorização OAuth em uma nova aba/contexto; por isso o backend configura `oauthRedirectUri` e preserva temporariamente o Connect Token em cookie seguro até que `onSuccess` devolva o `itemId` ao aplicativo.
 
 Como `avoidDuplicates=true`, não mantenha simultaneamente um Item MeuPluggy criado apenas pela Demo do Dashboard e tente criar a mesma conexão novamente pelo app. Para validar a criação automática pelo app, remova o Item de demonstração correspondente antes da nova tentativa. Depois que o app capturar o `itemId`, as sincronizações seguintes reutilizam essa referência.
 
