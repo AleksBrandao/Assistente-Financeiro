@@ -112,6 +112,41 @@ class CreditCardBillingCycleTest {
     }
 
     @Test
+    fun centsOnlyResidualIsTreatedAsPaid() {
+        val closing = LocalDate.of(2026, 8, 14)
+        val due = LocalDate.of(2026, 8, 21)
+
+        assertEquals(
+            BigDecimal.ZERO,
+            CreditCardBillingCycle.outstandingAmount(
+                BigDecimal("1650.18"),
+                BigDecimal("1650.14"),
+            ),
+        )
+        assertEquals(
+            CreditCardInvoiceStatus.PAID,
+            CreditCardBillingCycle.paymentStatus(
+                BigDecimal("1650.18"),
+                BigDecimal("1650.14"),
+                closing,
+                due,
+                LocalDate.of(2026, 9, 7),
+            ),
+        )
+    }
+
+    @Test
+    fun materialResidualRemainsOutstanding() {
+        assertEquals(
+            BigDecimal("0.11"),
+            CreditCardBillingCycle.outstandingAmount(
+                BigDecimal("100.00"),
+                BigDecimal("99.89"),
+            ),
+        )
+    }
+
+    @Test
     fun futureCreditBalanceRemainsOpenInsteadOfPaid() {
         val closing = LocalDate.of(2026, 9, 11)
         val due = LocalDate.of(2026, 9, 18)
