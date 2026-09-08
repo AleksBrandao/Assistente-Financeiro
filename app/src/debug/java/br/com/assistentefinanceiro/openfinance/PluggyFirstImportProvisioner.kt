@@ -87,7 +87,8 @@ internal object PluggyFirstImportProvisioner {
                         id = null,
                         name = localName,
                         type = localType,
-                        closingDay = latestBill?.closingDate?.dayOfMonth,
+                        closingDay = latestBill?.closingDate?.dayOfMonth
+                            ?: accountPreview.account.creditData?.balanceCloseDate?.dayOfMonth,
                         dueDay = latestBill?.dueDate?.dayOfMonth
                             ?: accountPreview.account.creditData?.balanceDueDate?.dayOfMonth,
                         isDefault = makeDefault,

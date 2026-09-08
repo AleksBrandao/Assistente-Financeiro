@@ -36,6 +36,7 @@ data class PluggyBankData(
 data class PluggyCreditData(
     val creditLimit: BigDecimal? = null,
     val availableCreditLimit: BigDecimal? = null,
+    val balanceCloseDate: LocalDate? = null,
     val balanceDueDate: LocalDate? = null,
     val minimumPayment: BigDecimal? = null,
 )
