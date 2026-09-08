@@ -165,6 +165,7 @@ internal class PluggyReadOnlyClient(
                 PluggyCreditData(
                     creditLimit = credit.optBigDecimal("creditLimit"),
                     availableCreditLimit = credit.optBigDecimal("availableCreditLimit"),
+                    balanceCloseDate = credit.optLocalDate("balanceCloseDate"),
                     balanceDueDate = credit.optLocalDate("balanceDueDate"),
                     minimumPayment = credit.optBigDecimal("minimumPayment"),
                 )
