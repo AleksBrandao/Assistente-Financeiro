@@ -3,6 +3,7 @@ package br.com.assistentefinanceiro.ui.viewmodels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import br.com.assistentefinanceiro.data.FinancialRepository
+import br.com.assistentefinanceiro.data.statementEntriesWithFutureInstallments
 import br.com.assistentefinanceiro.notifications.MonthlyStatement
 import br.com.assistentefinanceiro.notifications.MonthlyStatementCalculator
 import br.com.assistentefinanceiro.ui.screens.LoadState
@@ -46,7 +47,7 @@ internal class AnnualSummaryViewModel(
     }
 
     private fun buildState(year: Int): AnnualSummaryUiState {
-        val entries = repository.statementEntries()
+        val entries = repository.statementEntriesWithFutureInstallments()
         val periods = periodsFor(year)
         return AnnualSummaryUiState(
             selectedYear = year,
