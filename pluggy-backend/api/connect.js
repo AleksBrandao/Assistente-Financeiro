@@ -10,8 +10,11 @@ export default async function handler(req, res) {
 <html lang="pt-BR">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Conectar Open Finance</title></head>
 <body><main><h2>Assistente Financeiro</h2><p>Preparando a conexão segura com o Open Finance…</p><div id="status"></div></main>
-<script src="https://cdn.pluggy.ai/pluggy-connect/v2.14.2/pluggy-connect.js"></script>
 <script>
+const SDK_URLS=[
+  'https://cdn.pluggy.ai/pluggy-connect/latest/pluggy-connect.js',
+  'https://cdn.pluggy.ai/pluggy-connect/v2.7.0/pluggy-connect.js'
+];
 const ACCESS_KEY='assistfinanceiro.pluggy.accessCode';
 const TOKEN_KEY='assistfinanceiro.pluggy.connectToken';
 const ITEM_KEY='assistfinanceiro.pluggy.updateItem';
@@ -30,6 +33,21 @@ function fail(message,error){
   const details=[message||'Não foi possível iniciar a conexão.',code&&('Código: '+code),id&&('Item: '+id)].filter(Boolean);
   statusEl.textContent=details.join(' — ');
 }
+function loadSdk(index=0){
+  if(typeof window.PluggyConnect==='function')return Promise.resolve();
+  if(index>=SDK_URLS.length)return Promise.reject(new Error('Não foi possível carregar o Pluggy Connect.'));
+  return new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+    script.src=SDK_URLS[index];
+    script.async=true;
+    script.onload=()=>{
+      if(typeof window.PluggyConnect==='function')resolve();
+      else reject(new Error('SDK carregado sem expor PluggyConnect'));
+    };
+    script.onerror=()=>reject(new Error('Falha ao carregar '+SDK_URLS[index]));
+    document.head.appendChild(script);
+  }).catch(()=>loadSdk(index+1));
+}
 if(hashAccessCode){
   storageSet(ACCESS_KEY,hashAccessCode);
   history.replaceState(null,'',location.pathname+location.search);
@@ -39,6 +57,7 @@ const accessCode=hashAccessCode||storageGet(ACCESS_KEY);
 const itemId=queryItemId||storageGet(ITEM_KEY);
 function openWidget(connectToken){
   if(!connectToken)return fail('Connect Token ausente.');
+  if(typeof window.PluggyConnect!=='function')return fail('Pluggy Connect não foi carregado.');
   storageSet(TOKEN_KEY,connectToken);
   const config={
     connectToken,
@@ -55,27 +74,36 @@ function openWidget(connectToken){
     onClose:()=>{statusEl.textContent='Conexão fechada. Você pode voltar ao aplicativo.'}
   };
   if(itemId)config.updateItem=itemId;
-  new PluggyConnect(config).init();
+  new window.PluggyConnect(config).init();
 }
-if(!accessCode){
-  fail('Código de acesso ausente. Volte ao aplicativo e tente novamente.');
-}else{
+async function start(){
+  if(!accessCode){
+    fail('Código de acesso ausente. Volte ao aplicativo e tente novamente.');
+    return;
+  }
+  try{
+    await loadSdk();
+  }catch(error){
+    fail(error.message,error);
+    return;
+  }
   const isOauthReturn=params.get('oauth')==='return';
   const storedToken=storageGet(TOKEN_KEY);
   if(isOauthReturn&&storedToken){
     statusEl.textContent='Retomando autorização…';
     openWidget(storedToken);
-  }else{
-    fetch('/api/connect-token',{
-      method:'POST',
-      headers:{'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+accessCode},
-      body:JSON.stringify(itemId?{itemId}:{})
-    }).then(async r=>{
-      const body=await r.json().catch(()=>({}));
-      if(!r.ok)throw Object.assign(new Error(body.message||'Falha ao obter Connect Token'),body);
-      return body;
-    }).then(({accessToken})=>openWidget(accessToken)).catch(error=>fail(error.message,error));
+    return;
   }
+  fetch('/api/connect-token',{
+    method:'POST',
+    headers:{'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+accessCode},
+    body:JSON.stringify(itemId?{itemId}:{})
+  }).then(async r=>{
+    const body=await r.json().catch(()=>({}));
+    if(!r.ok)throw Object.assign(new Error(body.message||'Falha ao obter Connect Token'),body);
+    return body;
+  }).then(({accessToken})=>openWidget(accessToken)).catch(error=>fail(error.message,error));
 }
+start();
 </script></body></html>`)
 }
