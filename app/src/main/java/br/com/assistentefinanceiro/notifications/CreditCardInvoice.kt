@@ -55,6 +55,8 @@ object InvoiceAdjustmentCalculator {
 }
 
 object CreditCardBillingCycle {
+    private val PAYMENT_SETTLEMENT_TOLERANCE = BigDecimal("0.10")
+
     fun calculate(
         purchaseDate: LocalDate,
         closingDay: Int,
@@ -84,6 +86,17 @@ object CreditCardBillingCycle {
         if (!today.isBefore(closingDate)) CreditCardInvoiceStatus.CLOSED
         else CreditCardInvoiceStatus.OPEN
 
+    /**
+     * Small settlement differences are ignored because banks can report the debit and the official
+     * Bill total with a few cents of difference. The bank debit remains authoritative for cash;
+     * this helper only decides whether a card liability is still materially outstanding.
+     */
+    fun outstandingAmount(total: BigDecimal, paidAmount: BigDecimal): BigDecimal {
+        if (total.signum() <= 0) return BigDecimal.ZERO
+        val remaining = (total - paidAmount).max(BigDecimal.ZERO)
+        return if (remaining <= PAYMENT_SETTLEMENT_TOLERANCE) BigDecimal.ZERO else remaining
+    }
+
     fun paymentStatus(
         total: BigDecimal,
         paidAmount: BigDecimal,
@@ -98,7 +111,7 @@ object CreditCardBillingCycle {
         // settle. Zero-balance closed invoices can safely be considered paid.
         if (total.signum() < 0) return CreditCardInvoiceStatus.CLOSED
         if (total.signum() == 0) return CreditCardInvoiceStatus.PAID
-        if (paidAmount >= total) return CreditCardInvoiceStatus.PAID
+        if (outstandingAmount(total, paidAmount).signum() == 0) return CreditCardInvoiceStatus.PAID
         if (dueDate != null && today.isAfter(dueDate)) return CreditCardInvoiceStatus.OVERDUE
         if (paidAmount.signum() > 0) return CreditCardInvoiceStatus.PARTIALLY_PAID
         return CreditCardInvoiceStatus.CLOSED
