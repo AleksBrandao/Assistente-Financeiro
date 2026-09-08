@@ -10,6 +10,7 @@ import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import br.com.assistentefinanceiro.notifications.FinancialTransactionDirection
 import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.FinancialTransactionType
+import br.com.assistentefinanceiro.notifications.InvoicePaymentRecord
 import br.com.assistentefinanceiro.notifications.TransactionOrigin
 import br.com.assistentefinanceiro.notifications.TransactionStatus
 import br.com.assistentefinanceiro.notifications.matchesCardLastFour
@@ -82,12 +83,12 @@ internal class BankInvoicePaymentReconciler(
         .filter { invoice ->
             val dueDate = invoice.dueDate ?: return@filter false
             invoice.total.signum() > 0 &&
-                abs(ChronoUnit.DAYS.between(dueDate, paymentDate)) <= PAYMENT_DATE_WINDOW_DAYS &&
+                dayDifference(dueDate, paymentDate) <= PAYMENT_DATE_WINDOW_DAYS &&
                 amountDifference(invoice.total, bankAmount) <= PAYMENT_AMOUNT_TOLERANCE
         }
         .minWithOrNull(
             compareBy<CreditCardInvoiceRecord> { invoice ->
-                abs(ChronoUnit.DAYS.between(invoice.dueDate, paymentDate))
+                dayDifference(checkNotNull(invoice.dueDate), paymentDate)
             }.thenBy { invoice -> amountDifference(invoice.total, bankAmount) },
         )
 
@@ -101,15 +102,15 @@ internal class BankInvoicePaymentReconciler(
         val payments = store.invoicePayments(invoice)
         val existing = payments
             .filter { payment ->
-                abs(ChronoUnit.DAYS.between(payment.paidAt, paymentDate)) <= PAYMENT_DATE_WINDOW_DAYS &&
+                dayDifference(payment.paidAt, paymentDate) <= PAYMENT_DATE_WINDOW_DAYS &&
                     (
                         amountDifference(payment.amount, bankAmount) <= PAYMENT_AMOUNT_TOLERANCE ||
                             amountDifference(payment.amount, invoice.total) <= PAYMENT_AMOUNT_TOLERANCE
                     )
             }
             .minWithOrNull(
-                compareBy<br.com.assistentefinanceiro.notifications.InvoicePaymentRecord> { payment ->
-                    abs(ChronoUnit.DAYS.between(payment.paidAt, paymentDate))
+                compareBy<InvoicePaymentRecord> { payment ->
+                    dayDifference(payment.paidAt, paymentDate)
                 }.thenBy { payment -> amountDifference(payment.amount, bankAmount) },
             )
 
@@ -159,13 +160,15 @@ internal class BankInvoicePaymentReconciler(
         }
 
         val paidAfter = db.rawQuery(
-            """SELECT COALESCE(SUM(CAST(amount AS REAL)),0)
-               FROM invoice_payments
+            """SELECT amount FROM invoice_payments
                WHERE account_id = ? AND closing_period = ?""",
             arrayOf(invoice.accountId.toString(), invoice.closingPeriod.toString()),
         ).use { cursor ->
-            cursor.moveToFirst()
-            cursor.getDouble(0).toBigDecimal()
+            var total = BigDecimal.ZERO
+            while (cursor.moveToNext()) {
+                total += cursor.getString(0).toBigDecimalOrNull() ?: BigDecimal.ZERO
+            }
+            total
         }
         if (CreditCardBillingCycle.outstandingAmount(invoice.total, paidAfter).signum() == 0) {
             db.update(
@@ -189,6 +192,9 @@ internal class BankInvoicePaymentReconciler(
             customCategory.equals("Credit card payment", ignoreCase = true)
         return categoryMatches || CARD_PAYMENT_DESCRIPTION_PATTERN.containsMatchIn(description)
     }
+
+    private fun dayDifference(first: LocalDate, second: LocalDate): Long =
+        abs(ChronoUnit.DAYS.between(first, second))
 
     private fun amountDifference(first: BigDecimal, second: BigDecimal): BigDecimal =
         (first - second).abs()
