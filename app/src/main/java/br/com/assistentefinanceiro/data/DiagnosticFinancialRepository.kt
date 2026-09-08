@@ -32,6 +32,7 @@ internal class DiagnosticFinancialRepository(
     private val store = DiagnosticStore(appContext)
     private val externalPersistence = ExternalImportPersistence(store)
     private val externalInvoiceConsistencyRepair = ExternalInvoiceConsistencyRepair(store)
+    private val bankInvoicePaymentReconciler = BankInvoicePaymentReconciler(store)
     private val invoiceDiagnosticExporter = InvoiceDiagnosticCsvExporter(store)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
 
@@ -219,6 +220,7 @@ internal class DiagnosticFinancialRepository(
     ): ExternalBillImportResult {
         val result = externalPersistence.importBills(drafts)
         externalInvoiceConsistencyRepair.repairAfterBillImport(drafts)
+        bankInvoicePaymentReconciler.reconcile()
         return result
     }
 
