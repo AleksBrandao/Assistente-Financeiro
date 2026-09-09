@@ -18,6 +18,12 @@ data class CategoryExpenseSummary(
     val sharePercent: Int,
 )
 
+data class StatementCalculationEntry(
+    val transaction: FinancialTransactionRecord,
+    val realizedAmount: BigDecimal? = null,
+    val pendingAmount: BigDecimal? = null,
+)
+
 data class MonthlyStatement(
     val period: YearMonth,
     val totalIncome: BigDecimal,
@@ -45,26 +51,53 @@ object MonthlyStatementCalculator {
     fun calculate(
         period: YearMonth,
         transactions: List<FinancialTransactionRecord>,
+    ): MonthlyStatement = calculateEntries(
+        period = period,
+        entries = transactions.map { transaction -> StatementCalculationEntry(transaction) },
+    )
+
+    fun calculateEntries(
+        period: YearMonth,
+        entries: List<StatementCalculationEntry>,
     ): MonthlyStatement {
-        val normalized = transactions.mapNotNull { transaction ->
+        val normalized = entries.mapNotNull { entry ->
+            val transaction = entry.transaction
             val originalOccurredAt = runCatching {
                 LocalDateTime.parse(transaction.occurredAt)
             }.getOrNull() ?: return@mapNotNull null
-            val effectiveDate = when (transaction.status) {
-                TransactionStatus.REALIZED -> transaction.paidAt?.let {
-                    runCatching { LocalDate.parse(it) }.getOrNull()
-                }
-                TransactionStatus.PENDING ->
-                    (transaction.plannedPaymentDate ?: transaction.dueDate)?.let {
-                    runCatching { LocalDate.parse(it) }.getOrNull()
+            val splitAmounts = entry.realizedAmount != null || entry.pendingAmount != null
+            val effectiveDate = if (splitAmounts) {
+                null
+            } else {
+                when (transaction.status) {
+                    TransactionStatus.REALIZED -> transaction.paidAt?.let {
+                        runCatching { LocalDate.parse(it) }.getOrNull()
+                    }
+                    TransactionStatus.PENDING ->
+                        (transaction.plannedPaymentDate ?: transaction.dueDate)?.let {
+                            runCatching { LocalDate.parse(it) }.getOrNull()
+                        }
                 }
             }
             val occurredAt = effectiveDate?.atStartOfDay() ?: originalOccurredAt
             val amount = transaction.amount.toBigDecimalOrNull()
                 ?.takeIf { it.signum() >= 0 }
                 ?: return@mapNotNull null
+            val realizedAmount = (entry.realizedAmount ?: if (
+                transaction.status == TransactionStatus.REALIZED
+            ) amount else BigDecimal.ZERO).takeIf { it.signum() >= 0 }
+                ?: return@mapNotNull null
+            val pendingAmount = (entry.pendingAmount ?: if (
+                transaction.status == TransactionStatus.PENDING
+            ) amount else BigDecimal.ZERO).takeIf { it.signum() >= 0 }
+                ?: return@mapNotNull null
 
-            NormalizedTransaction(transaction, occurredAt, amount)
+            NormalizedTransaction(
+                transaction = transaction,
+                occurredAt = occurredAt,
+                realizedAmount = realizedAmount,
+                pendingAmount = pendingAmount,
+            )
         }.filter { YearMonth.from(it.occurredAt) == period }
 
         val incomeItems = normalized.filter {
@@ -73,36 +106,24 @@ object MonthlyStatementCalculator {
         val expenseItems = normalized.filter {
             it.transaction.direction == FinancialTransactionDirection.EXPENSE
         }
-        val realizedIncomeItems = incomeItems.filter {
-            it.transaction.status == TransactionStatus.REALIZED
+        val totalIncome = incomeItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.realizedAmount
         }
-        val realizedExpenseItems = expenseItems.filter {
-            it.transaction.status == TransactionStatus.REALIZED
+        val totalExpense = expenseItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.realizedAmount
         }
-        val pendingIncomeItems = incomeItems.filter {
-            it.transaction.status == TransactionStatus.PENDING
+        val pendingIncome = incomeItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.pendingAmount
         }
-        val pendingExpenseItems = expenseItems.filter {
-            it.transaction.status == TransactionStatus.PENDING
-        }
-        val totalIncome = realizedIncomeItems.fold(BigDecimal.ZERO) { total, item ->
-            total + item.amount
-        }
-        val totalExpense = realizedExpenseItems.fold(BigDecimal.ZERO) { total, item ->
-            total + item.amount
-        }
-        val pendingIncome = pendingIncomeItems.fold(BigDecimal.ZERO) { total, item ->
-            total + item.amount
-        }
-        val pendingExpense = pendingExpenseItems.fold(BigDecimal.ZERO) { total, item ->
-            total + item.amount
+        val pendingExpense = expenseItems.fold(BigDecimal.ZERO) { total, item ->
+            total + item.pendingAmount
         }
         val projectedExpense = totalExpense + pendingExpense
         val categoryExpenses = expenseItems
             .groupBy { it.transaction.category }
             .map { (category, items) ->
                 val categoryTotal = items.fold(BigDecimal.ZERO) { total, item ->
-                    total + item.amount
+                    total + item.realizedAmount + item.pendingAmount
                 }
                 CategoryExpenseSummary(
                     category = category,
@@ -153,6 +174,7 @@ object MonthlyStatementCalculator {
     private data class NormalizedTransaction(
         val transaction: FinancialTransactionRecord,
         val occurredAt: LocalDateTime,
-        val amount: BigDecimal,
+        val realizedAmount: BigDecimal,
+        val pendingAmount: BigDecimal,
     )
 }

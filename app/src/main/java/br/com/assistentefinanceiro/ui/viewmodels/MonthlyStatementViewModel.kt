@@ -8,7 +8,6 @@ import br.com.assistentefinanceiro.importing.MobillsImportAccountReview
 import br.com.assistentefinanceiro.importing.MobillsImportAnalyzer
 import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.importing.SimpleXlsxReader
-import br.com.assistentefinanceiro.notifications.CreditCardInvoiceStatus
 import br.com.assistentefinanceiro.notifications.DailyTransactionGroup
 import br.com.assistentefinanceiro.notifications.FinancialAccountIdentity
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
@@ -17,6 +16,7 @@ import br.com.assistentefinanceiro.notifications.FinancialTransactionRecord
 import br.com.assistentefinanceiro.notifications.FinancialTransactionType
 import br.com.assistentefinanceiro.notifications.MonthlyStatement
 import br.com.assistentefinanceiro.notifications.MonthlyStatementCalculator
+import br.com.assistentefinanceiro.notifications.StatementCalculationEntry
 import br.com.assistentefinanceiro.notifications.TransactionCategory
 import br.com.assistentefinanceiro.notifications.TransactionSeriesScope
 import br.com.assistentefinanceiro.notifications.TransactionStatus
@@ -65,6 +65,7 @@ internal class MonthlyStatementViewModel(
     private val repository: FinancialRepository,
 ) : ViewModel() {
     private var transactions: List<FinancialTransactionRecord> = emptyList()
+    private var statementEntries: List<StatementCalculationEntry> = emptyList()
     private var invoiceItems: List<StatementInvoiceItem> = emptyList()
     private var creditCardAccountIds: Set<Long> = emptySet()
     private var balanceJob: Job? = null
@@ -348,13 +349,16 @@ internal class MonthlyStatementViewModel(
 
     private fun selectMonth(period: YearMonth) {
         val current = _uiState.value
-        val statement = MonthlyStatementCalculator.calculate(period, statementTransactions())
+        val statement = MonthlyStatementCalculator.calculateEntries(period, statementEntries)
         _uiState.value = current.copy(
             selectedMonth = period,
+            pendingOnly = false,
+            withoutCategoryOnly = false,
+            withoutSubcategoryOnly = false,
             statement = statement,
             visibleGroups = statement.groups,
             generalProjectedBalance = LoadState.Loading,
-        ).withVisibleGroups()
+        )
         loadProjectedBalance()
     }
 
@@ -382,36 +386,21 @@ internal class MonthlyStatementViewModel(
 
     private fun loadState(period: YearMonth): MonthlyStatementUiState {
         transactions = repository.recentTransactions(limit = 10_000)
+        statementEntries = repository.statementEntries()
         val creditCardAccounts = repository.financialAccounts()
             .filter { it.type == FinancialAccountType.CREDIT_CARD }
         val invoicesByAccount = creditCardAccounts.flatMap { account ->
             repository.creditCardInvoices(account.id).map { account to it }
         }
+        val statementTransactionByInvoiceId = statementEntries.mapNotNull { entry ->
+            entry.transaction.invoiceId?.let { invoiceId -> invoiceId to entry.transaction }
+        }.toMap()
         invoiceItems = invoicesByAccount.mapNotNull { (account, invoice) ->
-            val dueDate = invoice.dueDate ?: return@mapNotNull null
-            if (invoice.total.signum() == 0) return@mapNotNull null
-            val isCredit = invoice.total.signum() < 0
+            val transaction = statementTransactionByInvoiceId[invoice.id] ?: return@mapNotNull null
             StatementInvoiceItem(
                 account = account,
                 invoice = invoice,
-                transaction = FinancialTransactionRecord(
-                    id = -invoice.id,
-                    sourceEventId = null,
-                    direction = if (isCredit) FinancialTransactionDirection.INCOME
-                    else FinancialTransactionDirection.EXPENSE,
-                    type = if (isCredit) FinancialTransactionType.IMPORTED_INCOME
-                    else FinancialTransactionType.IMPORTED_EXPENSE,
-                    amount = invoice.total.abs().toPlainString(),
-                    occurredAt = dueDate.atTime(23, 59, 59).toString(),
-                    description = "Fatura ${account.name}",
-                    sourcePackage = "credit-card-invoice",
-                    status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                        TransactionStatus.REALIZED
-                    } else TransactionStatus.PENDING,
-                    account = account.name,
-                    accountId = account.id,
-                    invoiceId = invoice.id,
-                ),
+                transaction = transaction,
             )
         }
         creditCardAccountIds = creditCardAccounts.map { it.id }.toSet()
@@ -423,24 +412,18 @@ internal class MonthlyStatementViewModel(
                 transaction.invoiceId == null || transaction.invoiceId !in consolidatedInvoiceIds
                 )
         }
-        val statement = MonthlyStatementCalculator.calculate(period, statementTransactions())
+        val statement = MonthlyStatementCalculator.calculateEntries(period, statementEntries)
         return MonthlyStatementUiState(
             selectedMonth = period,
             statement = statement,
             visibleGroups = statement.groups,
             invoiceItemByTransactionId = invoiceItems.associateBy { it.transaction.id },
             unconsolidatedCardTransactionCount = unconsolidatedCount,
-            customCategories = FinancialTransactionDirection.entries.associateWith {
-                direction -> repository.customCategories(direction)
+            customCategories = FinancialTransactionDirection.entries.associateWith { direction ->
+                repository.customCategories(direction)
             },
         )
     }
-
-    private fun statementTransactions(): List<FinancialTransactionRecord> =
-        transactions.filterNot { transaction ->
-            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
-                (transaction.accountId != null && transaction.accountId in creditCardAccountIds)
-        } + invoiceItems.map { it.transaction }
 
     private fun loadProjectedBalance() {
         balanceJob?.cancel()
