@@ -52,6 +52,7 @@ import br.com.assistentefinanceiro.data.ExternalDataProvider
 import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import java.time.LocalDate
+import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -168,6 +169,11 @@ internal fun PluggyConnectedScreen(
     }
 
     pendingPlan?.let { plan ->
+        val diagnosticDate = LocalDate.now()
+        val futureDiagnostics = preview?.futureDataDiagnostics(
+            selectedExternalAccountIds = selectedForImport,
+            today = diagnosticDate,
+        )
         AlertDialog(
             onDismissRequest = { if (!loading) pendingPlan = null },
             title = { Text("Confirmar importação") },
@@ -180,14 +186,41 @@ internal fun PluggyConnectedScreen(
                         Text("${plan.skippedCreditCardPayments} crédito(s) serão tratados como pagamento de fatura.")
                     }
                     if (plan.skippedOutsideWindow > 0) {
-                        Text("${plan.skippedOutsideWindow} movimentação(ões) ficaram fora do período.")
+                        Text("${plan.skippedOutsideWindow} movimentação(ões) ficaram fora do período histórico.")
                     }
                     Text(
-                        "Período: " + (plan.windowStartDate?.toString() ?: "início disponível") +
+                        "Período histórico: " +
+                            (plan.windowStartDate?.toString() ?: "início disponível") +
                             " a ${plan.windowEndDate}.",
                     )
+                    futureDiagnostics?.let { diagnostics ->
+                        Text(
+                            "Dados futuros retornados pela Pluggy",
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "${diagnostics.futureTransactionCount} transação(ões) futura(s) • " +
+                                "${diagnostics.futureBillCount} fatura(s) futura(s).",
+                        )
+                        Text(
+                            "Maior data de transação: " +
+                                (diagnostics.latestTransactionDate?.toString() ?: "nenhuma") +
+                                " • maior vencimento de fatura: " +
+                                (diagnostics.latestBillDueDate?.toString() ?: "nenhum") + ".",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (
+                            diagnostics.futureTransactionCount == 0 &&
+                            diagnostics.futureBillCount == 0
+                        ) {
+                            Text(
+                                "Neste snapshot, a Pluggy não retornou registros com data posterior a $diagnosticDate.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                     Text(
-                        "PENDING permanece pendente; POSTED permanece realizado. A sincronização é idempotente.",
+                        "PENDING permanece pendente; POSTED permanece realizado. Dados futuros só entram quando vierem da Pluggy.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -614,6 +647,36 @@ internal fun PluggyConnectedScreen(
             }
         }
     }
+}
+
+private data class PluggyFutureDataDiagnostics(
+    val futureTransactionCount: Int,
+    val futureBillCount: Int,
+    val latestTransactionDate: LocalDate?,
+    val latestBillDueDate: LocalDate?,
+)
+
+private fun PluggySandboxPreview.futureDataDiagnostics(
+    selectedExternalAccountIds: Set<String>,
+    today: LocalDate,
+): PluggyFutureDataDiagnostics {
+    val selectedAccounts = accounts.filter { preview ->
+        preview.account.externalId in selectedExternalAccountIds
+    }
+    val transactionDates = selectedAccounts.flatMap { preview ->
+        preview.transactions.map { transaction ->
+            transaction.date.atZone(ZoneId.systemDefault()).toLocalDate()
+        }
+    }
+    val billDueDates = selectedAccounts.flatMap { preview ->
+        preview.bills.map { bill -> bill.dueDate }
+    }
+    return PluggyFutureDataDiagnostics(
+        futureTransactionCount = transactionDates.count { it.isAfter(today) },
+        futureBillCount = billDueDates.count { it.isAfter(today) },
+        latestTransactionDate = transactionDates.maxOrNull(),
+        latestBillDueDate = billDueDates.maxOrNull(),
+    )
 }
 
 private fun buildConnectedReconciliation(
