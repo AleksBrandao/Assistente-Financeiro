@@ -6,8 +6,10 @@ import br.com.assistentefinanceiro.data.ExternalDataProvider
 import br.com.assistentefinanceiro.data.FinancialRepository
 import br.com.assistentefinanceiro.notifications.FinancialAccountType
 import java.time.LocalDate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Consumes the durable webhook signal created by the backend.
@@ -24,12 +26,14 @@ internal object PluggyAutoSyncFeature {
         repository: FinancialRepository,
     ) {
         mutex.withLock {
-            runCatching {
-                syncIfPendingLocked(context.applicationContext, repository)
-            }.onFailure { error ->
-                // Foreground startup must never fail because the provider/backend is temporarily
-                // unavailable. The webhook remains pending and will be retried on a later start.
-                Log.w(TAG, "Webhook-triggered Open Finance sync failed", error)
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    syncIfPendingLocked(context.applicationContext, repository)
+                }.onFailure { error ->
+                    // Foreground startup must never fail because the provider/backend is temporarily
+                    // unavailable. The webhook remains pending and will be retried on a later start.
+                    Log.w(TAG, "Webhook-triggered Open Finance sync failed", error)
+                }
             }
         }
     }
@@ -88,11 +92,12 @@ internal object PluggyAutoSyncFeature {
         val localInvoicesByAccount = localAccounts
             .filter { it.id in linkedAccountIds && it.type == FinancialAccountType.CREDIT_CARD }
             .associate { account -> account.id to repository.creditCardInvoices(account.id) }
+        val localTransactions = repository.granularTransactions()
         val reconciliation = PluggyReconciliationEngine.reconcile(
             PluggyReconciliationInput(
                 pluggyAccounts = datasets,
                 localAccounts = localAccounts,
-                localTransactions = repository.granularTransactions(),
+                localTransactions = localTransactions,
                 localInvoicesByAccount = localInvoicesByAccount,
                 confirmedAccountLinks = confirmedLinks,
             ),
@@ -102,7 +107,7 @@ internal object PluggyAutoSyncFeature {
             datasets = datasets,
             reconciliation = reconciliation,
             selectedExternalAccountIds = selectedExternalAccountIds,
-            localTransactions = repository.granularTransactions(),
+            localTransactions = localTransactions,
             today = today,
             lookbackDays = null,
             startDate = null,
