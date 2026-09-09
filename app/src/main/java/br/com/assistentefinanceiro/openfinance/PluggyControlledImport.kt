@@ -34,6 +34,9 @@ data class PluggyControlledImportPlan(
  * Builds an explicit import plan. PENDING movements are retained as pending, already imported
  * Pluggy movements are sent through again so persistence can update them idempotently, and card
  * credits are retained unless they match a payment explicitly reported by a Pluggy Bill.
+ *
+ * The selected window controls historical import. Records whose own date is in the future are also
+ * retained when Pluggy explicitly supplied them; the app does not synthesize missing installments.
  */
 object PluggyControlledImportPlanner {
     fun plan(
@@ -48,7 +51,6 @@ object PluggyControlledImportPlanner {
         zoneId: ZoneId = ZoneId.systemDefault(),
     ): PluggyControlledImportPlan {
         require(lookbackDays == null || lookbackDays > 0)
-        require(!endDate.isAfter(today)) { "endDate cannot be in the future" }
         val earliest = startDate ?: lookbackDays?.let(today::minusDays)
         require(earliest == null || !earliest.isAfter(endDate))
 
@@ -69,8 +71,13 @@ object PluggyControlledImportPlanner {
         }
         val datasetsById = datasets.associateBy { it.account.externalId }
 
-        fun insideWindow(date: LocalDate): Boolean =
+        fun insideRequestedWindow(date: LocalDate): Boolean =
             (earliest == null || !date.isBefore(earliest)) && !date.isAfter(endDate)
+
+        // A future record is imported only when it exists in the Pluggy payload. This does not
+        // infer or generate any missing future transaction.
+        fun shouldImportProviderDate(date: LocalDate): Boolean =
+            insideRequestedWindow(date) || date.isAfter(today)
 
         selectedResults.forEach { accountResult ->
             val dataset = datasetsById[accountResult.pluggyAccountExternalId] ?: return@forEach
@@ -82,10 +89,11 @@ object PluggyControlledImportPlanner {
             val localForMatching = localForAccount.filter { it.origin != TransactionOrigin.PLUGGY }
             val billsById = dataset.bills.associateBy { it.externalId }
             val billPayments = dataset.bills.flatMap { it.payments }
+            val referencedBillIds = mutableSetOf<String>()
 
             dataset.transactions.forEach { remote ->
                 val accountingDate = remote.date.atZone(zoneId).toLocalDate()
-                if (!insideWindow(accountingDate)) {
+                if (!shouldImportProviderDate(accountingDate)) {
                     skippedOutsideWindow++
                     return@forEach
                 }
@@ -122,6 +130,7 @@ object PluggyControlledImportPlanner {
                 val type = transactionType(dataset.account.type, remote, direction)
                 val (category, customCategory) = importedCategory(remote.category, direction)
                 val officialBill = remote.billExternalId?.let(billsById::get)
+                remote.billExternalId?.let(referencedBillIds::add)
                 drafts += ExternalTransactionImportDraft(
                     provider = ExternalDataProvider.PLUGGY,
                     externalTransactionId = remote.externalId,
@@ -154,7 +163,11 @@ object PluggyControlledImportPlanner {
             }
 
             dataset.bills
-                .filter { insideWindow(it.dueDate) }
+                // Keep Bills explicitly returned by Pluggy for future dates as well as Bills
+                // referenced by an imported transaction. No future Bill is created synthetically.
+                .filter {
+                    shouldImportProviderDate(it.dueDate) || it.externalId in referencedBillIds
+                }
                 .forEach { bill ->
                     billDrafts += ExternalBillImportDraft(
                         provider = ExternalDataProvider.PLUGGY,
@@ -165,7 +178,9 @@ object PluggyControlledImportPlanner {
                         closingDate = bill.closingDate,
                         totalAmount = bill.totalAmount.abs(),
                         payments = bill.payments
-                            .filter { it.amount.signum() > 0 }
+                            .filter {
+                                it.amount.signum() > 0 && !it.paymentDate.isAfter(today)
+                            }
                             .map { payment ->
                                 ExternalBillPaymentDraft(
                                     externalPaymentId = payment.externalId,

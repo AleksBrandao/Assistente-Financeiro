@@ -31,11 +31,16 @@ internal class DiagnosticFinancialRepository(
     private val appContext = context.applicationContext
     private val store = DiagnosticStore(appContext)
     private val externalPersistence = ExternalImportPersistence(store)
+    private val externalInvoiceConsistencyRepair = ExternalInvoiceConsistencyRepair(store)
+    private val bankInvoicePaymentReconciler = BankInvoicePaymentReconciler(store)
     private val invoiceDiagnosticExporter = InvoiceDiagnosticCsvExporter(store)
     private val budgetAlerts = BudgetAlertManager(appContext, store)
 
     init {
         NotificationTimestampRepair.repairOnce(store)
+        // Repair data imported by older builds too. This removes the dependency on running another
+        // Open Finance Bill sync after installing a version that knows how to reconcile the debit.
+        bankInvoicePaymentReconciler.reconcile()
     }
 
     override fun candidates(): List<Pair<String, String>> = store.candidates()
@@ -215,7 +220,12 @@ internal class DiagnosticFinancialRepository(
 
     override fun importExternalBills(
         drafts: List<ExternalBillImportDraft>,
-    ): ExternalBillImportResult = externalPersistence.importBills(drafts)
+    ): ExternalBillImportResult {
+        val result = externalPersistence.importBills(drafts)
+        externalInvoiceConsistencyRepair.repairAfterBillImport(drafts)
+        bankInvoicePaymentReconciler.reconcile()
+        return result
+    }
 
     override fun deletedTransactionGroups(): List<DeletedTransactionGroup> =
         store.deletedTransactionGroups()
@@ -228,7 +238,11 @@ internal class DiagnosticFinancialRepository(
 
     override fun createBackupJson(): String = store.createBackupJson()
     override fun previewBackup(content: String): BackupValidationResult = store.previewBackup(content)
-    override fun restoreBackup(content: String): Boolean = store.restoreBackup(content)
+    override fun restoreBackup(content: String): Boolean {
+        val restored = store.restoreBackup(content)
+        if (restored) bankInvoicePaymentReconciler.reconcile()
+        return restored
+    }
     override fun exportTransactionsCsv(): String = store.exportTransactionsCsv()
     override fun exportInvoiceDiagnosticsCsv(): String = invoiceDiagnosticExporter.export()
 }

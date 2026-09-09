@@ -46,6 +46,11 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/assistente-financeiro.jks"
 
+      - name: Preparar identidade do app de teste CI
+        run: |
+          echo "CI_TEST_APK=true" >> "$GITHUB_ENV"
+          echo "CI_TEST_VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+
       - name: Executar testes e gerar APK assinado
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/assistente-financeiro.jks
@@ -63,7 +68,7 @@ jobs:
           VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
           test -n "$VERSION"
           PR_NUMBER="${{ github.event.pull_request.number || 'manual' }}"
-          FILE_NAME="AssistenteFinanceiro-$VERSION-PR-$PR_NUMBER.apk"
+          FILE_NAME="AssistenteFinanceiro-TesteCI-$VERSION-PR-$PR_NUMBER.apk"
           cp app/build/outputs/apk/release/app-release.apk "$FILE_NAME"
           sha256sum "$FILE_NAME" > "$FILE_NAME.sha256"
           echo "file=$FILE_NAME" >> "$GITHUB_OUTPUT"
@@ -71,7 +76,7 @@ jobs:
       - name: Disponibilizar APK para teste
         uses: actions/upload-artifact@v4
         with:
-          name: apk-teste-${{ github.event.pull_request.number || 'manual' }}
+          name: apk-teste-ci-${{ github.event.pull_request.number || 'manual' }}
           path: |
             ${{ steps.apk.outputs.file }}
             ${{ steps.apk.outputs.file }}.sha256

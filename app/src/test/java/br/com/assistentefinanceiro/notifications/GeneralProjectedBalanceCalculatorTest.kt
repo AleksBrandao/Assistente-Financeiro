@@ -83,7 +83,7 @@ class GeneralProjectedBalanceCalculatorTest {
     }
 
     @Test
-    fun keepsUnlinkedInvoicePaymentInTotalDeduction() {
+    fun unlinkedInvoicePaymentOnlyReducesLiabilityInsteadOfBeingDeductedAgain() {
         val bank = bankAccount(openingBalance = "1000.00")
         val card = creditCard()
         val invoice = invoice(
@@ -99,7 +99,27 @@ class GeneralProjectedBalanceCalculatorTest {
             paymentsByInvoice = mapOf(invoice.id to listOf(payment)),
         )
 
-        assertEquals(BigDecimal("700.00"), result)
+        assertEquals(BigDecimal("800.00"), result)
+    }
+
+    @Test
+    fun centsOnlyInvoiceResidualDoesNotReduceProjectedBalance() {
+        val bank = bankAccount(openingBalance = "1000.00")
+        val card = creditCard()
+        val invoice = invoice(
+            total = "1650.18",
+            paidAmount = "1650.14",
+            status = CreditCardInvoiceStatus.PAID,
+        )
+        val payment = payment(amount = "1650.14", sourceAccountId = null)
+
+        val result = calculate(
+            accounts = listOf(bank, card),
+            invoices = listOf(invoice),
+            paymentsByInvoice = mapOf(invoice.id to listOf(payment)),
+        )
+
+        assertEquals(BigDecimal("1000.00"), result)
     }
 
     @Test
