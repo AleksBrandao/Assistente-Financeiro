@@ -15,6 +15,7 @@ Backend serverless mínimo para manter `PLUGGY_CLIENT_ID` e `PLUGGY_CLIENT_SECRE
 3. Conecte ao projeto um **Vercel Blob privado**. O SDK `@vercel/blob` usa a credencial/OIDC fornecida pela Vercel e mantém o estado de webhook fora da memória efêmera das Functions.
 4. Faça o deploy.
 5. No app de teste, informe uma única vez a URL HTTPS do projeto e o mesmo `APP_ACCESS_CODE`.
+6. Pelo celular, abra `GET /api/webhook-setup`, informe o `APP_ACCESS_CODE` e toque em **Registrar webhooks**.
 
 ## Rotas
 
@@ -26,6 +27,7 @@ Backend serverless mínimo para manter `PLUGGY_CLIENT_ID` e `PLUGGY_CLIENT_SECRE
 - `GET /api/webhook-status?itemId=...` — informa ao app se surgiram mudanças desde a última sincronização conhecida.
 - `POST /api/webhook-status` — confirma um sinal após sincronização; recebe `itemId` e opcionalmente `throughEventId`. Se um evento mais novo tiver chegado durante a sincronização, ele não é apagado.
 - `POST /api/webhook-register` — registra de forma idempotente os webhooks suportados na aplicação Pluggy.
+- `GET /api/webhook-setup` — tela simples, voltada ao uso no celular, que envia o código de pareamento somente no cabeçalho e chama `/api/webhook-register`.
 
 O aplicativo não recebe `CLIENT_ID`, `CLIENT_SECRET`, `apiKey`, `PLUGGY_WEBHOOK_SECRET` nem credenciais do Blob.
 
