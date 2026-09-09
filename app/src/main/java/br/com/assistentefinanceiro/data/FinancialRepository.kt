@@ -4,8 +4,8 @@ import br.com.assistentefinanceiro.importing.MobillsImportPreview
 import br.com.assistentefinanceiro.notifications.AccountBalanceSummary
 import br.com.assistentefinanceiro.notifications.AccountMovementRecord
 import br.com.assistentefinanceiro.notifications.BackupValidationResult
+import br.com.assistentefinanceiro.notifications.CreditCardBillingCycle
 import br.com.assistentefinanceiro.notifications.CreditCardInvoiceRecord
-import br.com.assistentefinanceiro.notifications.CreditCardInvoiceStatus
 import br.com.assistentefinanceiro.notifications.DeletedTransactionGroup
 import br.com.assistentefinanceiro.notifications.DiagnosticEvent
 import br.com.assistentefinanceiro.notifications.FinancialAccountRecord
@@ -16,7 +16,9 @@ import br.com.assistentefinanceiro.notifications.FinancialTransactionType
 import br.com.assistentefinanceiro.notifications.InvoicePaymentRecord
 import br.com.assistentefinanceiro.notifications.MobillsImportResult
 import br.com.assistentefinanceiro.notifications.MonthlyBudgetRecord
+import br.com.assistentefinanceiro.notifications.StatementCalculationEntry
 import br.com.assistentefinanceiro.notifications.TransactionCategory
+import br.com.assistentefinanceiro.notifications.TransactionOrigin
 import br.com.assistentefinanceiro.notifications.TransactionSeriesScope
 import br.com.assistentefinanceiro.notifications.TransactionStatus
 import java.math.BigDecimal
@@ -137,45 +139,127 @@ interface FinancialRepository {
     fun exportTransactionsCsv(): String
     fun exportInvoiceDiagnosticsCsv(): String
 
+    /**
+     * Granular expense source used by budgets and category analytics. A debit that merely pays a
+     * credit-card invoice is a transfer between tracked positions, not a new expense: the original
+     * card purchases already carry the economic expense and must remain the granular source.
+     */
     fun granularTransactions(): List<FinancialTransactionRecord> = recentTransactions(10_000)
+        .filterNot(FinancialTransactionRecord::isImportedCreditCardPaymentTransfer)
 
-    fun consolidatedTransactions(): List<FinancialTransactionRecord> {
-        val transactions = recentTransactions(10_000)
+    /**
+     * Cash-flow statement source. Card purchases stay granular for budgets, but statements replace
+     * them with one invoice row in the due-month competence. A partially paid invoice contributes
+     * the settled amount to realized totals and only the remaining balance to pending totals.
+     */
+    fun statementEntries(): List<StatementCalculationEntry> {
+        val transactions = granularTransactions()
         val cards = financialAccounts().filter {
             it.type == FinancialAccountType.CREDIT_CARD
         }
         val cardIds = cards.map { it.id }.toSet()
-        val invoices = cards.flatMap { account ->
+        val nonCardEntries = transactions.filterNot { transaction ->
+            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
+                (transaction.accountId != null && transaction.accountId in cardIds)
+        }.map { transaction -> StatementCalculationEntry(transaction) }
+
+        val invoiceEntries = cards.flatMap { account ->
             creditCardInvoices(account.id).mapNotNull { invoice ->
                 val due = invoice.dueDate ?: return@mapNotNull null
                 if (invoice.total.signum() == 0) return@mapNotNull null
-                val paidAt = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                    invoicePayments(invoice).maxOfOrNull { it.paidAt }
-                } else null
-                FinancialTransactionRecord(
+                val isCredit = invoice.total.signum() < 0
+                val absoluteTotal = invoice.total.abs()
+                val realizedAmount: BigDecimal
+                val pendingAmount: BigDecimal
+                if (isCredit) {
+                    realizedAmount = BigDecimal.ZERO
+                    pendingAmount = absoluteTotal
+                } else {
+                    val recordedPaid = invoice.paidAmount
+                        .max(BigDecimal.ZERO)
+                        .min(absoluteTotal)
+                    val remaining = CreditCardBillingCycle.outstandingAmount(
+                        total = absoluteTotal,
+                        paidAmount = recordedPaid,
+                    )
+                    if (recordedPaid.signum() > 0 && remaining.signum() == 0) {
+                        // Normalize a settled cents-only difference to the official Bill total so
+                        // statement totals do not retain an artificial pending residue.
+                        realizedAmount = absoluteTotal
+                        pendingAmount = BigDecimal.ZERO
+                    } else {
+                        realizedAmount = recordedPaid
+                        pendingAmount = remaining
+                    }
+                }
+                val transaction = FinancialTransactionRecord(
                     id = -invoice.id,
                     sourceEventId = null,
-                    direction = if (invoice.total.signum() < 0) {
+                    direction = if (isCredit) {
                         FinancialTransactionDirection.INCOME
                     } else FinancialTransactionDirection.EXPENSE,
-                    type = if (invoice.total.signum() < 0) {
+                    type = if (isCredit) {
                         FinancialTransactionType.IMPORTED_INCOME
                     } else FinancialTransactionType.IMPORTED_EXPENSE,
-                    amount = invoice.total.abs().toPlainString(),
-                    occurredAt = due.atStartOfDay().toString(),
+                    amount = absoluteTotal.toPlainString(),
+                    occurredAt = due.atTime(23, 59, 59).toString(),
                     description = "Fatura ${account.name}",
                     sourcePackage = "credit-card-invoice",
-                    status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                    status = if (pendingAmount.signum() == 0) {
                         TransactionStatus.REALIZED
                     } else TransactionStatus.PENDING,
+                    account = account.name,
+                    accountId = account.id,
+                    invoiceId = invoice.id,
                     dueDate = due.toString(),
-                    paidAt = paidAt?.toString(),
+                )
+                StatementCalculationEntry(
+                    transaction = transaction,
+                    realizedAmount = realizedAmount,
+                    pendingAmount = pendingAmount,
                 )
             }
         }
-        return transactions.filterNot { transaction ->
-            transaction.type == FinancialTransactionType.CARD_PURCHASE ||
-                (transaction.accountId != null && transaction.accountId in cardIds)
-        } + invoices
+        return nonCardEntries + invoiceEntries
     }
+
+    /**
+     * Pending-oriented consolidated view retained for planning screens. For a partially paid
+     * invoice the synthetic row carries only the amount still outstanding, preventing the full
+     * invoice from being counted as pending again.
+     */
+    fun consolidatedTransactions(): List<FinancialTransactionRecord> = statementEntries().mapNotNull { entry ->
+        val hasSplit = entry.realizedAmount != null || entry.pendingAmount != null
+        if (!hasSplit) return@mapNotNull entry.transaction
+        val pending = entry.pendingAmount ?: BigDecimal.ZERO
+        val realized = entry.realizedAmount ?: BigDecimal.ZERO
+        when {
+            pending.signum() > 0 -> entry.transaction.copy(
+                amount = pending.toPlainString(),
+                status = TransactionStatus.PENDING,
+            )
+            realized.signum() > 0 -> entry.transaction.copy(
+                amount = realized.toPlainString(),
+                status = TransactionStatus.REALIZED,
+            )
+            else -> null
+        }
+    }
+}
+
+private val CARD_PAYMENT_DESCRIPTION_PATTERN = Regex(
+    """\bFATURA\s+CARTAO\b.*\bFINAL\s*\d{4}\b""",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun FinancialTransactionRecord.isImportedCreditCardPaymentTransfer(): Boolean {
+    if (
+        origin != TransactionOrigin.PLUGGY ||
+        direction != FinancialTransactionDirection.EXPENSE ||
+        type != FinancialTransactionType.IMPORTED_EXPENSE
+    ) return false
+
+    return originalCategory.equals("Credit card payment", ignoreCase = true) ||
+        customCategory.equals("Credit card payment", ignoreCase = true) ||
+        CARD_PAYMENT_DESCRIPTION_PATTERN.containsMatchIn(description)
 }

@@ -8,6 +8,10 @@ val releaseKeystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH")
 val releaseKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
 val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+val ciTestApk = providers.environmentVariable("CI_TEST_APK").orNull
+    ?.equals("true", ignoreCase = true) == true
+val ciTestVersionCode = providers.environmentVariable("CI_TEST_VERSION_CODE").orNull
+    ?.toIntOrNull()
 val releaseSigningConfigured = listOf(
     releaseKeystorePath,
     releaseKeystorePassword,
@@ -23,7 +27,7 @@ android {
         applicationId = "br.com.assistentefinanceiro"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
+        versionCode = ciTestVersionCode ?: 25
         versionName = "0.22.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appLabel"] = "Assistente Financeiro"
@@ -48,6 +52,11 @@ android {
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.findByName("release")
+            if (ciTestApk) {
+                applicationIdSuffix = ".citest"
+                versionNameSuffix = "-ci-test"
+                manifestPlaceholders["appLabel"] = "Assistente Financeiro (Teste CI)"
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

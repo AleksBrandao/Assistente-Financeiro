@@ -199,6 +199,159 @@ class ExternalImportPersistenceIntegrationTest {
         assertEquals(2, second.billsSynced)
     }
 
+    @Test
+    fun officialBillRelinksExistingTransactionBeforeRecalculatingAdjustment() {
+        val repository = DiagnosticFinancialRepository(context)
+        val account = createCard(repository)
+        repository.importExternalTransactions(
+            listOf(
+                ExternalTransactionImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalTransactionId = "tx-july",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    direction = FinancialTransactionDirection.EXPENSE,
+                    type = FinancialTransactionType.CARD_PURCHASE,
+                    amount = BigDecimal("80.00"),
+                    occurredAt = LocalDateTime.parse("2026-07-10T12:00:00"),
+                    description = "Compra julho",
+                    status = TransactionStatus.REALIZED,
+                    origin = TransactionOrigin.PLUGGY,
+                    billForecastPeriod = YearMonth.of(2026, 8),
+                    externalBillId = "bill-july",
+                ),
+            ),
+        )
+        assertEquals(
+            YearMonth.of(2026, 8),
+            repository.creditCardInvoices(account.id).single().closingPeriod,
+        )
+
+        repository.importExternalBills(
+            listOf(
+                ExternalBillImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalBillId = "bill-july",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    closingDate = LocalDate.of(2026, 7, 14),
+                    dueDate = LocalDate.of(2026, 7, 21),
+                    totalAmount = BigDecimal("100.00"),
+                ),
+            ),
+        )
+
+        val july = repository.creditCardInvoices(account.id)
+            .single { it.closingPeriod == YearMonth.of(2026, 7) }
+        val transaction = repository.recentTransactions(10).single()
+        assertEquals(july.id, transaction.invoiceId)
+        assertEquals(1, july.transactionCount)
+        assertEquals(0, july.baseTotal.compareTo(BigDecimal("80.00")))
+        assertEquals(0, july.adjustmentAmount.compareTo(BigDecimal("20.00")))
+        assertEquals(0, july.total.compareTo(BigDecimal("100.00")))
+    }
+
+    @Test
+    fun transactionAfterOfficialClosingIsMovedToForecastCycle() {
+        val repository = DiagnosticFinancialRepository(context)
+        val account = createCard(repository)
+        repository.importExternalTransactions(
+            listOf(
+                ExternalTransactionImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalTransactionId = "late-tx",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    direction = FinancialTransactionDirection.EXPENSE,
+                    type = FinancialTransactionType.CARD_PURCHASE,
+                    amount = BigDecimal("80.00"),
+                    occurredAt = LocalDateTime.parse("2026-08-16T12:00:00"),
+                    description = "Compra após fechamento",
+                    status = TransactionStatus.PENDING,
+                    origin = TransactionOrigin.PLUGGY,
+                    billForecastPeriod = YearMonth.of(2026, 9),
+                    externalBillId = "bill-august",
+                    invoiceClosingDate = LocalDate.of(2026, 8, 14),
+                    invoiceDueDate = LocalDate.of(2026, 8, 21),
+                ),
+            ),
+        )
+
+        repository.importExternalBills(
+            listOf(
+                ExternalBillImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalBillId = "bill-august",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    closingDate = LocalDate.of(2026, 8, 14),
+                    dueDate = LocalDate.of(2026, 8, 21),
+                    totalAmount = BigDecimal("50.00"),
+                ),
+            ),
+        )
+
+        val invoices = repository.creditCardInvoices(account.id)
+        val august = invoices.single { it.closingPeriod == YearMonth.of(2026, 8) }
+        val september = invoices.single { it.closingPeriod == YearMonth.of(2026, 9) }
+        val transaction = repository.recentTransactions(10).single()
+        assertEquals(0, august.transactionCount)
+        assertEquals(0, august.total.compareTo(BigDecimal("50.00")))
+        assertEquals(september.id, transaction.invoiceId)
+        assertEquals(1, september.transactionCount)
+        assertEquals(0, september.total.compareTo(BigDecimal("80.00")))
+    }
+
+    @Test
+    fun externalPaymentDoesNotSettleUnbackedProvisionalInvoice() {
+        val repository = DiagnosticFinancialRepository(context)
+        val account = createCard(repository)
+        repository.importExternalTransactions(
+            listOf(
+                ExternalTransactionImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalTransactionId = "provisional-july",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    direction = FinancialTransactionDirection.EXPENSE,
+                    type = FinancialTransactionType.CARD_PURCHASE,
+                    amount = BigDecimal("100.00"),
+                    occurredAt = LocalDateTime.parse("2026-07-10T12:00:00"),
+                    description = "Compra julho",
+                    status = TransactionStatus.REALIZED,
+                    origin = TransactionOrigin.PLUGGY,
+                ),
+            ),
+        )
+        val july = repository.creditCardInvoices(account.id).single()
+
+        repository.importExternalBills(
+            listOf(
+                ExternalBillImportDraft(
+                    provider = ExternalDataProvider.PLUGGY,
+                    externalBillId = "bill-august",
+                    externalAccountId = "remote-card",
+                    localAccountId = account.id,
+                    closingDate = LocalDate.of(2026, 8, 14),
+                    dueDate = LocalDate.of(2026, 8, 21),
+                    totalAmount = BigDecimal("50.00"),
+                    payments = listOf(
+                        ExternalBillPaymentDraft(
+                            externalPaymentId = "payment-unknown-previous",
+                            amount = BigDecimal("100.00"),
+                            paidAt = LocalDate.of(2026, 7, 21),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val refreshedJuly = repository.creditCardInvoices(account.id)
+            .single { it.id == july.id }
+        assertEquals(0, refreshedJuly.paidAmount.compareTo(BigDecimal.ZERO))
+        assertTrue(repository.invoicePayments(refreshedJuly).isEmpty())
+    }
+
     private fun createCard(
         repository: DiagnosticFinancialRepository,
         closingDay: Int = 14,

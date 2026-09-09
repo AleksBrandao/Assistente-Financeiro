@@ -8,6 +8,7 @@ import br.com.assistentefinanceiro.notifications.TransactionStatus
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -209,6 +210,115 @@ class PluggyControlledImportTest {
         assertEquals(1, plan.skippedCreditCardPayments)
         assertEquals(1, plan.billDrafts.size)
         assertEquals(1, plan.billDrafts.single().payments.size)
+    }
+
+    @Test
+    fun referencedFutureBillIsIncludedEvenWhenDueDateIsOutsideWindow() {
+        val account = cardAccount()
+        val purchase = PluggyTransactionSnapshot(
+            externalId = "pending-purchase",
+            accountExternalId = "card-remote",
+            amount = BigDecimal("80.00"),
+            date = Instant.parse("2026-09-04T12:00:00Z"),
+            direction = PluggyTransactionDirection.DEBIT,
+            status = PluggyTransactionStatus.PENDING,
+            description = "Compra pendente",
+            billExternalId = "bill-september",
+        )
+        val futureBill = PluggyBillSnapshot(
+            externalId = "bill-september",
+            accountExternalId = "card-remote",
+            dueDate = LocalDate.of(2026, 9, 5),
+            closingDate = LocalDate.of(2026, 8, 29),
+            totalAmount = BigDecimal("80.00"),
+            minimumPaymentAmount = null,
+            allowsInstallments = false,
+            payments = listOf(
+                PluggyBillPaymentSnapshot(
+                    externalId = "historical-payment",
+                    amount = BigDecimal("20.00"),
+                    paymentDate = LocalDate.of(2026, 8, 21),
+                ),
+                PluggyBillPaymentSnapshot(
+                    externalId = "future-payment",
+                    amount = BigDecimal("60.00"),
+                    paymentDate = LocalDate.of(2026, 9, 6),
+                ),
+            ),
+        )
+
+        val plan = PluggyControlledImportPlanner.plan(
+            datasets = listOf(PluggyAccountDataset(account, listOf(purchase), listOf(futureBill))),
+            reconciliation = reconciliation(
+                9, "Cartão local", "card-remote", "Cartão", PluggyAccountType.CREDIT,
+            ),
+            selectedExternalAccountIds = setOf("card-remote"),
+            localTransactions = emptyList(),
+            today = LocalDate.of(2026, 9, 4),
+            startDate = LocalDate.of(2026, 9, 1),
+            endDate = LocalDate.of(2026, 9, 4),
+            zoneId = ZoneOffset.UTC,
+        )
+
+        assertEquals(1, plan.drafts.size)
+        assertEquals(1, plan.billDrafts.size)
+        assertEquals("bill-september", plan.billDrafts.single().externalBillId)
+        assertEquals(1, plan.billDrafts.single().payments.size)
+        assertEquals("historical-payment", plan.billDrafts.single().payments.single().externalPaymentId)
+    }
+
+    @Test
+    fun futurePendingTransactionExplicitlyReturnedByPluggyIsImportedWithoutInference() {
+        val account = cardAccount()
+        val futurePurchase = PluggyTransactionSnapshot(
+            externalId = "future-installment-3-of-6",
+            accountExternalId = "card-remote",
+            amount = BigDecimal("171.70"),
+            date = Instant.parse("2026-10-10T12:00:00Z"),
+            direction = PluggyTransactionDirection.DEBIT,
+            status = PluggyTransactionStatus.PENDING,
+            description = "Compra parcelada 3/6",
+            installmentNumber = 3,
+            totalInstallments = 6,
+            billForecastDate = YearMonth.of(2026, 10),
+            billExternalId = "bill-october",
+        )
+        val futureBill = PluggyBillSnapshot(
+            externalId = "bill-october",
+            accountExternalId = "card-remote",
+            dueDate = LocalDate.of(2026, 10, 21),
+            closingDate = LocalDate.of(2026, 10, 14),
+            totalAmount = BigDecimal("171.70"),
+            minimumPaymentAmount = null,
+            allowsInstallments = true,
+        )
+
+        val plan = PluggyControlledImportPlanner.plan(
+            datasets = listOf(
+                PluggyAccountDataset(account, listOf(futurePurchase), listOf(futureBill)),
+            ),
+            reconciliation = reconciliation(
+                9, "Cartão local", "card-remote", "Cartão", PluggyAccountType.CREDIT,
+            ),
+            selectedExternalAccountIds = setOf("card-remote"),
+            localTransactions = emptyList(),
+            today = LocalDate.of(2026, 9, 8),
+            startDate = LocalDate.of(2026, 6, 1),
+            endDate = LocalDate.of(2026, 9, 8),
+            zoneId = ZoneOffset.UTC,
+        )
+
+        val draft = plan.drafts.single()
+        assertEquals("future-installment-3-of-6", draft.externalTransactionId)
+        assertEquals(LocalDate.of(2026, 10, 10), draft.occurredAt.toLocalDate())
+        assertEquals(TransactionStatus.PENDING, draft.status)
+        assertEquals(3, draft.installmentNumber)
+        assertEquals(6, draft.totalInstallments)
+        assertEquals(YearMonth.of(2026, 10), draft.billForecastPeriod)
+        assertEquals("bill-october", draft.externalBillId)
+        assertEquals(1, plan.billDrafts.size)
+        assertEquals(LocalDate.of(2026, 10, 21), plan.billDrafts.single().dueDate)
+        assertEquals(0, plan.skippedOutsideWindow)
     }
 
     @Test

@@ -75,8 +75,10 @@ object GeneralProjectedBalanceCalculator {
                 val paidThroughDate = payments.fold(BigDecimal.ZERO) { sum, payment ->
                     sum + payment.amount
                 }
-                val outstandingAtDate = (invoice.total - paidThroughDate)
-                    .max(BigDecimal.ZERO)
+                val outstandingAtDate = CreditCardBillingCycle.outstandingAmount(
+                    total = invoice.total,
+                    paidAmount = paidThroughDate,
+                )
                 val dueOutstanding = if (
                     invoice.dueDate != null && !invoice.dueDate.isAfter(throughDate)
                 ) {
@@ -84,10 +86,13 @@ object GeneralProjectedBalanceCalculator {
                 } else {
                     BigDecimal.ZERO
                 }
-                val paymentsWithoutAccount = payments
-                    .filter { it.sourceAccountId == null }
-                    .fold(BigDecimal.ZERO) { sum, payment -> sum + payment.amount }
-                total + dueOutstanding + paymentsWithoutAccount
+
+                // Payments are not an additional liability. If they came from a tracked bank
+                // account, the debit is already present in bankBalance; if they came from an
+                // untracked account, they simply reduce the card liability. Subtracting historical
+                // payments again here double-counts cash outflow and can drive the projection far
+                // below the actual balances.
+                total + dueOutstanding
             }
 
         return bankBalance - invoiceAdjustment
