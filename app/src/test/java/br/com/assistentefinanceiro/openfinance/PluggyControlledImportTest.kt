@@ -212,6 +212,61 @@ class PluggyControlledImportTest {
     }
 
     @Test
+    fun referencedFutureBillIsIncludedEvenWhenDueDateIsOutsideWindow() {
+        val account = cardAccount()
+        val purchase = PluggyTransactionSnapshot(
+            externalId = "pending-purchase",
+            accountExternalId = "card-remote",
+            amount = BigDecimal("80.00"),
+            date = Instant.parse("2026-09-04T12:00:00Z"),
+            direction = PluggyTransactionDirection.DEBIT,
+            status = PluggyTransactionStatus.PENDING,
+            description = "Compra pendente",
+            billExternalId = "bill-september",
+        )
+        val futureBill = PluggyBillSnapshot(
+            externalId = "bill-september",
+            accountExternalId = "card-remote",
+            dueDate = LocalDate.of(2026, 9, 5),
+            closingDate = LocalDate.of(2026, 8, 29),
+            totalAmount = BigDecimal("80.00"),
+            minimumPaymentAmount = null,
+            allowsInstallments = false,
+            payments = listOf(
+                PluggyBillPaymentSnapshot(
+                    externalId = "historical-payment",
+                    amount = BigDecimal("20.00"),
+                    paymentDate = LocalDate.of(2026, 8, 21),
+                ),
+                PluggyBillPaymentSnapshot(
+                    externalId = "future-payment",
+                    amount = BigDecimal("60.00"),
+                    paymentDate = LocalDate.of(2026, 9, 6),
+                ),
+            ),
+        )
+
+        val plan = PluggyControlledImportPlanner.plan(
+            datasets = listOf(PluggyAccountDataset(account, listOf(purchase), listOf(futureBill))),
+            reconciliation = reconciliation(
+                9, "Cartão local", "card-remote", "Cartão", PluggyAccountType.CREDIT,
+            ),
+            selectedExternalAccountIds = setOf("card-remote"),
+            localTransactions = emptyList(),
+            today = LocalDate.of(2026, 9, 4),
+            startDate = LocalDate.of(2026, 9, 1),
+            endDate = LocalDate.of(2026, 9, 4),
+            zoneId = ZoneOffset.UTC,
+        )
+
+        assertEquals(1, plan.drafts.size)
+        assertEquals(1, plan.billDrafts.size)
+        assertEquals("bill-september", plan.billDrafts.single().externalBillId)
+        assertEquals(1, plan.billDrafts.single().payments.size)
+        assertEquals("historical-payment", plan.billDrafts.single().payments.single().externalPaymentId)
+    }
+
+    @Test
     fun confirmedLinkOverridesHeuristic() {
         val remoteAccount = PluggyAccountSnapshot(
             externalId = "remote-card",
