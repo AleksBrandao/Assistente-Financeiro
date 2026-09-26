@@ -26,7 +26,6 @@ android {
         versionCode = 26
         versionName = "0.22.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        manifestPlaceholders["appLabel"] = "Assistente Financeiro"
     }
 
     signingConfigs {
@@ -40,11 +39,6 @@ android {
         }
     }
     buildTypes {
-        debug {
-            applicationIdSuffix = ".pluggysandbox"
-            versionNameSuffix = "-pluggy-test"
-            manifestPlaceholders["appLabel"] = "Assistente Financeiro (Teste)"
-        }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.findByName("release")
@@ -62,8 +56,6 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.1")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.navigation:navigation-compose:2.9.0")
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -72,7 +64,4 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:core-ktx:1.6.1")
 }
