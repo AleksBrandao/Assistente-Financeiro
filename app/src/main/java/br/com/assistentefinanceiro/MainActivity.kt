@@ -531,7 +531,7 @@ class MainActivity : ComponentActivity() {
                 val isCardPurchase = transaction.type == FinancialTransactionType.CARD_PURCHASE ||
                     (transaction.accountId != null &&
                         transaction.accountId in creditCardAccountIds)
-                isCardPurchase && (
+                !transaction.ignoreInvoiceLink && isCardPurchase && (
                     transaction.invoiceId == null ||
                         transaction.invoiceId !in consolidatedInvoiceIds
                     )
@@ -539,6 +539,9 @@ class MainActivity : ComponentActivity() {
         }
         var reviewingUnlinkedPurchases by remember { mutableStateOf(false) }
         var assigningUnlinkedPurchase by remember {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var ignoringUnlinkedPurchase by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
         }
         val statementTransactions = remember(
@@ -1052,10 +1055,15 @@ class MainActivity : ComponentActivity() {
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    TextButton(
-                                        onClick = { assigningUnlinkedPurchase = transaction },
-                                        enabled = creditCardAccounts.isNotEmpty(),
-                                    ) { Text("Vincular ao cartão") }
+                                    Row {
+                                        TextButton(
+                                            onClick = { ignoringUnlinkedPurchase = transaction },
+                                        ) { Text("Ignorar") }
+                                        TextButton(
+                                            onClick = { assigningUnlinkedPurchase = transaction },
+                                            enabled = creditCardAccounts.isNotEmpty(),
+                                        ) { Text("Vincular ao cartão") }
+                                    }
                                 }
                             }
                         }
@@ -1063,6 +1071,33 @@ class MainActivity : ComponentActivity() {
                 },
                 confirmButton = {
                     TextButton(onClick = { reviewingUnlinkedPurchases = false }) { Text("Fechar") }
+                },
+            )
+        }
+        ignoringUnlinkedPurchase?.let { transaction ->
+            AlertDialog(
+                onDismissRequest = { ignoringUnlinkedPurchase = null },
+                title = { Text("Ignorar compra sem fatura?") },
+                text = {
+                    Text(
+                        "${transaction.description} continuará registrada, mas deixará de " +
+                            "aparecer no alerta e não será vinculada automaticamente a uma fatura."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (store.ignoreCardPurchaseWithoutInvoice(transaction.id)) {
+                                ignoringUnlinkedPurchase = null
+                                refresh++
+                            }
+                        },
+                    ) { Text("Ignorar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { ignoringUnlinkedPurchase = null }) {
+                        Text("Cancelar")
+                    }
                 },
             )
         }
@@ -1373,6 +1408,9 @@ class MainActivity : ComponentActivity() {
             EditAccountDialog(
                 account = account,
                 isNew = creatingAccount,
+                currentBalance = if (creatingAccount) null else {
+                    bankBalances[account]?.realizedBalance
+                },
                 onDismiss = {
                     editingAccount = null
                     creatingAccount = false
@@ -1584,8 +1622,11 @@ class MainActivity : ComponentActivity() {
                     description = movement.description,
                     detail = listOfNotNull(
                         movement.relatedAccountName,
-                        if (movement.type == AccountMovementType.TRANSFER) "Transferência"
-                        else "Pagamento de fatura",
+                        when (movement.type) {
+                            AccountMovementType.TRANSFER -> "Transferência"
+                            AccountMovementType.CARD_PAYMENT -> "Pagamento de fatura"
+                            AccountMovementType.BALANCE_ADJUSTMENT -> "Ajuste de saldo"
+                        },
                     ).joinToString(" · "),
                     movement = movement,
                 )
@@ -1958,6 +1999,7 @@ class MainActivity : ComponentActivity() {
     private fun EditAccountDialog(
         account: FinancialAccountRecord,
         isNew: Boolean,
+        currentBalance: java.math.BigDecimal?,
         onDismiss: () -> Unit,
         onSave: (
             String, FinancialAccountType, Int?, Int?, Boolean, String?,
@@ -1977,11 +2019,17 @@ class MainActivity : ComponentActivity() {
         var cardIdentifiers by remember(account.id, isNew) {
             mutableStateOf(account.cardIdentifiers.orEmpty())
         }
-        var openingBalance by remember(account.id, isNew) {
-            mutableStateOf(account.openingBalance.toPlainString().replace('.', ','))
+        var openingBalance by remember(account.id, isNew, currentBalance) {
+            mutableStateOf(
+                (currentBalance ?: account.openingBalance).toPlainString().replace('.', ',')
+            )
         }
         var openingBalanceDate by remember(account.id, isNew) {
-            mutableStateOf(account.openingBalanceDate?.toString() ?: LocalDate.now().toString())
+            mutableStateOf(
+                if (isNew) {
+                    account.openingBalanceDate?.toString() ?: LocalDate.now().toString()
+                } else LocalDate.now().toString()
+            )
         }
         var typeMenuExpanded by remember { mutableStateOf(false) }
         val closingValue = closingDay.toIntOrNull()
@@ -2074,7 +2122,9 @@ class MainActivity : ComponentActivity() {
                                     it.isDigit() || it in ",.-"
                                 }.take(18)
                             },
-                            label = { Text("Saldo inicial") },
+                            label = {
+                                Text(if (isNew) "Saldo inicial" else "Saldo atual informado")
+                            },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                         )
@@ -2084,8 +2134,13 @@ class MainActivity : ComponentActivity() {
                             onValueChange = { openingBalanceDate = it },
                         )
                         Text(
-                            "Este saldo será o fechamento do dia; movimentações posteriores " +
-                                "alterarão o valor",
+                            if (isNew) {
+                                "Este saldo será o fechamento do dia; movimentações posteriores " +
+                                    "alterarão o valor"
+                            } else {
+                                "A diferença será registrada como uma linha de ajuste positiva " +
+                                    "ou negativa."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -2568,7 +2623,7 @@ class MainActivity : ComponentActivity() {
                                         style = MaterialTheme.typography.titleMedium,
                                     )
                                     Text(
-                                        "${transactions.size} movimentações",
+                                        "${transactions.size + if (invoice.adjustmentAmount.signum() != 0) 1 else 0} movimentações",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -2741,6 +2796,56 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(top = FinanceSpacing.sm),
                         style = MaterialTheme.typography.titleLarge,
                     )
+                }
+                if (invoice.adjustmentAmount.signum() != 0) {
+                    item {
+                        val isCredit = invoice.adjustmentAmount.signum() < 0
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.md),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                FinanceIconTile(
+                                    icon = Icons.Rounded.Tune,
+                                    contentDescription = null,
+                                    containerColor = if (isCredit) {
+                                        semantic.incomeContainer
+                                    } else semantic.expenseContainer,
+                                    iconColor = if (isCredit) {
+                                        semantic.income
+                                    } else semantic.expense,
+                                )
+                                Spacer(Modifier.width(FinanceSpacing.sm))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Ajuste de fatura",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Text(
+                                        if (isCredit) "Crédito de ajuste" else "Débito de ajuste",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    (if (isCredit) "+ " else "− ") +
+                                        formatCurrency(
+                                            invoice.adjustmentAmount.abs().toPlainString()
+                                        ),
+                                    color = if (isCredit) semantic.income else semantic.expense,
+                                    style = FinanceTextStyles.moneyMedium,
+                                )
+                            }
+                        }
+                    }
                 }
                 items(transactions, key = { "invoice-transaction-${it.id}" }) { transaction ->
                     val occurredAt = runCatching {

@@ -29,7 +29,7 @@ data class FinancialAccountRecord(
 
 enum class AccountMovementDirection { CREDIT, DEBIT }
 
-enum class AccountMovementType { CARD_PAYMENT, TRANSFER }
+enum class AccountMovementType { CARD_PAYMENT, TRANSFER, BALANCE_ADJUSTMENT }
 
 data class AccountMovementRecord(
     val id: Long,
@@ -47,6 +47,13 @@ data class AccountBalanceSummary(
     val pendingIncome: BigDecimal,
     val pendingExpense: BigDecimal,
 )
+
+object BalanceAdjustmentCalculator {
+    fun difference(
+        currentBalance: BigDecimal,
+        informedBalance: BigDecimal,
+    ): BigDecimal = informedBalance - currentBalance
+}
 
 data class AccountBalanceEntry(
     val direction: FinancialTransactionDirection,
