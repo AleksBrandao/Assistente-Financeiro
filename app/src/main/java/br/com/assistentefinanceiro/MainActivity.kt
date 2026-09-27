@@ -518,10 +518,10 @@ class MainActivity : ComponentActivity() {
         val consolidatedInvoiceIds = remember(statementInvoiceItems) {
             statementInvoiceItems.map { it.invoice.id }.toSet()
         }
-        val unconsolidatedCardTransactionCount = remember(
+        val unconsolidatedCardTransactions = remember(
             transactions, creditCardAccountIds, consolidatedInvoiceIds,
         ) {
-            transactions.count { transaction ->
+            transactions.filter { transaction ->
                 val isCardPurchase = transaction.type == FinancialTransactionType.CARD_PURCHASE ||
                     (transaction.accountId != null &&
                         transaction.accountId in creditCardAccountIds)
@@ -530,6 +530,10 @@ class MainActivity : ComponentActivity() {
                         transaction.invoiceId !in consolidatedInvoiceIds
                     )
             }
+        }
+        var reviewingUnlinkedPurchases by remember { mutableStateOf(false) }
+        var assigningUnlinkedPurchase by remember {
+            mutableStateOf<FinancialTransactionRecord?>(null)
         }
         val statementTransactions = remember(
             transactions, statementInvoiceItems, creditCardAccountIds,
@@ -792,16 +796,18 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (unconsolidatedCardTransactionCount > 0) {
+                if (unconsolidatedCardTransactions.isNotEmpty()) {
                     item {
                         FinanceNoticeCard(
                             icon = Icons.Rounded.CreditCardOff,
                             title = "Compras sem fatura",
-                            description = "$unconsolidatedCardTransactionCount compras de cartão " +
+                            description = "${unconsolidatedCardTransactions.size} compras de cartão " +
                                 "ainda não foram vinculadas a uma fatura. " +
                                 "Revise o cadastro do cartão em Contas.",
                             foreground = MaterialTheme.colorScheme.onErrorContainer,
                             background = MaterialTheme.colorScheme.errorContainer,
+                            actionLabel = "Revisar compras",
+                            onAction = { reviewingUnlinkedPurchases = true },
                         )
                     }
                 }
@@ -1011,6 +1017,76 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+        if (reviewingUnlinkedPurchases) {
+            AlertDialog(
+                onDismissRequest = { reviewingUnlinkedPurchases = false },
+                title = { Text("Compras sem fatura") },
+                text = {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
+                        verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
+                    ) {
+                        items(unconsolidatedCardTransactions, key = { "unlinked-${it.id}" }) {
+                                transaction ->
+                            Surface(
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(FinanceSpacing.sm),
+                                ) {
+                                    Text(transaction.description, style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        formatCurrency(transaction.amount),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                    Text(
+                                        transaction.account?.let { "Conta atual: $it" }
+                                            ?: "Cartão não identificado",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    TextButton(
+                                        onClick = { assigningUnlinkedPurchase = transaction },
+                                        enabled = creditCardAccounts.isNotEmpty(),
+                                    ) { Text("Vincular ao cartão") }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { reviewingUnlinkedPurchases = false }) { Text("Fechar") }
+                },
+            )
+        }
+        assigningUnlinkedPurchase?.let { transaction ->
+            AlertDialog(
+                onDismissRequest = { assigningUnlinkedPurchase = null },
+                title = { Text("Selecionar cartão") },
+                text = {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
+                        items(creditCardAccounts, key = { "assign-card-${it.id}" }) { account ->
+                            OutlinedButton(
+                                onClick = {
+                                    if (store.assignCardPurchaseToAccount(
+                                            transaction.id, account.id,
+                                        )) {
+                                        assigningUnlinkedPurchase = null
+                                        refresh++
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(account.name) }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { assigningUnlinkedPurchase = null }) { Text("Cancelar") }
+                },
+            )
+        }
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -1025,6 +1101,8 @@ class MainActivity : ComponentActivity() {
                 .associateWith(store::accountBalance)
         }
         var editingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var deletingAccount by remember { mutableStateOf<FinancialAccountRecord?>(null) }
+        var deletionBlockedFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var creatingAccount by remember { mutableStateOf(false) }
         var viewingInvoicesFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
         var viewingMovementsFor by remember { mutableStateOf<FinancialAccountRecord?>(null) }
@@ -1312,6 +1390,50 @@ class MainActivity : ComponentActivity() {
                         creatingAccount = false
                         refresh++
                     }
+                },
+                onDeleteRequest = if (creatingAccount) null else {
+                    {
+                        editingAccount = null
+                        deletingAccount = account
+                    }
+                },
+            )
+        }
+        deletingAccount?.let { account ->
+            AlertDialog(
+                onDismissRequest = { deletingAccount = null },
+                title = { Text("Excluir ${account.name}?") },
+                text = { Text("A conta será excluída somente se estiver vazia e sem vínculos.") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (store.deleteFinancialAccountIfEmpty(account.id)) {
+                                deletingAccount = null
+                                refresh++
+                            } else {
+                                deletingAccount = null
+                                deletionBlockedFor = account
+                            }
+                        },
+                    ) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletingAccount = null }) { Text("Cancelar") }
+                },
+            )
+        }
+        deletionBlockedFor?.let { account ->
+            AlertDialog(
+                onDismissRequest = { deletionBlockedFor = null },
+                title = { Text("Conta não excluída") },
+                text = {
+                    Text(
+                        "${account.name} possui saldo, movimentações, faturas ou vínculos. " +
+                            "Remova esses dados antes de excluir a conta."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { deletionBlockedFor = null }) { Text("Entendi") }
                 },
             )
         }
@@ -1835,6 +1957,7 @@ class MainActivity : ComponentActivity() {
             String, FinancialAccountType, Int?, Int?, Boolean, String?,
             java.math.BigDecimal, LocalDate?,
         ) -> Unit,
+        onDeleteRequest: (() -> Unit)? = null,
     ) {
         var name by remember(account.id, isNew) { mutableStateOf(account.name) }
         var type by remember(account.id, isNew) { mutableStateOf(account.type) }
@@ -1979,7 +2102,16 @@ class MainActivity : ComponentActivity() {
                             (openingBalanceValue != null && openingBalanceDateValue != null)),
                 ) { Text("Salvar") }
             },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+            dismissButton = {
+                Row {
+                    onDeleteRequest?.let { delete ->
+                        TextButton(onClick = delete) {
+                            Text("Excluir", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = onDismiss) { Text("Cancelar") }
+                }
+            },
         )
     }
 
