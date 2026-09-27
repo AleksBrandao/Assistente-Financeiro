@@ -2212,18 +2212,19 @@ class MainActivity : ComponentActivity() {
         }
         if (addingPurchase) {
             ManualCardPurchaseDialog(
-                accountName = account.name,
+                account = account,
                 onDismiss = { addingPurchase = false },
-                onSave = { amount, date, description ->
-                    if (store.recordManualCardPurchase(account.id, amount, date, description)) {
+                onSave = { amount, date, description, invoicePeriod ->
+                    if (store.recordManualCardPurchase(
+                            account.id, amount, date, description, invoicePeriod,
+                        )) {
                         addingPurchase = false
-                        val billingDates = CreditCardBillingCycle.calculate(
-                            purchaseDate = date,
-                            closingDay = checkNotNull(account.closingDay),
-                            dueDay = account.dueDay,
-                        )
-                        selectedMonth = billingDates.dueDate?.let(YearMonth::from)
-                            ?: billingDates.closingPeriod
+                        val duePeriod = account.dueDay?.let { dueDay ->
+                            if (dueDay <= checkNotNull(account.closingDay)) {
+                                invoicePeriod.plusMonths(1)
+                            } else invoicePeriod
+                        }
+                        selectedMonth = duePeriod ?: invoicePeriod
                         refresh++
                     }
                 },
@@ -2233,9 +2234,9 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun ManualCardPurchaseDialog(
-        accountName: String,
+        account: FinancialAccountRecord,
         onDismiss: () -> Unit,
-        onSave: (java.math.BigDecimal, LocalDate, String) -> Unit,
+        onSave: (java.math.BigDecimal, LocalDate, String, YearMonth) -> Unit,
     ) {
         var amount by remember { mutableStateOf("") }
         var date by remember { mutableStateOf(LocalDate.now().toString()) }
@@ -2244,13 +2245,22 @@ class MainActivity : ComponentActivity() {
             amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
         } else amount.toBigDecimalOrNull()
         val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        val automaticPeriod = dateValue?.let {
+            CreditCardBillingCycle.calculate(
+                purchaseDate = it,
+                closingDay = checkNotNull(account.closingDay),
+                dueDay = account.dueDay,
+            ).closingPeriod
+        } ?: YearMonth.now()
+        var invoicePeriod by remember { mutableStateOf<YearMonth?>(null) }
+        val effectiveInvoicePeriod = invoicePeriod ?: automaticPeriod
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("Adicionar compra") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
                     Text(
-                        accountName,
+                        account.name,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -2264,6 +2274,40 @@ class MainActivity : ComponentActivity() {
                         singleLine = true,
                     )
                     DatePickerField(date, "Data da compra", onValueChange = { date = it })
+                    Text("Fatura", style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(
+                            onClick = {
+                                invoicePeriod = effectiveInvoicePeriod.minusMonths(1)
+                            },
+                        ) {
+                            Icon(Icons.Rounded.ChevronLeft, contentDescription = "Fatura anterior")
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                formatMonth(effectiveInvoicePeriod),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            if (effectiveInvoicePeriod == automaticPeriod) {
+                                Text(
+                                    "Calculada automaticamente",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = {
+                                invoicePeriod = effectiveInvoicePeriod.plusMonths(1)
+                            },
+                        ) {
+                            Icon(Icons.Rounded.ChevronRight, contentDescription = "Próxima fatura")
+                        }
+                    }
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(100) },
@@ -2271,7 +2315,7 @@ class MainActivity : ComponentActivity() {
                         singleLine = true,
                     )
                     Text(
-                        "A compra será incluída automaticamente na fatura correspondente.",
+                        "Você pode manter a fatura calculada ou escolher outro mês.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -2280,7 +2324,10 @@ class MainActivity : ComponentActivity() {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onSave(checkNotNull(amountValue), checkNotNull(dateValue), description)
+                        onSave(
+                            checkNotNull(amountValue), checkNotNull(dateValue), description,
+                            effectiveInvoicePeriod,
+                        )
                     },
                     enabled = amountValue?.signum() == 1 && dateValue != null &&
                         description.isNotBlank(),
@@ -2631,20 +2678,39 @@ class MainActivity : ComponentActivity() {
             )
         }
         editingInvoiceTransaction?.let { transaction ->
-            EditTransactionDialog(
-                store = store,
-                transaction = transaction,
-                onDismiss = { editingInvoiceTransaction = null },
-                onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
-                    if (store.updateTransactionDetails(
-                            transaction.id, description, category, customCategory, subcategory, status,
-                            amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
-                        )) {
-                        editingInvoiceTransaction = null
-                        onTransactionChanged()
-                    }
-                },
-            )
+            if (
+                transaction.type == FinancialTransactionType.CARD_PURCHASE &&
+                transaction.origin == TransactionOrigin.MANUAL
+            ) {
+                EditManualCardPurchaseDialog(
+                    transaction = transaction,
+                    initialInvoicePeriod = invoice.closingPeriod,
+                    onDismiss = { editingInvoiceTransaction = null },
+                    onSave = { amount, date, description, invoicePeriod ->
+                        if (store.updateManualCardPurchase(
+                                transaction.id, amount, date, description, invoicePeriod,
+                            )) {
+                            editingInvoiceTransaction = null
+                            onTransactionChanged()
+                        }
+                    },
+                )
+            } else {
+                EditTransactionDialog(
+                    store = store,
+                    transaction = transaction,
+                    onDismiss = { editingInvoiceTransaction = null },
+                    onSave = { description, category, customCategory, subcategory, status, amount, dueDate, plannedDate, paidAt, applyToFuture, scope ->
+                        if (store.updateTransactionDetails(
+                                transaction.id, description, category, customCategory, subcategory, status,
+                                amount, dueDate, plannedDate, paidAt, applyToFuture, scope,
+                            )) {
+                            editingInvoiceTransaction = null
+                            onTransactionChanged()
+                        }
+                    },
+                )
+            }
         }
         if (addingPayment) {
             val normalizedPaymentAmount = if (',' in paymentAmount) {
@@ -2749,6 +2815,79 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    @Composable
+    private fun EditManualCardPurchaseDialog(
+        transaction: FinancialTransactionRecord,
+        initialInvoicePeriod: YearMonth,
+        onDismiss: () -> Unit,
+        onSave: (java.math.BigDecimal, LocalDate, String, YearMonth) -> Unit,
+    ) {
+        var description by remember(transaction.id) { mutableStateOf(transaction.description) }
+        var amount by remember(transaction.id) { mutableStateOf(transaction.amount.replace('.', ',')) }
+        var date by remember(transaction.id) {
+            mutableStateOf(
+                runCatching { LocalDateTime.parse(transaction.occurredAt).toLocalDate().toString() }
+                    .getOrDefault(LocalDate.now().toString())
+            )
+        }
+        var invoicePeriod by remember(transaction.id) { mutableStateOf(initialInvoicePeriod) }
+        val amountValue = if (',' in amount) {
+            amount.replace(".", "").replace(',', '.').toBigDecimalOrNull()
+        } else amount.toBigDecimalOrNull()
+        val dateValue = runCatching { LocalDate.parse(date) }.getOrNull()
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Editar compra do cartão") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(DESCRIPTION_MAX_LENGTH) },
+                        label = { Text("Descrição") },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { value ->
+                            amount = value.filter { it.isDigit() || it in ",." }.take(18)
+                        },
+                        label = { Text("Valor") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                    )
+                    DatePickerField(date, "Data da compra", onValueChange = { date = it })
+                    Text("Fatura", style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { invoicePeriod = invoicePeriod.minusMonths(1) }) {
+                            Icon(Icons.Rounded.ChevronLeft, contentDescription = "Fatura anterior")
+                        }
+                        Text(formatMonth(invoicePeriod), style = MaterialTheme.typography.titleMedium)
+                        IconButton(onClick = { invoicePeriod = invoicePeriod.plusMonths(1) }) {
+                            Icon(Icons.Rounded.ChevronRight, contentDescription = "Próxima fatura")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSave(
+                            checkNotNull(amountValue), checkNotNull(dateValue), description,
+                            invoicePeriod,
+                        )
+                    },
+                    enabled = amountValue?.signum() == 1 && dateValue != null &&
+                        description.isNotBlank(),
+                ) { Text("Salvar") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -5236,6 +5375,7 @@ class MainActivity : ComponentActivity() {
         val candidates = remember(refresh) { store.candidates() }
         val events = remember(refresh) { store.recentEvents() }
         val enabled = remember(refresh) { notificationAccessEnabled() }
+        var editingEvent by remember { mutableStateOf<DiagnosticEvent?>(null) }
 
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
@@ -5457,6 +5597,8 @@ class MainActivity : ComponentActivity() {
                                         "Reconhecida: final ${event.cardLastFour} · ${formatCurrency(event.amount)} · ${event.merchant}"
                                     FinancialTransactionType.PIX_RECEIVED ->
                                         "Entrada reconhecida: PIX · ${formatCurrency(event.amount)}"
+                                    FinancialTransactionType.PIX_SENT ->
+                                        "Saída reconhecida: PIX · ${formatCurrency(event.amount)}"
                                     FinancialTransactionType.IMPORTED_EXPENSE,
                                     FinancialTransactionType.IMPORTED_INCOME,
                                     FinancialTransactionType.MANUAL_EXPENSE,
@@ -5496,10 +5638,59 @@ class MainActivity : ComponentActivity() {
                                 background = statusBackground,
                                 icon = statusIcon,
                             )
+                            TextButton(onClick = { editingEvent = event }) {
+                                Icon(Icons.Rounded.Edit, contentDescription = null)
+                                Spacer(Modifier.width(FinanceSpacing.xs))
+                                Text("Editar regra")
+                            }
                         }
                     }
                 }
             }
+        }
+        editingEvent?.let { event ->
+            AlertDialog(
+                onDismissRequest = { editingEvent = null },
+                title = { Text("Editar regra do evento") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
+                        Text(event.title, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            event.body,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "Reprocessar usa os classificadores atuais. Ignorar remove a " +
+                                "movimentação gerada por este evento.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (store.reclassifyEvent(event.id)) {
+                                editingEvent = null
+                                refresh++
+                            }
+                        },
+                    ) { Text("Reprocessar") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(
+                            onClick = {
+                                if (store.setEventAsIgnored(event.id)) {
+                                    editingEvent = null
+                                    refresh++
+                                }
+                            },
+                        ) { Text("Ignorar") }
+                        TextButton(onClick = { editingEvent = null }) { Text("Cancelar") }
+                    }
+                },
+            )
         }
     }
 
@@ -5507,6 +5698,7 @@ class MainActivity : ComponentActivity() {
         when (type) {
             FinancialTransactionType.CARD_PURCHASE -> "Compra no cartão"
             FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+            FinancialTransactionType.PIX_SENT -> "PIX enviado"
             FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
             FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
             FinancialTransactionType.MANUAL_EXPENSE -> "Despesa manual"

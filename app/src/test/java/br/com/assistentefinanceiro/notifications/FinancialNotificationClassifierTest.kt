@@ -33,6 +33,19 @@ class FinancialNotificationClassifierTest {
     }
 
     @Test
+    fun classifiesSentPix() {
+        val result = classify(
+            title = "Seu PIX foi enviado!",
+            body = "PIX enviado em 26/09/2026 as 13:05 no valor de R$ 5,00.",
+        )
+
+        assertEquals(NotificationClassification.TRANSACTION, result.classification)
+        assertEquals(FinancialTransactionType.PIX_SENT, result.transaction?.type)
+        assertEquals(FinancialTransactionDirection.EXPENSE, result.transaction?.type?.direction)
+        assertEquals("5.00", result.transaction?.amount?.toPlainString())
+    }
+
+    @Test
     fun ignoresKnownCreditOffer() {
         val result = classify(
             title = "Você tem crédito disponível!",
