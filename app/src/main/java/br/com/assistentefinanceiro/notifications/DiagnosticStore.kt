@@ -763,6 +763,80 @@ class DiagnosticStore(context: Context) :
         }
     }
 
+    fun assignCardPurchaseToAccount(transactionId: Long, accountId: Long): Boolean {
+        val db = writableDatabase
+        val account = db.rawQuery(
+            "SELECT name,type FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            cursor.getString(0) to FinancialAccountType.fromStored(cursor.getString(1))
+        }
+        if (account.second != FinancialAccountType.CREDIT_CARD) return false
+        val previousAccountId = db.rawQuery(
+            "SELECT account_id,type FROM transactions WHERE id = ?",
+            arrayOf(transactionId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            if (FinancialTransactionType.fromStored(cursor.getString(1)) !=
+                FinancialTransactionType.CARD_PURCHASE
+            ) return false
+            if (cursor.isNull(0)) null else cursor.getLong(0)
+        }
+        db.beginTransaction()
+        return try {
+            val updated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("account", account.first)
+                    put("account_id", accountId)
+                    putNull("invoice_id")
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (updated) {
+                previousAccountId?.takeIf { it != accountId }?.let {
+                    rebuildCreditCardInvoices(db, it)
+                }
+                rebuildCreditCardInvoices(db, accountId)
+                db.setTransactionSuccessful()
+            }
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun deleteFinancialAccountIfEmpty(accountId: Long): Boolean {
+        val db = writableDatabase
+        val accountIsEmpty = db.rawQuery(
+            """SELECT
+                 (SELECT COUNT(*) FROM transactions WHERE account_id = ?),
+                 (SELECT COUNT(*) FROM account_movements
+                    WHERE account_id = ? OR related_account_id = ?),
+                 (SELECT COUNT(*) FROM credit_card_invoices WHERE account_id = ?),
+                 (SELECT COUNT(*) FROM invoice_payments
+                    WHERE account_id = ? OR source_account_id = ?),
+                 (SELECT opening_balance FROM financial_accounts WHERE id = ?)""",
+            arrayOf(
+                accountId.toString(), accountId.toString(), accountId.toString(),
+                accountId.toString(), accountId.toString(), accountId.toString(),
+                accountId.toString(),
+            ),
+        ).use { cursor ->
+            cursor.moveToFirst() && cursor.getInt(0) == 0 && cursor.getInt(1) == 0 &&
+                cursor.getInt(2) == 0 && cursor.getInt(3) == 0 &&
+                cursor.getString(4).toBigDecimalOrNull()?.signum() == 0
+        }
+        if (!accountIsEmpty) return false
+        return db.delete(
+            "financial_accounts", "id = ?", arrayOf(accountId.toString()),
+        ) == 1
+    }
+
     fun creditCardInvoices(accountId: Long): List<CreditCardInvoiceRecord> {
         val db = writableDatabase
         refreshInvoiceStatuses(db, accountId, LocalDate.now())

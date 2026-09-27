@@ -144,6 +144,8 @@ fun FinanceNoticeCard(
     foreground: Color,
     background: Color,
     modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -172,6 +174,11 @@ fun FinanceNoticeCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = foreground,
                 )
+                if (actionLabel != null && onAction != null) {
+                    TextButton(onClick = onAction) {
+                        Text(actionLabel, color = foreground)
+                    }
+                }
             }
         }
     }
