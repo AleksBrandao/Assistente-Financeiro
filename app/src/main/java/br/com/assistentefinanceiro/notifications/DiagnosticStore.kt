@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 30556)
+Total output lines: 2856
+
 package br.com.assistentefinanceiro.notifications
 
 import android.content.ContentValues
@@ -998,17 +1001,23 @@ class DiagnosticStore(context: Context) :
     fun ignoreCardPurchaseWithoutInvoice(transactionId: Long): Boolean {
         val db = writableDatabase
         val metadata = db.rawQuery(
-            "SELECT account_id,type,invoice_id FROM transactions WHERE id = ?",
+            """SELECT t.account_id,t.type,t.invoice_id,a.type
+               FROM transactions t
+               LEFT JOIN financial_accounts a ON a.id = t.account_id
+               WHERE t.id = ?""",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
             if (!cursor.moveToFirst()) return false
-            Triple(
-                if (cursor.isNull(0)) null else cursor.getLong(0),
-                FinancialTransactionType.fromStored(cursor.getString(1)),
-                if (cursor.isNull(2)) null else cursor.getLong(2),
+            IgnoreInvoiceLinkMetadata(
+                accountId = if (cursor.isNull(0)) null else cursor.getLong(0),
+                transactionType = FinancialTransactionType.fromStored(cursor.getString(1)),
+                invoiceId = if (cursor.isNull(2)) null else cursor.getLong(2),
+                accountType = if (cursor.isNull(3)) null else {
+                    FinancialAccountType.fromStored(cursor.getString(3))
+                },
             )
         }
-        if (metadata.second != FinancialTransactionType.CARD_PURCHASE || metadata.third != null) {
+        if (!metadata.canIgnoreInvoiceLink()) {
             return false
         }
         val updated = db.update(
@@ -1017,7 +1026,7 @@ class DiagnosticStore(context: Context) :
             "id = ?",
             arrayOf(transactionId.toString()),
         ) == 1
-        if (updated) metadata.first?.let { rebuildCreditCardInvoices(db, it) }
+        if (updated) metadata.accountId?.let { rebuildCreditCardInvoices(db, it) }
         return updated
     }
 
@@ -1331,58 +1340,7 @@ class DiagnosticStore(context: Context) :
                 accountId: Long,
                 relatedAccountId: Long,
                 direction: AccountMovementDirection,
-            ) = db.insertOrThrow(
-                "account_movements",
-                null,
-                ContentValues().apply {
-                    put("account_id", accountId)
-                    put("type", AccountMovementType.TRANSFER.name)
-                    put("direction", direction.name)
-                    put("amount", amount.toPlainString())
-                    put("occurred_at", occurredAt.toString())
-                    put("description", normalizedDescription)
-                    putNull("invoice_payment_id")
-                    put("related_account_id", relatedAccountId)
-                    put("transfer_group", transferGroup)
-                },
-            )
-            insert(sourceAccountId, destinationAccountId, AccountMovementDirection.DEBIT)
-            insert(destinationAccountId, sourceAccountId, AccountMovementDirection.CREDIT)
-            db.setTransactionSuccessful()
-            true
-        } catch (_: Exception) {
-            false
-        } finally {
-            db.endTransaction()
-        }
-    }
-
-    fun recordManualTransaction(
-        accountId: Long,
-        direction: FinancialTransactionDirection,
-        amount: java.math.BigDecimal,
-        occurredAt: LocalDate,
-        description: String,
-        status: TransactionStatus,
-        occurrences: Int = 1,
-    ): Boolean {
-        if (amount.signum() <= 0 || description.isBlank() || occurrences !in 1..120) return false
-        val db = writableDatabase
-        if (!isBankAccount(db, accountId)) return false
-        val account = db.rawQuery(
-            "SELECT name FROM financial_accounts WHERE id = ?",
-            arrayOf(accountId.toString()),
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else return false }
-        val seriesId = if (occurrences > 1) UUID.randomUUID().toString() else null
-        db.beginTransaction()
-        return try {
-            MonthlyRecurrencePlanner.plan(occurredAt, occurrences, status).forEach { occurrence ->
-                val occurrenceDate = occurrence.date
-                val occurrenceStatus = occurrence.status
-                val inserted = db.insert(
-                    "transactions",
-                    null,
-                    ContentValues().apply {
+         …556 tokens truncated…tValues().apply {
                         putNull("source_event_id")
                         put("direction", direction.name)
                         put(
