@@ -36,6 +36,13 @@ data class DiagnosticEvent(
         get() = classification == NotificationClassification.TRANSACTION
 }
 
+enum class DiagnosticEventFilter(val displayName: String) {
+    ALL("Todos"),
+    PENDING("Pendentes"),
+    RECOGNIZED("Reconhecidos"),
+    IGNORED("Ignorados"),
+}
+
 class DiagnosticStore(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
@@ -266,34 +273,59 @@ class DiagnosticStore(context: Context) :
         }
     }
 
-    fun recentEvents(limit: Int = 50): List<DiagnosticEvent> = readableDatabase.rawQuery(
-        """SELECT id,package_name,app_label,title,body,posted_at,classification,
-                  classification_reason,transaction_type,occurred_at,card_last_four,amount,merchant
-           FROM events ORDER BY posted_at DESC LIMIT ?""",
-        arrayOf(limit.coerceIn(1, 200).toString()),
-    ).use { cursor ->
-        buildList {
-            while (cursor.moveToNext()) {
-                add(
-                    DiagnosticEvent(
-                        id = cursor.getLong(0),
-                        packageName = cursor.getString(1),
-                        appLabel = cursor.getString(2),
-                        title = cursor.getString(3),
-                        body = cursor.getString(4),
-                        postedAt = cursor.getLong(5),
-                        classification = NotificationClassification.fromStored(cursor.getString(6)),
-                        classificationReason = cursor.getString(7),
-                        transactionType = FinancialTransactionType.fromStored(cursor.getString(8)),
-                        occurredAt = cursor.getString(9),
-                        cardLastFour = cursor.getString(10),
-                        amount = cursor.getString(11),
-                        merchant = cursor.getString(12),
+    fun recentEvents(
+        filter: DiagnosticEventFilter = DiagnosticEventFilter.ALL,
+        limit: Int = 50,
+        offset: Int = 0,
+    ): List<DiagnosticEvent> {
+        val (where, args) = eventFilterSql(filter)
+        return readableDatabase.rawQuery(
+            """SELECT id,package_name,app_label,title,body,posted_at,classification,
+                      classification_reason,transaction_type,occurred_at,card_last_four,amount,merchant
+               FROM events $where ORDER BY posted_at DESC LIMIT ? OFFSET ?""",
+            args + arrayOf(limit.coerceIn(1, 500).toString(), offset.coerceAtLeast(0).toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        DiagnosticEvent(
+                            id = cursor.getLong(0),
+                            packageName = cursor.getString(1),
+                            appLabel = cursor.getString(2),
+                            title = cursor.getString(3),
+                            body = cursor.getString(4),
+                            postedAt = cursor.getLong(5),
+                            classification = NotificationClassification.fromStored(cursor.getString(6)),
+                            classificationReason = cursor.getString(7),
+                            transactionType = FinancialTransactionType.fromStored(cursor.getString(8)),
+                            occurredAt = cursor.getString(9),
+                            cardLastFour = cursor.getString(10),
+                            amount = cursor.getString(11),
+                            merchant = cursor.getString(12),
+                        )
                     )
-                )
+                }
             }
         }
     }
+
+    fun eventCount(filter: DiagnosticEventFilter = DiagnosticEventFilter.ALL): Int {
+        val (where, args) = eventFilterSql(filter)
+        return readableDatabase.rawQuery("SELECT COUNT(*) FROM events $where", args).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    private fun eventFilterSql(filter: DiagnosticEventFilter): Pair<String, Array<String>> =
+        when (filter) {
+            DiagnosticEventFilter.ALL -> "" to emptyArray()
+            DiagnosticEventFilter.PENDING ->
+                "WHERE classification = ?" to arrayOf(NotificationClassification.PENDING_RULE.name)
+            DiagnosticEventFilter.RECOGNIZED ->
+                "WHERE classification = ?" to arrayOf(NotificationClassification.TRANSACTION.name)
+            DiagnosticEventFilter.IGNORED ->
+                "WHERE classification = ?" to arrayOf(NotificationClassification.IGNORED_PROMOTION.name)
+        }
 
     fun reclassifyEvent(eventId: Long): Boolean {
         val db = writableDatabase
@@ -364,6 +396,107 @@ class DiagnosticStore(context: Context) :
                 arrayOf(eventId.toString()),
             ) == 1
             db.setTransactionSuccessful()
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun classifyEventManually(
+        eventId: Long,
+        direction: FinancialTransactionDirection,
+        accountId: Long,
+        amount: BigDecimal,
+        occurredAt: LocalDateTime,
+        description: String,
+        category: TransactionCategory,
+        customCategory: String?,
+        subcategory: String?,
+        pending: Boolean,
+        cardLastFour: String? = null,
+    ): Boolean {
+        if (amount.signum() <= 0 || description.isBlank() || !category.supports(direction)) {
+            return false
+        }
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val sourcePackage = db.rawQuery(
+                "SELECT package_name FROM events WHERE id = ?",
+                arrayOf(eventId.toString()),
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                ?: return false
+            val account = db.rawQuery(
+                "SELECT name,type FROM financial_accounts WHERE id = ?",
+                arrayOf(accountId.toString()),
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) null
+                else cursor.getString(0) to FinancialAccountType.fromStored(cursor.getString(1))
+            } ?: return false
+            if (
+                account.second == FinancialAccountType.CREDIT_CARD &&
+                direction != FinancialTransactionDirection.EXPENSE
+            ) return false
+            val type = when {
+                account.second == FinancialAccountType.CREDIT_CARD ->
+                    FinancialTransactionType.CARD_PURCHASE
+                direction == FinancialTransactionDirection.EXPENSE ->
+                    FinancialTransactionType.MANUAL_EXPENSE
+                else -> FinancialTransactionType.MANUAL_INCOME
+            }
+
+            removeTransactionForEvent(db, eventId)
+            val inserted = db.insertWithOnConflict(
+                "transactions",
+                null,
+                ContentValues().apply {
+                    put("source_event_id", eventId)
+                    put("direction", direction.name)
+                    put("type", type.name)
+                    put("amount", amount.toPlainString())
+                    put("occurred_at", occurredAt.toString())
+                    put("description", description.trim())
+                    put("source_package", sourcePackage)
+                    put("category", category.name)
+                    put("category_source", TransactionCategorySource.MANUAL.name)
+                    if (customCategory.isNullOrBlank()) putNull("custom_category")
+                    else put("custom_category", customCategory.trim())
+                    if (subcategory.isNullOrBlank()) putNull("subcategory")
+                    else put("subcategory", subcategory.trim())
+                    put(
+                        "status",
+                        if (pending) TransactionStatus.PENDING.name
+                        else TransactionStatus.REALIZED.name,
+                    )
+                    put("account", account.first)
+                    put("account_id", accountId)
+                },
+                SQLiteDatabase.CONFLICT_ABORT,
+            ) != -1L
+            val updated = inserted && db.update(
+                "events",
+                ContentValues().apply {
+                    put("parsed", 1)
+                    put("classification", NotificationClassification.TRANSACTION.name)
+                    put("classification_reason", "Classificada manualmente")
+                    put("transaction_type", type.name)
+                    put("occurred_at", occurredAt.toString())
+                    put("amount", amount.toPlainString())
+                    put("merchant", description.trim())
+                    if (cardLastFour.isNullOrBlank()) putNull("card_last_four")
+                    else put("card_last_four", cardLastFour)
+                },
+                "id = ?",
+                arrayOf(eventId.toString()),
+            ) == 1
+            if (updated) {
+                if (account.second == FinancialAccountType.CREDIT_CARD) {
+                    rebuildCreditCardInvoices(db, accountId)
+                }
+                db.setTransactionSuccessful()
+            }
             updated
         } catch (_: Exception) {
             false
