@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -120,6 +122,10 @@ class MainActivity : ComponentActivity() {
                 val store = remember { DiagnosticStore(applicationContext) }
                 val preferences = remember { BankPackagePreferences(applicationContext) }
                 var screen by remember { mutableStateOf(AppScreen.STATEMENT) }
+
+                BackHandler(enabled = screen != AppScreen.STATEMENT) {
+                    screen = AppScreen.STATEMENT
+                }
 
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
@@ -5506,9 +5512,15 @@ class MainActivity : ComponentActivity() {
         var refresh by remember { mutableIntStateOf(0) }
         val allowed = remember(refresh) { preferences.allowedPackages() }
         val candidates = remember(refresh) { store.candidates() }
-        val events = remember(refresh) { store.recentEvents() }
+        var eventFilter by remember { mutableStateOf(DiagnosticEventFilter.ALL) }
+        var eventLimit by remember { mutableIntStateOf(50) }
+        val events = remember(refresh, eventFilter, eventLimit) {
+            store.recentEvents(filter = eventFilter, limit = eventLimit)
+        }
+        val eventCount = remember(refresh, eventFilter) { store.eventCount(eventFilter) }
         val enabled = remember(refresh) { notificationAccessEnabled() }
         var editingEvent by remember { mutableStateOf<DiagnosticEvent?>(null) }
+        var classifyingEvent by remember { mutableStateOf<DiagnosticEvent?>(null) }
 
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
@@ -5695,6 +5707,32 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs),
+                    ) {
+                        DiagnosticEventFilter.entries.forEach { filter ->
+                            FilterChip(
+                                selected = eventFilter == filter,
+                                onClick = {
+                                    eventFilter = filter
+                                    eventLimit = 50
+                                },
+                                label = { Text(filter.displayName) },
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        "Exibindo ${events.size} de $eventCount eventos",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (events.isEmpty()) {
                     item {
                         FinanceEmptyState(
@@ -5736,7 +5774,7 @@ class MainActivity : ComponentActivity() {
                                     FinancialTransactionType.IMPORTED_INCOME,
                                     FinancialTransactionType.MANUAL_EXPENSE,
                                     FinancialTransactionType.MANUAL_INCOME ->
-                                        "Movimentação importada"
+                                        "Movimentação reconhecida"
                                     null -> "Transação reconhecida"
                                 }
                                 NotificationClassification.IGNORED_PROMOTION ->
@@ -5776,6 +5814,18 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.width(FinanceSpacing.xs))
                                 Text("Editar regra")
                             }
+                        }
+                    }
+                }
+                if (events.size < eventCount) {
+                    item {
+                        OutlinedButton(
+                            onClick = { eventLimit += 50 },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Rounded.ExpandMore, contentDescription = null)
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Carregar mais 50")
                         }
                     }
                 }
@@ -5820,11 +5870,298 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                         ) { Text("Ignorar") }
+                        TextButton(
+                            onClick = {
+                                editingEvent = null
+                                classifyingEvent = event
+                            },
+                        ) { Text("Classificar") }
                         TextButton(onClick = { editingEvent = null }) { Text("Cancelar") }
                     }
                 },
             )
         }
+        classifyingEvent?.let { event ->
+            ManualEventClassificationDialog(
+                event = event,
+                accounts = remember(refresh) { store.financialAccounts() },
+                onDismiss = { classifyingEvent = null },
+                onSave = { direction, accountId, amount, occurredAt, description, category,
+                    customCategory, subcategory, pending, cardLastFour ->
+                    if (
+                        store.classifyEventManually(
+                            eventId = event.id,
+                            direction = direction,
+                            accountId = accountId,
+                            amount = amount,
+                            occurredAt = occurredAt,
+                            description = description,
+                            category = category,
+                            customCategory = customCategory,
+                            subcategory = subcategory,
+                            pending = pending,
+                            cardLastFour = cardLastFour,
+                        )
+                    ) {
+                        classifyingEvent = null
+                        refresh++
+                    }
+                },
+            )
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun ManualEventClassificationDialog(
+        event: DiagnosticEvent,
+        accounts: List<FinancialAccountRecord>,
+        onDismiss: () -> Unit,
+        onSave: (
+            FinancialTransactionDirection,
+            Long,
+            java.math.BigDecimal,
+            LocalDateTime,
+            String,
+            TransactionCategory,
+            String?,
+            String?,
+            Boolean,
+            String?,
+        ) -> Unit,
+    ) {
+        val hint = remember(event.id) { DiagnosticMessageParser.parse(event) }
+        var direction by remember(event.id) {
+            mutableStateOf(hint?.direction ?: FinancialTransactionDirection.EXPENSE)
+        }
+        var selectedAccount by remember(event.id, accounts) {
+            mutableStateOf(
+                hint?.cardLastFour?.let { lastFour ->
+                    accounts.firstOrNull {
+                        it.type == FinancialAccountType.CREDIT_CARD &&
+                            it.cardIdentifiers.orEmpty().contains(lastFour)
+                    }
+                } ?: accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
+                    .singleOrNull()
+            )
+        }
+        var amountText by remember(event.id) {
+            mutableStateOf(hint?.amount?.toPlainString().orEmpty())
+        }
+        var dateText by remember(event.id) {
+            mutableStateOf((hint?.occurredAt ?: LocalDateTime.now()).toLocalDate().toString())
+        }
+        var description by remember(event.id) {
+            mutableStateOf(hint?.description ?: event.title)
+        }
+        var pending by remember(event.id) { mutableStateOf(hint?.pending ?: false) }
+        var category by remember(event.id) { mutableStateOf(TransactionCategory.UNCATEGORIZED) }
+        var customCategory by remember(event.id) { mutableStateOf("") }
+        var subcategory by remember(event.id) { mutableStateOf("") }
+        var accountExpanded by remember { mutableStateOf(false) }
+        var categoryExpanded by remember { mutableStateOf(false) }
+        var quoteStatus by remember(event.id) { mutableStateOf<String?>(null) }
+        var quoteLoading by remember(event.id) { mutableStateOf(false) }
+
+        LaunchedEffect(event.id, hint?.currency) {
+            if (hint?.currency == "USD") {
+                quoteLoading = true
+                quoteStatus = runCatching {
+                    val quote = withContext(Dispatchers.IO) {
+                        BcbExchangeRateService.usdSellingRate(hint.occurredAt.toLocalDate())
+                    }
+                    val converted = hint.amount.multiply(quote.rate)
+                        .setScale(2, java.math.RoundingMode.HALF_UP)
+                    amountText = converted.toPlainString()
+                    "USD ${hint.amount.toPlainString()} × PTAX ${quote.rate.toPlainString()} = " +
+                        formatCurrency(converted.toPlainString())
+                }.getOrElse {
+                    "Não foi possível consultar a PTAX. Informe o valor em reais."
+                }
+                quoteLoading = false
+            }
+        }
+
+        val availableAccounts = remember(direction, accounts, hint?.cardLastFour) {
+            if (direction == FinancialTransactionDirection.INCOME) {
+                accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
+            } else {
+                accounts
+            }
+        }
+        LaunchedEffect(direction) {
+            if (selectedAccount !in availableAccounts) selectedAccount = null
+        }
+        val parsedAmount = amountText.replace(",", ".").toBigDecimalOrNull()
+        val parsedDate = runCatching { LocalDate.parse(dateText) }.getOrNull()
+        val canSave = selectedAccount != null && parsedAmount?.signum() == 1 &&
+            parsedDate != null && description.isNotBlank() && !quoteLoading
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Classificar movimentação") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 560.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
+                ) {
+                    Text(event.body, style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(FinanceSpacing.xs)) {
+                        FilterChip(
+                            selected = direction == FinancialTransactionDirection.EXPENSE,
+                            onClick = { direction = FinancialTransactionDirection.EXPENSE },
+                            label = { Text("Saída") },
+                        )
+                        FilterChip(
+                            selected = direction == FinancialTransactionDirection.INCOME,
+                            onClick = { direction = FinancialTransactionDirection.INCOME },
+                            label = { Text("Entrada") },
+                        )
+                    }
+                    ExposedDropdownMenuBox(
+                        expanded = accountExpanded,
+                        onExpandedChange = { accountExpanded = it },
+                    ) {
+                        OutlinedTextField(
+                            value = selectedAccount?.name.orEmpty(),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Conta ou cartão") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = accountExpanded)
+                            },
+                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        )
+                        ExposedDropdownMenu(
+                            expanded = accountExpanded,
+                            onDismissRequest = { accountExpanded = false },
+                        ) {
+                            availableAccounts.forEach { account ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text("${account.name} · ${account.type.displayName}")
+                                    },
+                                    onClick = {
+                                        selectedAccount = account
+                                        accountExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = amountText,
+                        onValueChange = {
+                            amountText = it.filter { char ->
+                                char.isDigit() || char == ',' || char == '.'
+                            }.take(18)
+                        },
+                        label = { Text("Valor em reais") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (quoteLoading) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text("Consultando PTAX do Banco Central…")
+                    } else {
+                        quoteStatus?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = dateText,
+                        onValueChange = { dateText = it.take(10) },
+                        label = { Text("Data (AAAA-MM-DD)") },
+                        isError = dateText.isNotBlank() && parsedDate == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it.take(100) },
+                        label = { Text("Descrição") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    ExposedDropdownMenuBox(
+                        expanded = categoryExpanded,
+                        onExpandedChange = { categoryExpanded = it },
+                    ) {
+                        OutlinedTextField(
+                            value = category.displayName,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Categoria") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = categoryExpanded)
+                            },
+                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        )
+                        ExposedDropdownMenu(
+                            expanded = categoryExpanded,
+                            onDismissRequest = { categoryExpanded = false },
+                        ) {
+                            TransactionCategory.availableFor(direction).forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.displayName) },
+                                    onClick = {
+                                        category = option
+                                        categoryExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = customCategory,
+                        onValueChange = { customCategory = it.take(40) },
+                        label = { Text("Categoria personalizada (opcional)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = subcategory,
+                        onValueChange = { subcategory = it.take(40) },
+                        label = { Text("Subcategoria (opcional)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("Pendente")
+                        Switch(checked = pending, onCheckedChange = { pending = it })
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = canSave,
+                    onClick = {
+                        onSave(
+                            direction,
+                            checkNotNull(selectedAccount).id,
+                            checkNotNull(parsedAmount),
+                            checkNotNull(parsedDate).atStartOfDay(),
+                            description,
+                            category,
+                            customCategory.ifBlank { null },
+                            subcategory.ifBlank { null },
+                            pending,
+                            hint?.cardLastFour,
+                        )
+                    },
+                ) { Text("Salvar") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            },
+        )
     }
 
     private fun transactionTypeLabel(type: FinancialTransactionType): String =
