@@ -38,6 +38,9 @@ data class CreditCardInvoiceRecord(
     val adjustmentAmount: BigDecimal = BigDecimal.ZERO,
 )
 
+fun CreditCardInvoiceRecord.statementDate(): LocalDate =
+    dueDate ?: closingPeriod.atEndOfMonth()
+
 data class InvoicePaymentRecord(
     val id: Long,
     val amount: BigDecimal,
