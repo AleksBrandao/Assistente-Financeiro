@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 30556)
-Total output lines: 2856
-
 package br.com.assistentefinanceiro.notifications
 
 import android.content.ContentValues
@@ -1340,7 +1337,58 @@ class DiagnosticStore(context: Context) :
                 accountId: Long,
                 relatedAccountId: Long,
                 direction: AccountMovementDirection,
-         …556 tokens truncated…tValues().apply {
+            ) = db.insertOrThrow(
+                "account_movements",
+                null,
+                ContentValues().apply {
+                    put("account_id", accountId)
+                    put("type", AccountMovementType.TRANSFER.name)
+                    put("direction", direction.name)
+                    put("amount", amount.toPlainString())
+                    put("occurred_at", occurredAt.toString())
+                    put("description", normalizedDescription)
+                    putNull("invoice_payment_id")
+                    put("related_account_id", relatedAccountId)
+                    put("transfer_group", transferGroup)
+                },
+            )
+            insert(sourceAccountId, destinationAccountId, AccountMovementDirection.DEBIT)
+            insert(destinationAccountId, sourceAccountId, AccountMovementDirection.CREDIT)
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun recordManualTransaction(
+        accountId: Long,
+        direction: FinancialTransactionDirection,
+        amount: java.math.BigDecimal,
+        occurredAt: LocalDate,
+        description: String,
+        status: TransactionStatus,
+        occurrences: Int = 1,
+    ): Boolean {
+        if (amount.signum() <= 0 || description.isBlank() || occurrences !in 1..120) return false
+        val db = writableDatabase
+        if (!isBankAccount(db, accountId)) return false
+        val account = db.rawQuery(
+            "SELECT name FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else return false }
+        val seriesId = if (occurrences > 1) UUID.randomUUID().toString() else null
+        db.beginTransaction()
+        return try {
+            MonthlyRecurrencePlanner.plan(occurredAt, occurrences, status).forEach { occurrence ->
+                val occurrenceDate = occurrence.date
+                val occurrenceStatus = occurrence.status
+                val inserted = db.insert(
+                    "transactions",
+                    null,
+                    ContentValues().apply {
                         putNull("source_event_id")
                         put("direction", direction.name)
                         put(
