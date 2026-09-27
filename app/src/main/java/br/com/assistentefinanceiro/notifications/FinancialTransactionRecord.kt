@@ -45,8 +45,7 @@ enum class TransactionSeriesScope {
 enum class TransactionOrigin {
     NOTIFICATION,
     MOBILLS,
-    MANUAL,
-    PLUGGY;
+    MANUAL;
 
     companion object {
         fun fromStored(value: String?): TransactionOrigin =

@@ -6,8 +6,7 @@ import java.util.Locale
 enum class TransactionCategorySource {
     DEFAULT,
     RULE,
-    MANUAL,
-    EXTERNAL;
+    MANUAL;
 
     companion object {
         fun fromStored(value: String?): TransactionCategorySource =

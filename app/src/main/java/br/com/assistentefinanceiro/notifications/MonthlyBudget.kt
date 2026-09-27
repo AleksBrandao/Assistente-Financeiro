@@ -106,9 +106,6 @@ object MonthlyBudgetCalculator {
             )
     }
 
-    fun periodFor(transaction: FinancialTransactionRecord): YearMonth? =
-        effectiveDate(transaction)?.let(YearMonth::from)
-
     private fun expensesFor(
         period: YearMonth,
         transactions: List<FinancialTransactionRecord>,
