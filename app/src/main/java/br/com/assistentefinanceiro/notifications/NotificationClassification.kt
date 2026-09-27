@@ -29,6 +29,7 @@ enum class FinancialTransactionType(
 ) {
     CARD_PURCHASE(FinancialTransactionDirection.EXPENSE),
     PIX_RECEIVED(FinancialTransactionDirection.INCOME),
+    PIX_SENT(FinancialTransactionDirection.EXPENSE),
     IMPORTED_EXPENSE(FinancialTransactionDirection.EXPENSE),
     IMPORTED_INCOME(FinancialTransactionDirection.INCOME),
     MANUAL_EXPENSE(FinancialTransactionDirection.EXPENSE),
@@ -99,6 +100,18 @@ object FinancialNotificationClassifier {
                 reason = "PIX recebido reconhecido",
                 transaction = ParsedFinancialTransaction(
                     type = FinancialTransactionType.PIX_RECEIVED,
+                    amount = pix.amount,
+                    occurredAt = pix.occurredAt,
+                ),
+            )
+        }
+
+        SantanderPixSentParser.parse(title, body)?.let { pix ->
+            return NotificationClassificationResult(
+                classification = NotificationClassification.TRANSACTION,
+                reason = "PIX enviado reconhecido",
+                transaction = ParsedFinancialTransaction(
+                    type = FinancialTransactionType.PIX_SENT,
                     amount = pix.amount,
                     occurredAt = pix.occurredAt,
                 ),

@@ -167,6 +167,9 @@ class DiagnosticStore(context: Context) :
             db.execSQL("ALTER TABLE transactions ADD COLUMN custom_category TEXT")
             db.execSQL("ALTER TABLE transactions ADD COLUMN subcategory TEXT")
         }
+        if (oldVersion < 22) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN invoice_period_override TEXT")
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -290,6 +293,96 @@ class DiagnosticStore(context: Context) :
                 )
             }
         }
+    }
+
+    fun reclassifyEvent(eventId: Long): Boolean {
+        val db = writableDatabase
+        val event = db.rawQuery(
+            """SELECT package_name,app_label,title,body FROM events WHERE id = ?""",
+            arrayOf(eventId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            arrayOf(cursor.getString(0), cursor.getString(1), cursor.getString(2), cursor.getString(3))
+        }
+        val result = FinancialNotificationClassifier.classify(
+            event[0], event[1], event[2], event[3],
+        )
+        db.beginTransaction()
+        return try {
+            removeTransactionForEvent(db, eventId)
+            val transaction = result.transaction
+            val updated = db.update(
+                "events",
+                ContentValues().apply {
+                    put("parsed", if (transaction != null) 1 else 0)
+                    put("classification", result.classification.name)
+                    put("classification_reason", result.reason)
+                    put("transaction_type", transaction?.type?.name)
+                    put("occurred_at", transaction?.occurredAt?.toString())
+                    put("card_last_four", transaction?.cardLastFour)
+                    put("amount", transaction?.amount?.toPlainString())
+                    put("merchant", transaction?.merchant)
+                },
+                "id = ?",
+                arrayOf(eventId.toString()),
+            ) == 1
+            if (updated && transaction != null) {
+                insertTransaction(
+                    db, eventId, event[0], transaction.type,
+                    transaction.amount.toPlainString(), transaction.occurredAt.toString(),
+                    transactionDescription(transaction.type, transaction.merchant),
+                    transaction.merchant, transaction.cardLastFour,
+                )
+            }
+            db.setTransactionSuccessful()
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun setEventAsIgnored(eventId: Long): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            removeTransactionForEvent(db, eventId)
+            val updated = db.update(
+                "events",
+                ContentValues().apply {
+                    put("parsed", 0)
+                    put("classification", NotificationClassification.IGNORED_PROMOTION.name)
+                    put("classification_reason", "Ignorada manualmente")
+                    putNull("transaction_type")
+                    putNull("occurred_at")
+                    putNull("card_last_four")
+                    putNull("amount")
+                    putNull("merchant")
+                },
+                "id = ?",
+                arrayOf(eventId.toString()),
+            ) == 1
+            db.setTransactionSuccessful()
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun removeTransactionForEvent(db: SQLiteDatabase, eventId: Long) {
+        val accountIds = db.rawQuery(
+            "SELECT DISTINCT account_id FROM transactions WHERE source_event_id = ?",
+            arrayOf(eventId.toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) if (!cursor.isNull(0)) add(cursor.getLong(0))
+            }
+        }
+        db.delete("transactions", "source_event_id = ?", arrayOf(eventId.toString()))
+        accountIds.forEach { rebuildCreditCardInvoices(db, it) }
     }
 
     fun recentTransactions(limit: Int = 100): List<FinancialTransactionRecord> =
@@ -1053,6 +1146,7 @@ class DiagnosticStore(context: Context) :
         amount: java.math.BigDecimal,
         occurredAt: LocalDate,
         description: String,
+        invoicePeriod: YearMonth? = null,
     ): Boolean {
         if (amount.signum() <= 0 || description.isBlank()) return false
         val db = writableDatabase
@@ -1091,6 +1185,7 @@ class DiagnosticStore(context: Context) :
                     put("account", account.first)
                     put("account_id", accountId)
                     putNull("invoice_id")
+                    invoicePeriod?.let { put("invoice_period_override", it.toString()) }
                     put("import_key", "MANUAL:${UUID.randomUUID()}")
                 },
             )
@@ -1098,6 +1193,50 @@ class DiagnosticStore(context: Context) :
             rebuildCreditCardInvoices(db, accountId)
             db.setTransactionSuccessful()
             true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun updateManualCardPurchase(
+        transactionId: Long,
+        amount: java.math.BigDecimal,
+        occurredAt: LocalDate,
+        description: String,
+        invoicePeriod: YearMonth,
+    ): Boolean {
+        if (amount.signum() <= 0 || description.isBlank()) return false
+        val db = writableDatabase
+        val accountId = db.rawQuery(
+            """SELECT account_id FROM transactions
+               WHERE id = ? AND type = ? AND origin = ?""",
+            arrayOf(
+                transactionId.toString(),
+                FinancialTransactionType.CARD_PURCHASE.name,
+                TransactionOrigin.MANUAL.name,
+            ),
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return false
+            cursor.getLong(0)
+        }
+        db.beginTransaction()
+        return try {
+            val updated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("amount", amount.toPlainString())
+                    put("occurred_at", occurredAt.atStartOfDay().toString())
+                    put("description", description.trim())
+                    put("invoice_period_override", invoicePeriod.toString())
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (updated) rebuildCreditCardInvoices(db, accountId)
+            db.setTransactionSuccessful()
+            updated
         } catch (_: Exception) {
             false
         } finally {
@@ -1722,6 +1861,7 @@ class DiagnosticStore(context: Context) :
         FinancialTransactionType.CARD_PURCHASE ->
             merchant?.takeIf { it.isNotBlank() } ?: "Compra no cartão"
         FinancialTransactionType.PIX_RECEIVED -> "PIX recebido"
+        FinancialTransactionType.PIX_SENT -> "PIX enviado"
         FinancialTransactionType.IMPORTED_EXPENSE -> "Despesa importada"
         FinancialTransactionType.IMPORTED_INCOME -> "Receita importada"
         FinancialTransactionType.MANUAL_EXPENSE -> "Despesa manual"
@@ -1774,6 +1914,7 @@ class DiagnosticStore(context: Context) :
                 series_total INTEGER,
                 custom_category TEXT,
                 subcategory TEXT,
+                invoice_period_override TEXT,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2078,7 +2219,7 @@ class DiagnosticStore(context: Context) :
         if (account.first != FinancialAccountType.CREDIT_CARD || account.second == null) return
 
         db.rawQuery(
-            """SELECT id,occurred_at,origin FROM transactions
+            """SELECT id,occurred_at,origin,invoice_period_override FROM transactions
                WHERE account_id = ?""",
             arrayOf(accountId.toString()),
         ).use { cursor ->
@@ -2087,7 +2228,10 @@ class DiagnosticStore(context: Context) :
                     LocalDateTime.parse(cursor.getString(1)).toLocalDate()
                 }.getOrNull() ?: continue
                 val origin = TransactionOrigin.fromStored(cursor.getString(2))
-                val dates = if (origin == TransactionOrigin.MOBILLS) {
+                val overridePeriod = if (cursor.isNull(3)) null else runCatching {
+                    YearMonth.parse(cursor.getString(3))
+                }.getOrNull()
+                val calculatedDates = if (origin == TransactionOrigin.MOBILLS) {
                     CreditCardBillingCycle.fromImportedInvoiceDate(
                         invoiceDate = purchaseDate,
                         closingDay = account.second!!,
@@ -2100,6 +2244,14 @@ class DiagnosticStore(context: Context) :
                         dueDay = account.third,
                     )
                 }
+                val dates = overridePeriod?.let { period ->
+                    val closingDate = period.atDay(account.second!!.coerceAtMost(period.lengthOfMonth()))
+                    val dueDate = account.third?.let { dueDay ->
+                        val duePeriod = if (dueDay <= account.second!!) period.plusMonths(1) else period
+                        duePeriod.atDay(dueDay.coerceAtMost(duePeriod.lengthOfMonth()))
+                    }
+                    CreditCardBillingDates(period, closingDate, dueDate)
+                } ?: calculatedDates
                 val status = CreditCardBillingCycle.status(dates.closingDate, LocalDate.now())
                 val invoiceId = db.insertWithOnConflict(
                     "credit_card_invoices",
@@ -2384,7 +2536,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 21
+        const val DATABASE_VERSION = 22
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(
