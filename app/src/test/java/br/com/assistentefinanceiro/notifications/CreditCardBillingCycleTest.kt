@@ -47,6 +47,24 @@ class CreditCardBillingCycleTest {
     }
 
     @Test
+    fun invoiceWithoutDueDateUsesEndOfClosingPeriodInStatement() {
+        val invoice = CreditCardInvoiceRecord(
+            id = 1,
+            accountId = 2,
+            closingPeriod = YearMonth.of(2026, 9),
+            closingDate = LocalDate.of(2026, 9, 14),
+            dueDate = null,
+            status = CreditCardInvoiceStatus.CLOSED,
+            total = BigDecimal("610.92"),
+            paidAmount = BigDecimal.ZERO,
+            outstandingAmount = BigDecimal("610.92"),
+            transactionCount = 1,
+        )
+
+        assertEquals(LocalDate.of(2026, 9, 30), invoice.statementDate())
+    }
+
+    @Test
     fun closesInvoiceOnClosingDate() {
         val closingDate = LocalDate.of(2026, 8, 26)
         assertEquals(

@@ -1015,9 +1015,9 @@ class DiagnosticStore(context: Context) :
                 }
                 val outstandingAtDate = (invoice.total - paidThroughDate)
                     .max(java.math.BigDecimal.ZERO)
-                val dueOutstanding = if (
-                    invoice.dueDate != null && !invoice.dueDate.isAfter(throughDate)
-                ) outstandingAtDate else java.math.BigDecimal.ZERO
+                val dueOutstanding = if (!invoice.statementDate().isAfter(throughDate)) {
+                    outstandingAtDate
+                } else java.math.BigDecimal.ZERO
                 val paymentsWithoutAccount = payments
                     .filter { it.sourceAccountId == null }
                     .fold(java.math.BigDecimal.ZERO) { sum, payment -> sum + payment.amount }

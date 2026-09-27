@@ -479,7 +479,7 @@ class MainActivity : ComponentActivity() {
         }
         val statementInvoiceItems = remember(invoicesByAccount) {
             invoicesByAccount.mapNotNull { (account, invoice) ->
-                        val dueDate = invoice.dueDate ?: return@mapNotNull null
+                        val statementDate = invoice.statementDate()
                         if (invoice.total.signum() == 0) return@mapNotNull null
                         val isCredit = invoice.total.signum() < 0
                         StatementInvoiceItem(
@@ -495,7 +495,7 @@ class MainActivity : ComponentActivity() {
                                     FinancialTransactionType.IMPORTED_INCOME
                                 } else FinancialTransactionType.IMPORTED_EXPENSE,
                                 amount = invoice.total.abs().toPlainString(),
-                                occurredAt = dueDate.atTime(23, 59, 59).toString(),
+                                occurredAt = statementDate.atTime(23, 59, 59).toString(),
                                 description = "Fatura ${account.name}",
                                 sourcePackage = "credit-card-invoice",
                                 status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
@@ -504,6 +504,7 @@ class MainActivity : ComponentActivity() {
                                 account = account.name,
                                 accountId = account.id,
                                 invoiceId = invoice.id,
+                                dueDate = invoice.dueDate?.toString(),
                             ),
                         )
                     }
@@ -797,7 +798,7 @@ class MainActivity : ComponentActivity() {
                             icon = Icons.Rounded.CreditCardOff,
                             title = "Compras sem fatura",
                             description = "$unconsolidatedCardTransactionCount compras de cartão " +
-                                "ainda não foram vinculadas a uma fatura com vencimento. " +
+                                "ainda não foram vinculadas a uma fatura. " +
                                 "Revise o cadastro do cartão em Contas.",
                             foreground = MaterialTheme.colorScheme.onErrorContainer,
                             background = MaterialTheme.colorScheme.errorContainer,
@@ -5331,7 +5332,7 @@ class MainActivity : ComponentActivity() {
         val cardIds = cards.map { it.id }.toSet()
         val invoices = cards.flatMap { account ->
             store.creditCardInvoices(account.id).mapNotNull { invoice ->
-                val due = invoice.dueDate ?: return@mapNotNull null
+                val statementDate = invoice.statementDate()
                 if (invoice.total.signum() == 0) return@mapNotNull null
                 val paidAt = if (invoice.status == CreditCardInvoiceStatus.PAID) {
                     store.invoicePayments(invoice).maxOfOrNull { it.paidAt }
@@ -5346,13 +5347,13 @@ class MainActivity : ComponentActivity() {
                         FinancialTransactionType.IMPORTED_INCOME
                     } else FinancialTransactionType.IMPORTED_EXPENSE,
                     amount = invoice.total.abs().toPlainString(),
-                    occurredAt = due.atStartOfDay().toString(),
+                    occurredAt = statementDate.atStartOfDay().toString(),
                     description = "Fatura ${account.name}",
                     sourcePackage = "credit-card-invoice",
                     status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
                         TransactionStatus.REALIZED
                     } else TransactionStatus.PENDING,
-                    dueDate = due.toString(),
+                    dueDate = invoice.dueDate?.toString(),
                     paidAt = paidAt?.toString(),
                 )
             }
