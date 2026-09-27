@@ -998,17 +998,23 @@ class DiagnosticStore(context: Context) :
     fun ignoreCardPurchaseWithoutInvoice(transactionId: Long): Boolean {
         val db = writableDatabase
         val metadata = db.rawQuery(
-            "SELECT account_id,type,invoice_id FROM transactions WHERE id = ?",
+            """SELECT t.account_id,t.type,t.invoice_id,a.type
+               FROM transactions t
+               LEFT JOIN financial_accounts a ON a.id = t.account_id
+               WHERE t.id = ?""",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
             if (!cursor.moveToFirst()) return false
-            Triple(
-                if (cursor.isNull(0)) null else cursor.getLong(0),
-                FinancialTransactionType.fromStored(cursor.getString(1)),
-                if (cursor.isNull(2)) null else cursor.getLong(2),
+            IgnoreInvoiceLinkMetadata(
+                accountId = if (cursor.isNull(0)) null else cursor.getLong(0),
+                transactionType = FinancialTransactionType.fromStored(cursor.getString(1)),
+                invoiceId = if (cursor.isNull(2)) null else cursor.getLong(2),
+                accountType = if (cursor.isNull(3)) null else {
+                    FinancialAccountType.fromStored(cursor.getString(3))
+                },
             )
         }
-        if (metadata.second != FinancialTransactionType.CARD_PURCHASE || metadata.third != null) {
+        if (!metadata.canIgnoreInvoiceLink()) {
             return false
         }
         val updated = db.update(
@@ -1017,7 +1023,7 @@ class DiagnosticStore(context: Context) :
             "id = ?",
             arrayOf(transactionId.toString()),
         ) == 1
-        if (updated) metadata.first?.let { rebuildCreditCardInvoices(db, it) }
+        if (updated) metadata.accountId?.let { rebuildCreditCardInvoices(db, it) }
         return updated
     }
 

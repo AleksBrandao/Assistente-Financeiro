@@ -23,8 +23,8 @@ android {
         applicationId = "br.com.assistentefinanceiro"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.22.6"
+        versionCode = 32
+        versionName = "0.22.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
