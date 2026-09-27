@@ -28,6 +28,7 @@ data class FinancialTransactionRecord(
     val seriesTotal: Int? = null,
     val customCategory: String? = null,
     val subcategory: String? = null,
+    val ignoreInvoiceLink: Boolean = false,
 )
 
 val FinancialTransactionRecord.categoryDisplayName: String

@@ -177,6 +177,11 @@ class DiagnosticStore(context: Context) :
         if (oldVersion < 22) {
             db.execSQL("ALTER TABLE transactions ADD COLUMN invoice_period_override TEXT")
         }
+        if (oldVersion in 7..22) {
+            db.execSQL(
+                "ALTER TABLE transactions ADD COLUMN ignore_invoice_link INTEGER NOT NULL DEFAULT 0"
+            )
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -524,7 +529,7 @@ class DiagnosticStore(context: Context) :
                       category,category_source,rule_key,origin,status,account,original_category,
                       original_status,account_id,invoice_id,original_amount,due_date,
                       planned_payment_date,paid_at,series_id,series_index,series_total,
-                      custom_category,subcategory
+                      custom_category,subcategory,ignore_invoice_link
                FROM transactions ORDER BY occurred_at DESC, id DESC LIMIT ?""",
             arrayOf(limit.coerceIn(1, 10_000).toString()),
         ).use { cursor ->
@@ -563,6 +568,7 @@ class DiagnosticStore(context: Context) :
                                 seriesTotal = if (cursor.isNull(24)) null else cursor.getInt(24),
                                 customCategory = cursor.getString(25),
                                 subcategory = cursor.getString(26),
+                                ignoreInvoiceLink = cursor.getInt(27) == 1,
                             )
                         )
                     }
@@ -844,6 +850,23 @@ class DiagnosticStore(context: Context) :
         val normalizedIdentifiers = FinancialAccountIdentity.normalizedIdentifiers(cardIdentifiers)
         if (normalizedKey.isBlank()) return false
         if (type == FinancialAccountType.BANK_ACCOUNT && openingBalanceDate == null) return false
+        val existingAccount = id?.let { accountId ->
+            financialAccounts().firstOrNull { it.id == accountId }
+        }
+        val balanceAdjustment = if (
+            existingAccount?.type == FinancialAccountType.BANK_ACCOUNT &&
+            type == FinancialAccountType.BANK_ACCOUNT
+        ) {
+            val adjustmentDate = checkNotNull(openingBalanceDate)
+            if (
+                existingAccount.openingBalanceDate != null &&
+                !adjustmentDate.isAfter(existingAccount.openingBalanceDate)
+            ) return false
+            BalanceAdjustmentCalculator.difference(
+                currentBalance = accountBalance(existingAccount, adjustmentDate).realizedBalance,
+                informedBalance = openingBalance,
+            )
+        } else null
         val db = writableDatabase
         db.beginTransaction()
         return try {
@@ -866,11 +889,20 @@ class DiagnosticStore(context: Context) :
                 else put("card_identifiers", normalizedIdentifiers)
                 put(
                     "opening_balance",
-                    if (type == FinancialAccountType.BANK_ACCOUNT) openingBalance.toPlainString()
+                    if (
+                        type == FinancialAccountType.BANK_ACCOUNT &&
+                        existingAccount?.type == FinancialAccountType.BANK_ACCOUNT
+                    ) existingAccount.openingBalance.toPlainString()
+                    else if (type == FinancialAccountType.BANK_ACCOUNT) openingBalance.toPlainString()
                     else "0",
                 )
                 if (type == FinancialAccountType.BANK_ACCOUNT) {
-                    put("opening_balance_date", openingBalanceDate?.toString())
+                    put(
+                        "opening_balance_date",
+                        if (existingAccount?.type == FinancialAccountType.BANK_ACCOUNT) {
+                            existingAccount.openingBalanceDate?.toString()
+                        } else openingBalanceDate?.toString(),
+                    )
                 } else {
                     putNull("opening_balance_date")
                 }
@@ -885,6 +917,25 @@ class DiagnosticStore(context: Context) :
                 } else id
             }
             if (accountId == -1L) return false
+            if (balanceAdjustment != null && balanceAdjustment.signum() != 0) {
+                db.insertOrThrow(
+                    "account_movements",
+                    null,
+                    ContentValues().apply {
+                        put("account_id", accountId)
+                        put("type", AccountMovementType.BALANCE_ADJUSTMENT.name)
+                        put("amount", balanceAdjustment.abs().toPlainString())
+                        put("occurred_at", checkNotNull(openingBalanceDate).toString())
+                        put("description", "Ajuste de saldo")
+                        put(
+                            "direction",
+                            if (balanceAdjustment.signum() > 0) {
+                                AccountMovementDirection.CREDIT.name
+                            } else AccountMovementDirection.DEBIT.name,
+                        )
+                    },
+                )
+            }
             linkTransactionsToAccount(db, accountId, normalizedKey)
             rebuildCreditCardInvoices(db, accountId)
             db.setTransactionSuccessful()
@@ -924,6 +975,7 @@ class DiagnosticStore(context: Context) :
                     put("account", account.first)
                     put("account_id", accountId)
                     putNull("invoice_id")
+                    put("ignore_invoice_link", 0)
                 },
                 "id = ?",
                 arrayOf(transactionId.toString()),
@@ -941,6 +993,32 @@ class DiagnosticStore(context: Context) :
         } finally {
             db.endTransaction()
         }
+    }
+
+    fun ignoreCardPurchaseWithoutInvoice(transactionId: Long): Boolean {
+        val db = writableDatabase
+        val metadata = db.rawQuery(
+            "SELECT account_id,type,invoice_id FROM transactions WHERE id = ?",
+            arrayOf(transactionId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            Triple(
+                if (cursor.isNull(0)) null else cursor.getLong(0),
+                FinancialTransactionType.fromStored(cursor.getString(1)),
+                if (cursor.isNull(2)) null else cursor.getLong(2),
+            )
+        }
+        if (metadata.second != FinancialTransactionType.CARD_PURCHASE || metadata.third != null) {
+            return false
+        }
+        val updated = db.update(
+            "transactions",
+            ContentValues().apply { put("ignore_invoice_link", 1) },
+            "id = ?",
+            arrayOf(transactionId.toString()),
+        ) == 1
+        if (updated) metadata.first?.let { rebuildCreditCardInvoices(db, it) }
+        return updated
     }
 
     fun deleteFinancialAccountIfEmpty(accountId: Long): Boolean {
@@ -2122,6 +2200,7 @@ class DiagnosticStore(context: Context) :
                 custom_category TEXT,
                 subcategory TEXT,
                 invoice_period_override TEXT,
+                ignore_invoice_link INTEGER NOT NULL DEFAULT 0,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2427,7 +2506,7 @@ class DiagnosticStore(context: Context) :
 
         db.rawQuery(
             """SELECT id,occurred_at,origin,invoice_period_override FROM transactions
-               WHERE account_id = ?""",
+               WHERE account_id = ? AND ignore_invoice_link = 0""",
             arrayOf(accountId.toString()),
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -2743,7 +2822,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 22
+        const val DATABASE_VERSION = 23
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(
