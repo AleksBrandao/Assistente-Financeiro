@@ -18,15 +18,29 @@ class IgnoreInvoiceLinkMetadataTest {
     }
 
     @Test
-    fun `does not allow a transaction already linked to an invoice`() {
+    fun `does not allow a transaction linked to a consolidated invoice`() {
         val metadata = IgnoreInvoiceLinkMetadata(
             accountId = 10L,
             transactionType = FinancialTransactionType.CARD_PURCHASE,
             invoiceId = 20L,
             accountType = FinancialAccountType.CREDIT_CARD,
+            linkedInvoiceHasConsolidatedValue = true,
         )
 
         assertFalse(metadata.canIgnoreInvoiceLink())
+    }
+
+    @Test
+    fun `allows a card transaction linked to an unconsolidated invoice`() {
+        val metadata = IgnoreInvoiceLinkMetadata(
+            accountId = 10L,
+            transactionType = FinancialTransactionType.CARD_PURCHASE,
+            invoiceId = 20L,
+            accountType = FinancialAccountType.CREDIT_CARD,
+            linkedInvoiceHasConsolidatedValue = false,
+        )
+
+        assertTrue(metadata.canIgnoreInvoiceLink())
     }
 
     @Test
