@@ -5,9 +5,10 @@ data class IgnoreInvoiceLinkMetadata(
     val transactionType: FinancialTransactionType?,
     val invoiceId: Long?,
     val accountType: FinancialAccountType?,
+    val linkedInvoiceHasConsolidatedValue: Boolean = false,
 ) {
     fun canIgnoreInvoiceLink(): Boolean =
-        invoiceId == null && (
+        !linkedInvoiceHasConsolidatedValue && (
             transactionType == FinancialTransactionType.CARD_PURCHASE ||
                 accountType == FinancialAccountType.CREDIT_CARD
             )
