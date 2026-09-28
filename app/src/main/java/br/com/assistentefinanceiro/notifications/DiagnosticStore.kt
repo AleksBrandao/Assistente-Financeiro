@@ -998,32 +998,9 @@ class DiagnosticStore(context: Context) :
     fun ignoreCardPurchaseWithoutInvoice(transactionId: Long): Boolean {
         val db = writableDatabase
         val metadata = db.rawQuery(
-            """SELECT t.account_id,t.type,t.invoice_id,a.type,
-                      CASE
-                          WHEN i.id IS NULL THEN 0
-                          WHEN (
-                              COALESCE((
-                                  SELECT SUM(
-                                      CASE WHEN tx.direction = 'EXPENSE'
-                                          THEN CAST(tx.amount AS REAL)
-                                          ELSE -CAST(tx.amount AS REAL)
-                                      END
-                                  )
-                                  FROM transactions tx
-                                  WHERE tx.invoice_id = i.id
-                              ),0) +
-                              COALESCE((
-                                  SELECT CAST(adj.amount AS REAL)
-                                  FROM invoice_adjustments adj
-                                  WHERE adj.account_id = i.account_id
-                                    AND adj.closing_period = i.closing_period
-                              ),0)
-                          ) <> 0 THEN 1
-                          ELSE 0
-                      END
+            """SELECT t.account_id,t.type,t.invoice_id,a.type
                FROM transactions t
                LEFT JOIN financial_accounts a ON a.id = t.account_id
-               LEFT JOIN credit_card_invoices i ON i.id = t.invoice_id
                WHERE t.id = ?""",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
@@ -1035,7 +1012,6 @@ class DiagnosticStore(context: Context) :
                 accountType = if (cursor.isNull(3)) null else {
                     FinancialAccountType.fromStored(cursor.getString(3))
                 },
-                linkedInvoiceHasConsolidatedValue = cursor.getInt(4) == 1,
             )
         }
         if (!metadata.canIgnoreInvoiceLink()) {
