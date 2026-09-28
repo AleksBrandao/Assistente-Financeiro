@@ -18,7 +18,7 @@ class IgnoreInvoiceLinkMetadataTest {
     }
 
     @Test
-    fun `does not allow a transaction already linked to an invoice`() {
+    fun `allows card purchase even when an old invoice link exists`() {
         val metadata = IgnoreInvoiceLinkMetadata(
             accountId = 10L,
             transactionType = FinancialTransactionType.CARD_PURCHASE,
@@ -26,7 +26,7 @@ class IgnoreInvoiceLinkMetadataTest {
             accountType = FinancialAccountType.CREDIT_CARD,
         )
 
-        assertFalse(metadata.canIgnoreInvoiceLink())
+        assertTrue(metadata.canIgnoreInvoiceLink())
     }
 
     @Test
