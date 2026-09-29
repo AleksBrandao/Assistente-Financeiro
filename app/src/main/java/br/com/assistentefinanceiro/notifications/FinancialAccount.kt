@@ -65,6 +65,36 @@ object ForwardProjectedBalanceCalculator {
             throughDateBalance.pendingExpense
 }
 
+object AccountBalanceDatePolicy {
+    fun includesTransaction(
+        status: TransactionStatus,
+        effectiveDate: LocalDate,
+        openingBalanceDate: LocalDate?,
+        throughDate: LocalDate?,
+    ): Boolean {
+        if (throughDate != null && effectiveDate.isAfter(throughDate)) return false
+
+        // O saldo informado reconcilia somente o que já foi realizado até a data-base.
+        // Uma pendência continua sendo obrigação mesmo se seu vencimento for anterior
+        // à data do saldo informado.
+        if (
+            status == TransactionStatus.REALIZED &&
+            openingBalanceDate != null &&
+            !effectiveDate.isAfter(openingBalanceDate)
+        ) return false
+
+        return true
+    }
+
+    fun includesMovement(
+        occurredAt: LocalDate,
+        openingBalanceDate: LocalDate?,
+        throughDate: LocalDate?,
+    ): Boolean =
+        (openingBalanceDate == null || occurredAt.isAfter(openingBalanceDate)) &&
+            (throughDate == null || !occurredAt.isAfter(throughDate))
+}
+
 data class AccountBalanceEntry(
     val direction: FinancialTransactionDirection,
     val amount: BigDecimal,
