@@ -3,6 +3,8 @@ package br.com.assistentefinanceiro.notifications
 import java.math.BigDecimal
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AccountBalanceCalculatorTest {
@@ -55,6 +57,30 @@ class AccountBalanceCalculatorTest {
         assertEquals(
             BigDecimal("9029.13"),
             ForwardProjectedBalanceCalculator.calculate(current, throughMonthEnd),
+        )
+    }
+
+    @Test
+    fun pendingExpenseBeforeBalanceDateStillAffectsFutureProjection() {
+        val openingBalanceDate = LocalDate.of(2026, 9, 29)
+        val pendingDueDate = LocalDate.of(2026, 9, 20)
+        val throughDate = LocalDate.of(2026, 9, 30)
+
+        assertTrue(
+            AccountBalanceDatePolicy.includesTransaction(
+                status = TransactionStatus.PENDING,
+                effectiveDate = pendingDueDate,
+                openingBalanceDate = openingBalanceDate,
+                throughDate = throughDate,
+            ),
+        )
+        assertFalse(
+            AccountBalanceDatePolicy.includesTransaction(
+                status = TransactionStatus.REALIZED,
+                effectiveDate = pendingDueDate,
+                openingBalanceDate = openingBalanceDate,
+                throughDate = throughDate,
+            ),
         )
     }
 
