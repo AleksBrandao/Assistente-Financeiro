@@ -55,6 +55,16 @@ object BalanceAdjustmentCalculator {
     ): BigDecimal = informedBalance - currentBalance
 }
 
+object ForwardProjectedBalanceCalculator {
+    fun calculate(
+        currentBalance: AccountBalanceSummary,
+        throughDateBalance: AccountBalanceSummary,
+    ): BigDecimal =
+        currentBalance.realizedBalance +
+            throughDateBalance.pendingIncome -
+            throughDateBalance.pendingExpense
+}
+
 data class AccountBalanceEntry(
     val direction: FinancialTransactionDirection,
     val amount: BigDecimal,
