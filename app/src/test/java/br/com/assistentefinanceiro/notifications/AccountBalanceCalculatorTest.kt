@@ -36,6 +36,29 @@ class AccountBalanceCalculatorTest {
     }
 
     @Test
+    fun forwardProjectionUsesCurrentRealizedBalanceAndOnlyOpenPendingItems() {
+        val current = AccountBalanceSummary(
+            realizedBalance = BigDecimal("9252.95"),
+            projectedBalance = BigDecimal("9252.95"),
+            pendingIncome = BigDecimal.ZERO,
+            pendingExpense = BigDecimal.ZERO,
+        )
+        val throughMonthEnd = AccountBalanceSummary(
+            // Um valor realizado futuro não deve ser reaplicado depois de o saldo atual
+            // já ter sido conciliado manualmente.
+            realizedBalance = BigDecimal("16875.90"),
+            projectedBalance = BigDecimal("16652.08"),
+            pendingIncome = BigDecimal.ZERO,
+            pendingExpense = BigDecimal("223.82"),
+        )
+
+        assertEquals(
+            BigDecimal("9029.13"),
+            ForwardProjectedBalanceCalculator.calculate(current, throughMonthEnd),
+        )
+    }
+
+    @Test
     fun transferChangesAccountsButNotConsolidatedBalance() {
         val debit = AccountMovementRecord(
             id = 1,
