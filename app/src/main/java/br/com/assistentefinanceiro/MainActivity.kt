@@ -585,6 +585,18 @@ class MainActivity : ComponentActivity() {
                 ).takeIf { it.transactions.isNotEmpty() }
             }
         }
+        val visibleGroupDates = remember(visibleGroups) { visibleGroups.map { it.date } }
+        var dailyProjectedBalances by remember(selectedMonth) {
+            mutableStateOf<Map<LocalDate, java.math.BigDecimal>>(emptyMap())
+        }
+        LaunchedEffect(refresh, selectedMonth, visibleGroupDates) {
+            dailyProjectedBalances = emptyMap()
+            dailyProjectedBalances = withContext(Dispatchers.IO) {
+                visibleGroupDates.associateWith { date ->
+                    store.generalProjectedBalance(date)
+                }
+            }
+        }
         var editingTransaction by remember {
             mutableStateOf<FinancialTransactionRecord?>(null)
         }
@@ -860,15 +872,40 @@ class MainActivity : ComponentActivity() {
                 }
                 visibleGroups.forEach { group ->
                     item(key = "date-${group.date}") {
-                        Text(
-                            text = formatDate(group.date),
-                            modifier = Modifier.padding(
-                                top = FinanceSpacing.sm,
-                                start = FinanceSpacing.xxs,
-                            ),
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        val dailyProjectedBalance = dailyProjectedBalances[group.date]
+                        val semantic = MaterialTheme.financeColors
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    top = FinanceSpacing.sm,
+                                    start = FinanceSpacing.xxs,
+                                    end = FinanceSpacing.xxs,
+                                ),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = formatDate(group.date),
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            dailyProjectedBalance?.let { balance ->
+                                Text(
+                                    text = "Saldo proj.: " +
+                                        formatCurrency(balance.toPlainString()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (balance.signum() < 0) {
+                                        semantic.expense
+                                    } else {
+                                        semantic.income
+                                    },
+                                    textAlign = TextAlign.End,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                     items(
                         items = group.transactions,
