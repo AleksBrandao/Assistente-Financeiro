@@ -3,6 +3,8 @@ package br.com.assistentefinanceiro.notifications
 import java.math.BigDecimal
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AccountBalanceCalculatorTest {
@@ -33,6 +35,53 @@ class AccountBalanceCalculatorTest {
         assertEquals(BigDecimal("1150.00"), result.realizedBalance)
         assertEquals(BigDecimal("1070.00"), result.projectedBalance)
         assertEquals(BigDecimal("80.00"), result.pendingExpense)
+    }
+
+    @Test
+    fun forwardProjectionUsesCurrentRealizedBalanceAndOnlyOpenPendingItems() {
+        val current = AccountBalanceSummary(
+            realizedBalance = BigDecimal("9252.95"),
+            projectedBalance = BigDecimal("9252.95"),
+            pendingIncome = BigDecimal.ZERO,
+            pendingExpense = BigDecimal.ZERO,
+        )
+        val throughMonthEnd = AccountBalanceSummary(
+            // Um valor realizado futuro não deve ser reaplicado depois de o saldo atual
+            // já ter sido conciliado manualmente.
+            realizedBalance = BigDecimal("16875.90"),
+            projectedBalance = BigDecimal("16652.08"),
+            pendingIncome = BigDecimal.ZERO,
+            pendingExpense = BigDecimal("223.82"),
+        )
+
+        assertEquals(
+            BigDecimal("9029.13"),
+            ForwardProjectedBalanceCalculator.calculate(current, throughMonthEnd),
+        )
+    }
+
+    @Test
+    fun pendingExpenseBeforeBalanceDateStillAffectsFutureProjection() {
+        val openingBalanceDate = LocalDate.of(2026, 9, 29)
+        val pendingDueDate = LocalDate.of(2026, 9, 20)
+        val throughDate = LocalDate.of(2026, 9, 30)
+
+        assertTrue(
+            AccountBalanceDatePolicy.includesTransaction(
+                status = TransactionStatus.PENDING,
+                effectiveDate = pendingDueDate,
+                openingBalanceDate = openingBalanceDate,
+                throughDate = throughDate,
+            ),
+        )
+        assertFalse(
+            AccountBalanceDatePolicy.includesTransaction(
+                status = TransactionStatus.REALIZED,
+                effectiveDate = pendingDueDate,
+                openingBalanceDate = openingBalanceDate,
+                throughDate = throughDate,
+            ),
+        )
     }
 
     @Test

@@ -1137,7 +1137,11 @@ class MainActivity : ComponentActivity() {
     ) {
         var refresh by remember { mutableIntStateOf(0) }
         val accounts = remember(refresh) { store.financialAccounts() }
-        val bankBalances = remember(accounts, refresh) {
+        val currentBankBalances = remember(accounts, refresh) {
+            accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
+                .associateWith { account -> store.accountBalance(account, LocalDate.now()) }
+        }
+        val projectedBankBalances = remember(accounts, refresh) {
             accounts.filter { it.type == FinancialAccountType.BANK_ACCOUNT }
                 .associateWith(store::accountBalance)
         }
@@ -1192,12 +1196,12 @@ class MainActivity : ComponentActivity() {
                 contentPadding = PaddingValues(vertical = FinanceSpacing.md),
                 verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm),
             ) {
-                if (bankBalances.isNotEmpty()) {
+                if (currentBankBalances.isNotEmpty()) {
                     item {
-                        val realized = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                        val realized = currentBankBalances.values.fold(java.math.BigDecimal.ZERO) {
                                 total, balance -> total + balance.realizedBalance
                         }
-                        val projected = bankBalances.values.fold(java.math.BigDecimal.ZERO) {
+                        val projected = projectedBankBalances.values.fold(java.math.BigDecimal.ZERO) {
                                 total, balance -> total + balance.projectedBalance
                         }
                         val semantic = MaterialTheme.financeColors
@@ -1286,7 +1290,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 items(accounts, key = { "account-${it.id}" }) { account ->
-                    val balance = bankBalances[account]
+                    val currentBalance = currentBankBalances[account]
+                    val projectedBalance = projectedBankBalances[account]
                     val semantic = MaterialTheme.financeColors
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
@@ -1339,21 +1344,23 @@ class MainActivity : ComponentActivity() {
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
-                            } else if (balance != null) {
+                            } else if (currentBalance != null) {
                                 Text(
-                                    formatCurrency(balance.realizedBalance.toPlainString()),
-                                    color = if (balance.realizedBalance.signum() < 0) {
+                                    formatCurrency(currentBalance.realizedBalance.toPlainString()),
+                                    color = if (currentBalance.realizedBalance.signum() < 0) {
                                         semantic.expense
                                     } else semantic.income,
                                     style = FinanceTextStyles.moneyLarge,
                                     maxLines = 1,
                                 )
-                                if (balance.projectedBalance != balance.realizedBalance) {
-                                    Text(
-                                        "Previsto: ${formatCurrency(balance.projectedBalance.toPlainString())}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                projectedBalance?.projectedBalance?.let { projected ->
+                                    if (projected != currentBalance.realizedBalance) {
+                                        Text(
+                                            "Previsto: ${formatCurrency(projected.toPlainString())}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
                             Row(
@@ -1409,7 +1416,7 @@ class MainActivity : ComponentActivity() {
                 account = account,
                 isNew = creatingAccount,
                 currentBalance = if (creatingAccount) null else {
-                    bankBalances[account]?.realizedBalance
+                    currentBankBalances[account]?.realizedBalance
                 },
                 onDismiss = {
                     editingAccount = null
@@ -1590,7 +1597,10 @@ class MainActivity : ComponentActivity() {
         val transactions = remember(account.id, refresh) {
             store.recentTransactions(10_000).filter { it.accountId == account.id }
         }
-        val balance = remember(account.id, refresh) { store.accountBalance(account) }
+        val currentBalance = remember(account.id, refresh) {
+            store.accountBalance(account, LocalDate.now())
+        }
+        val projectedBalance = remember(account.id, refresh) { store.accountBalance(account) }
         val ledgerItems = remember(transactions, movements) {
             val transactionItems = transactions.mapNotNull { transaction ->
                 val occurredAt = runCatching {
@@ -1697,17 +1707,17 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                             Text(
-                                formatCurrency(balance.realizedBalance.toPlainString()),
+                                formatCurrency(currentBalance.realizedBalance.toPlainString()),
                                 style = FinanceTextStyles.moneyHero,
-                                color = if (balance.realizedBalance.signum() < 0) {
+                                color = if (currentBalance.realizedBalance.signum() < 0) {
                                     semantic.expense
                                 } else semantic.income,
                                 maxLines = 1,
                             )
                             SummaryValue(
                                 label = "Saldo previsto",
-                                amount = balance.projectedBalance.toPlainString(),
-                                color = if (balance.projectedBalance.signum() < 0) {
+                                amount = projectedBalance.projectedBalance.toPlainString(),
+                                color = if (projectedBalance.projectedBalance.signum() < 0) {
                                     semantic.expense
                                 } else semantic.income,
                             )
