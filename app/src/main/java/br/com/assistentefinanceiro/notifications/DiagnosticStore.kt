@@ -1637,6 +1637,159 @@ class DiagnosticStore(context: Context) :
         }
     }
 
+    fun convertCardPurchaseToInstallments(
+        transactionId: Long,
+        installments: Int,
+        firstInvoicePeriod: YearMonth,
+    ): Boolean {
+        if (installments !in 2..48) return false
+        val db = writableDatabase
+        val row = db.query(
+            "transactions", null, "id = ?", arrayOf(transactionId.toString()),
+            null, null, null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            cursorRowToJson(cursor)
+        }
+        if (FinancialTransactionType.fromStored(row.optString("type")) !=
+            FinancialTransactionType.CARD_PURCHASE
+        ) return false
+        if (!row.isNull("series_total")) return false
+        val accountId = if (row.isNull("account_id")) return false else row.getLong("account_id")
+        val accountType = db.rawQuery(
+            "SELECT type FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            FinancialAccountType.fromStored(cursor.getString(0))
+        }
+        if (accountType != FinancialAccountType.CREDIT_CARD) return false
+
+        val total = row.optString("amount").toBigDecimalOrNull() ?: return false
+        val amounts = runCatching { InstallmentPlanCalculator.split(total, installments) }
+            .getOrNull() ?: return false
+        val baseDescription = row.optString("description").trim()
+            .replace(Regex("""\s*\(\d{1,2}/\d{1,2}\)\s*$"""), "")
+        val seriesId = UUID.randomUUID().toString()
+        val columns = tableColumns(db, "transactions")
+
+        db.beginTransaction()
+        return try {
+            val firstUpdated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("amount", amounts.first().toPlainString())
+                    put("description", "$baseDescription (1/$installments)")
+                    put("series_id", seriesId)
+                    put("series_index", 1)
+                    put("series_total", installments)
+                    put("invoice_period_override", firstInvoicePeriod.toString())
+                    putNull("invoice_id")
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (!firstUpdated) error("Could not update first installment")
+
+            for (index in 2..installments) {
+                val values = jsonToContentValues(row, columns).apply {
+                    remove("id")
+                    putNull("source_event_id")
+                    putNull("invoice_id")
+                    putNull("reconciled_adjustment_id")
+                    put("amount", amounts[index - 1].toPlainString())
+                    put("description", "$baseDescription ($index/$installments)")
+                    put("series_id", seriesId)
+                    put("series_index", index)
+                    put("series_total", installments)
+                    put(
+                        "invoice_period_override",
+                        firstInvoicePeriod.plusMonths((index - 1).toLong()).toString(),
+                    )
+                    put("import_key", "INSTALLMENT:$seriesId:$index")
+                }
+                if (db.insertOrThrow("transactions", null, values) == -1L) {
+                    error("Could not insert installment")
+                }
+            }
+
+            rebuildCreditCardInvoices(db, accountId)
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun moveCardPurchaseToBankAccount(
+        transactionId: Long,
+        bankAccountId: Long,
+    ): Boolean {
+        val db = writableDatabase
+        val source = db.rawQuery(
+            """SELECT account_id,type,occurred_at,series_total
+               FROM transactions WHERE id = ?""",
+            arrayOf(transactionId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            val sourceAccountId = if (cursor.isNull(0)) null else cursor.getLong(0)
+            val type = FinancialTransactionType.fromStored(cursor.getString(1)) ?: return false
+            val occurredAt = runCatching { LocalDateTime.parse(cursor.getString(2)) }.getOrNull()
+                ?: return false
+            val seriesTotal = if (cursor.isNull(3)) null else cursor.getInt(3)
+            arrayOf(sourceAccountId, type, occurredAt, seriesTotal)
+        }
+        val sourceAccountId = source[0] as Long? ?: return false
+        if (source[1] != FinancialTransactionType.CARD_PURCHASE) return false
+        if (source[3] != null) return false
+
+        val bankName = db.rawQuery(
+            "SELECT name,type FROM financial_accounts WHERE id = ?",
+            arrayOf(bankAccountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            if (FinancialAccountType.fromStored(cursor.getString(1)) !=
+                FinancialAccountType.BANK_ACCOUNT
+            ) return false
+            cursor.getString(0)
+        }
+        val paidAt = (source[2] as LocalDateTime).toLocalDate()
+
+        db.beginTransaction()
+        return try {
+            val updated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("type", FinancialTransactionType.IMPORTED_EXPENSE.name)
+                    put("direction", FinancialTransactionDirection.EXPENSE.name)
+                    put("account", bankName)
+                    put("account_id", bankAccountId)
+                    putNull("invoice_id")
+                    putNull("invoice_period_override")
+                    put("ignore_invoice_link", 1)
+                    put("status", TransactionStatus.REALIZED.name)
+                    put("paid_at", paidAt.toString())
+                    putNull("planned_payment_date")
+                    putNull("due_date")
+                    putNull("reconciled_adjustment_id")
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (updated) {
+                rebuildCreditCardInvoices(db, sourceAccountId)
+                db.setTransactionSuccessful()
+            }
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun deleteManualTransaction(
         transactionId: Long,
         seriesScope: TransactionSeriesScope = TransactionSeriesScope.ONLY_THIS,
