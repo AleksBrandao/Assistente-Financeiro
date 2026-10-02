@@ -182,6 +182,17 @@ class DiagnosticStore(context: Context) :
                 "ALTER TABLE transactions ADD COLUMN ignore_invoice_link INTEGER NOT NULL DEFAULT 0"
             )
         }
+        if (oldVersion in 7..23) {
+            db.execSQL(
+                "ALTER TABLE transactions ADD COLUMN reconciled_adjustment_id INTEGER"
+            )
+        }
+        if (oldVersion in 13..23) {
+            db.execSQL("ALTER TABLE account_movements ADD COLUMN balance_after TEXT")
+            db.execSQL(
+                "ALTER TABLE account_movements ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+            )
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -918,15 +929,18 @@ class DiagnosticStore(context: Context) :
             }
             if (accountId == -1L) return false
             if (balanceAdjustment != null && balanceAdjustment.signum() != 0) {
-                db.insertOrThrow(
+                val adjustmentDate = checkNotNull(openingBalanceDate)
+                val adjustmentId = db.insertOrThrow(
                     "account_movements",
                     null,
                     ContentValues().apply {
                         put("account_id", accountId)
                         put("type", AccountMovementType.BALANCE_ADJUSTMENT.name)
                         put("amount", balanceAdjustment.abs().toPlainString())
-                        put("occurred_at", checkNotNull(openingBalanceDate).toString())
+                        put("occurred_at", adjustmentDate.toString())
                         put("description", "Ajuste de saldo")
+                        put("balance_after", openingBalance.toPlainString())
+                        put("created_at", System.currentTimeMillis())
                         put(
                             "direction",
                             if (balanceAdjustment.signum() > 0) {
@@ -935,6 +949,33 @@ class DiagnosticStore(context: Context) :
                         )
                     },
                 )
+
+                // O saldo informado passa a ser um checkpoint. Tudo o que já estava
+                // realizado até a data da conciliação fica absorvido por esse saldo.
+                db.rawQuery(
+                    """SELECT id,occurred_at,paid_at FROM transactions
+                       WHERE account_id = ? AND status = ?""",
+                    arrayOf(accountId.toString(), TransactionStatus.REALIZED.name),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val occurredDate = runCatching {
+                            LocalDateTime.parse(cursor.getString(1)).toLocalDate()
+                        }.getOrNull() ?: continue
+                        val effectiveDate = cursor.getString(2)?.let { value ->
+                            runCatching { LocalDate.parse(value) }.getOrNull()
+                        } ?: occurredDate
+                        if (!effectiveDate.isAfter(adjustmentDate)) {
+                            db.update(
+                                "transactions",
+                                ContentValues().apply {
+                                    put("reconciled_adjustment_id", adjustmentId)
+                                },
+                                "id = ?",
+                                arrayOf(cursor.getLong(0).toString()),
+                            )
+                        }
+                    }
+                }
             }
             linkTransactionsToAccount(db, accountId, normalizedKey)
             rebuildCreditCardInvoices(db, accountId)
@@ -1221,7 +1262,8 @@ class DiagnosticStore(context: Context) :
 
     fun accountMovements(accountId: Long): List<AccountMovementRecord> = readableDatabase.rawQuery(
         """SELECT movements.id,movements.direction,movements.type,movements.amount,
-                  movements.occurred_at,movements.description,related.name
+                  movements.occurred_at,movements.description,related.name,
+                  movements.balance_after,movements.created_at
            FROM account_movements AS movements
            LEFT JOIN financial_accounts AS related ON related.id = movements.related_account_id
            WHERE movements.account_id = ? ORDER BY movements.occurred_at DESC,movements.id DESC""",
@@ -1241,6 +1283,8 @@ class DiagnosticStore(context: Context) :
                         occurredAt = LocalDate.parse(cursor.getString(4)),
                         description = cursor.getString(5),
                         relatedAccountName = cursor.getString(6),
+                        balanceAfter = cursor.getString(7)?.toBigDecimalOrNull(),
+                        createdAt = cursor.getLong(8),
                     )
                 )
             }
@@ -1252,46 +1296,78 @@ class DiagnosticStore(context: Context) :
         throughDate: LocalDate? = null,
     ): AccountBalanceSummary {
         val fromDate = account.openingBalanceDate
+        val allMovements = accountMovements(account.id)
+        val checkpoint = allMovements
+            .asSequence()
+            .filter {
+                it.type == AccountMovementType.BALANCE_ADJUSTMENT &&
+                    it.balanceAfter != null &&
+                    (throughDate == null || !it.occurredAt.isAfter(throughDate))
+            }
+            .maxByOrNull { it.id }
+        val baseBalance = checkpoint?.balanceAfter ?: account.openingBalance
+
         val transactions = readableDatabase.rawQuery(
-            "SELECT direction,amount,occurred_at,status,due_date,planned_payment_date,paid_at " +
-                "FROM transactions WHERE account_id = ?",
+            "SELECT direction,amount,occurred_at,status,due_date,planned_payment_date,paid_at," +
+                "reconciled_adjustment_id FROM transactions WHERE account_id = ?",
             arrayOf(account.id.toString()),
         ).use { cursor ->
             buildList {
-            while (cursor.moveToNext()) {
-                val originalDate = runCatching {
-                    LocalDateTime.parse(cursor.getString(2)).toLocalDate()
-                }.getOrNull() ?: continue
-                val status = TransactionStatus.fromStored(cursor.getString(3))
-                val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
-                    cursor.getString(6)
-                } else cursor.getString(5) ?: cursor.getString(4)
-                val date = effectiveStoredDate?.let {
-                    runCatching { LocalDate.parse(it) }.getOrNull()
-                } ?: originalDate
-                if (
-                    !AccountBalanceDatePolicy.includesTransaction(
-                        status = status,
-                        effectiveDate = date,
-                        openingBalanceDate = fromDate,
-                        throughDate = throughDate,
-                    )
-                ) continue
-                val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
-                val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
-                    ?: continue
+                while (cursor.moveToNext()) {
+                    val originalDate = runCatching {
+                        LocalDateTime.parse(cursor.getString(2)).toLocalDate()
+                    }.getOrNull() ?: continue
+                    val status = TransactionStatus.fromStored(cursor.getString(3))
+                    val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
+                        cursor.getString(6)
+                    } else cursor.getString(5) ?: cursor.getString(4)
+                    val date = effectiveStoredDate?.let {
+                        runCatching { LocalDate.parse(it) }.getOrNull()
+                    } ?: originalDate
+
+                    if (throughDate != null && date.isAfter(throughDate)) continue
+
+                    if (checkpoint == null) {
+                        if (
+                            !AccountBalanceDatePolicy.includesTransaction(
+                                status = status,
+                                effectiveDate = date,
+                                openingBalanceDate = fromDate,
+                                throughDate = throughDate,
+                            )
+                        ) continue
+                    } else if (status == TransactionStatus.REALIZED) {
+                        val reconciledAdjustmentId = if (cursor.isNull(7)) null else cursor.getLong(7)
+                        if (
+                            reconciledAdjustmentId != null &&
+                            reconciledAdjustmentId <= checkpoint.id
+                        ) continue
+                    }
+
+                    val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
+                    val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
+                        ?: continue
                     add(AccountBalanceEntry(direction, amount, status))
                 }
             }
         }
-        val movements = accountMovements(account.id).filter { movement ->
-            AccountBalanceDatePolicy.includesMovement(
-                occurredAt = movement.occurredAt,
-                openingBalanceDate = fromDate,
-                throughDate = throughDate,
-            )
+
+        val movements = if (checkpoint == null) {
+            allMovements.filter { movement ->
+                AccountBalanceDatePolicy.includesMovement(
+                    occurredAt = movement.occurredAt,
+                    openingBalanceDate = fromDate,
+                    throughDate = throughDate,
+                )
+            }
+        } else {
+            allMovements.filter { movement ->
+                movement.id > checkpoint.id &&
+                    (throughDate == null || !movement.occurredAt.isAfter(throughDate))
+            }
         }
-        return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
+
+        return AccountBalanceCalculator.calculate(baseBalance, transactions, movements)
     }
 
     fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal {
@@ -2233,6 +2309,7 @@ class DiagnosticStore(context: Context) :
                 subcategory TEXT,
                 invoice_period_override TEXT,
                 ignore_invoice_link INTEGER NOT NULL DEFAULT 0,
+                reconciled_adjustment_id INTEGER,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2319,7 +2396,9 @@ class DiagnosticStore(context: Context) :
                 invoice_payment_id INTEGER UNIQUE,
                 direction TEXT NOT NULL DEFAULT 'DEBIT',
                 related_account_id INTEGER,
-                transfer_group TEXT
+                transfer_group TEXT,
+                balance_after TEXT,
+                created_at INTEGER NOT NULL DEFAULT 0
             )"""
         )
     }
@@ -2707,6 +2786,11 @@ class DiagnosticStore(context: Context) :
                ON transactions(invoice_id) WHERE invoice_id IS NOT NULL"""
         )
         db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_reconciled_adjustment
+               ON transactions(reconciled_adjustment_id)
+               WHERE reconciled_adjustment_id IS NOT NULL"""
+        )
+        db.execSQL(
             """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
                ON credit_card_invoices(account_id,due_date DESC)"""
         )
@@ -2854,7 +2938,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 23
+        const val DATABASE_VERSION = 24
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(
