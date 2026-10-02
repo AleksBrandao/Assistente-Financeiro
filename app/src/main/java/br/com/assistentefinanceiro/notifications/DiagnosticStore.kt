@@ -619,7 +619,7 @@ class DiagnosticStore(context: Context) :
 
         val db = writableDatabase
         val metadata = db.rawQuery(
-            "SELECT direction,type,rule_key,series_id,series_index FROM transactions WHERE id = ?",
+            "SELECT direction,type,rule_key,series_id,series_index,status FROM transactions WHERE id = ?",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
             if (!cursor.moveToFirst()) return@use null
@@ -633,6 +633,7 @@ class DiagnosticStore(context: Context) :
                 ruleKey = cursor.getString(2),
                 seriesId = cursor.getString(3),
                 seriesIndex = if (cursor.isNull(4)) null else cursor.getInt(4),
+                status = TransactionStatus.fromStored(cursor.getString(5)),
             )
         } ?: return false
 
@@ -641,6 +642,12 @@ class DiagnosticStore(context: Context) :
             type = metadata.type,
             category = category,
             ruleKey = metadata.ruleKey,
+        )
+        val effectivePaidAt = TransactionRealizationPolicy.resolvedPaidAt(
+            previousStatus = metadata.status,
+            newStatus = status,
+            requestedPaidAt = paidAt,
+            today = LocalDate.now(),
         )
 
         var updated = false
@@ -660,15 +667,13 @@ class DiagnosticStore(context: Context) :
                     if (subcategory.isNullOrBlank()) putNull("subcategory")
                     else put("subcategory", subcategory.trim())
                     put("category_source", TransactionCategorySource.MANUAL.name)
-                    put(
-                        "status",
-                        if (paidAt != null) TransactionStatus.REALIZED.name else status.name,
-                    )
+                    put("status", status.name)
                     put("amount", amount.toPlainString())
                     if (dueDate == null) putNull("due_date") else put("due_date", dueDate.toString())
                     if (plannedPaymentDate == null) putNull("planned_payment_date")
                     else put("planned_payment_date", plannedPaymentDate.toString())
-                    if (paidAt == null) putNull("paid_at") else put("paid_at", paidAt.toString())
+                    if (effectivePaidAt == null) putNull("paid_at")
+                    else put("paid_at", effectivePaidAt.toString())
                 },
                 "id = ?",
                 arrayOf(transactionId.toString()),
@@ -3092,6 +3097,7 @@ class DiagnosticStore(context: Context) :
         val ruleKey: String?,
         val seriesId: String?,
         val seriesIndex: Int?,
+        val status: TransactionStatus,
     )
 
     private data class KnownAccountPreset(
