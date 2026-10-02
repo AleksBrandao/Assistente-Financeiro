@@ -39,6 +39,8 @@ data class AccountMovementRecord(
     val occurredAt: LocalDate,
     val description: String,
     val relatedAccountName: String? = null,
+    val balanceAfter: BigDecimal? = null,
+    val createdAt: Long = 0L,
 )
 
 data class AccountBalanceSummary(
