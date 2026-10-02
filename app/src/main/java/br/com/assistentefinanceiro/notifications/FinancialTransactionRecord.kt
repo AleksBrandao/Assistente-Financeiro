@@ -54,6 +54,20 @@ enum class TransactionOrigin {
     }
 }
 
+object TransactionRealizationPolicy {
+    fun resolvedPaidAt(
+        previousStatus: TransactionStatus,
+        newStatus: TransactionStatus,
+        requestedPaidAt: java.time.LocalDate?,
+        today: java.time.LocalDate,
+    ): java.time.LocalDate? = when {
+        newStatus == TransactionStatus.PENDING -> null
+        requestedPaidAt != null -> requestedPaidAt
+        previousStatus == TransactionStatus.PENDING -> today
+        else -> null
+    }
+}
+
 enum class TransactionStatus {
     REALIZED,
     PENDING;
