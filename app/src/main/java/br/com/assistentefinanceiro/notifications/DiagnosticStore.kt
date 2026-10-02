@@ -1339,8 +1339,10 @@ class DiagnosticStore(context: Context) :
                     } else if (status == TransactionStatus.REALIZED) {
                         val reconciledAdjustmentId = if (cursor.isNull(7)) null else cursor.getLong(7)
                         if (
-                            reconciledAdjustmentId != null &&
-                            reconciledAdjustmentId <= checkpoint.id
+                            !BalanceCheckpointPolicy.includesRealizedTransaction(
+                                reconciledAdjustmentId = reconciledAdjustmentId,
+                                checkpointId = checkpoint.id,
+                            )
                         ) continue
                     }
 
@@ -1362,8 +1364,10 @@ class DiagnosticStore(context: Context) :
             }
         } else {
             allMovements.filter { movement ->
-                movement.id > checkpoint.id &&
-                    (throughDate == null || !movement.occurredAt.isAfter(throughDate))
+                BalanceCheckpointPolicy.includesMovement(
+                    movementId = movement.id,
+                    checkpointId = checkpoint.id,
+                ) && (throughDate == null || !movement.occurredAt.isAfter(throughDate))
             }
         }
 
