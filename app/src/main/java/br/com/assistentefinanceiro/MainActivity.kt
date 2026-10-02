@@ -4323,6 +4323,9 @@ class MainActivity : ComponentActivity() {
                             checked = selectedStatus == TransactionStatus.REALIZED,
                             onCheckedChange = { checked ->
                                 selectedStatus = if (checked) {
+                                    if (paidAt.isBlank()) {
+                                        paidAt = LocalDate.now().toString()
+                                    }
                                     TransactionStatus.REALIZED
                                 } else {
                                     paidAt = ""
