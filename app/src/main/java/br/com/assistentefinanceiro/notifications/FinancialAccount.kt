@@ -67,6 +67,19 @@ object ForwardProjectedBalanceCalculator {
             throughDateBalance.pendingExpense
 }
 
+object BalanceCheckpointPolicy {
+    fun includesRealizedTransaction(
+        reconciledAdjustmentId: Long?,
+        checkpointId: Long,
+    ): Boolean =
+        reconciledAdjustmentId == null || reconciledAdjustmentId > checkpointId
+
+    fun includesMovement(
+        movementId: Long,
+        checkpointId: Long,
+    ): Boolean = movementId > checkpointId
+}
+
 object AccountBalanceDatePolicy {
     fun includesTransaction(
         status: TransactionStatus,
