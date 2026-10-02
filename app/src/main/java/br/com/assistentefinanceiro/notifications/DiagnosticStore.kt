@@ -1728,22 +1728,31 @@ class DiagnosticStore(context: Context) :
         bankAccountId: Long,
     ): Boolean {
         val db = writableDatabase
+        data class CardMoveSource(
+            val accountId: Long,
+            val type: FinancialTransactionType,
+            val occurredAt: LocalDateTime,
+            val seriesTotal: Int?,
+        )
+
         val source = db.rawQuery(
             """SELECT account_id,type,occurred_at,series_total
                FROM transactions WHERE id = ?""",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
-            if (!cursor.moveToFirst()) return false
-            val sourceAccountId = if (cursor.isNull(0)) null else cursor.getLong(0)
-            val type = FinancialTransactionType.fromStored(cursor.getString(1)) ?: return false
-            val occurredAt = runCatching { LocalDateTime.parse(cursor.getString(2)) }.getOrNull()
-                ?: return false
-            val seriesTotal = if (cursor.isNull(3)) null else cursor.getInt(3)
-            arrayOf(sourceAccountId, type, occurredAt, seriesTotal)
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return false
+            CardMoveSource(
+                accountId = cursor.getLong(0),
+                type = FinancialTransactionType.fromStored(cursor.getString(1)) ?: return false,
+                occurredAt = runCatching {
+                    LocalDateTime.parse(cursor.getString(2))
+                }.getOrNull() ?: return false,
+                seriesTotal = if (cursor.isNull(3)) null else cursor.getInt(3),
+            )
         }
-        val sourceAccountId = source[0] as Long? ?: return false
-        if (source[1] != FinancialTransactionType.CARD_PURCHASE) return false
-        if (source[3] != null) return false
+        val sourceAccountId = source.accountId
+        if (source.type != FinancialTransactionType.CARD_PURCHASE) return false
+        if (source.seriesTotal != null) return false
 
         val bankName = db.rawQuery(
             "SELECT name,type FROM financial_accounts WHERE id = ?",
@@ -1755,7 +1764,7 @@ class DiagnosticStore(context: Context) :
             ) return false
             cursor.getString(0)
         }
-        val paidAt = (source[2] as LocalDateTime).toLocalDate()
+        val paidAt = source.occurredAt.toLocalDate()
 
         db.beginTransaction()
         return try {
