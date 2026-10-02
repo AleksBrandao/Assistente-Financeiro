@@ -2612,6 +2612,15 @@ class MainActivity : ComponentActivity() {
         var editingInvoiceTransaction by remember(invoice.id) {
             mutableStateOf<FinancialTransactionRecord?>(null)
         }
+        var invoiceTransactionActions by remember(invoice.id) {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var installmentTransaction by remember(invoice.id) {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
+        var debitTransaction by remember(invoice.id) {
+            mutableStateOf<FinancialTransactionRecord?>(null)
+        }
         var officialTotal by remember(invoice.id, invoice.total) {
             mutableStateOf(invoice.total.toPlainString().replace('.', ','))
         }
@@ -2906,7 +2915,13 @@ class MainActivity : ComponentActivity() {
                         }
                     TransactionCard(
                         transaction = transaction,
-                        onClick = { editingInvoiceTransaction = transaction },
+                        onClick = {
+                            if (transaction.type == FinancialTransactionType.CARD_PURCHASE) {
+                                invoiceTransactionActions = transaction
+                            } else {
+                                editingInvoiceTransaction = transaction
+                            }
+                        },
                         footerText = listOfNotNull(
                             dateLabel,
                             if (transaction.origin == TransactionOrigin.MOBILLS) {
@@ -2968,6 +2983,205 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+        invoiceTransactionActions?.let { transaction ->
+            AlertDialog(
+                onDismissRequest = { invoiceTransactionActions = null },
+                title = { Text(transaction.description) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
+                        Text(
+                            if (transaction.seriesTotal != null) {
+                                "Parcela ${transaction.seriesIndex}/${transaction.seriesTotal}"
+                            } else {
+                                "Compra vinculada à fatura."
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = {
+                                invoiceTransactionActions = null
+                                editingInvoiceTransaction = transaction
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Rounded.Edit, contentDescription = null)
+                            Spacer(Modifier.width(FinanceSpacing.xs))
+                            Text("Editar lançamento")
+                        }
+                        if (transaction.seriesTotal == null) {
+                            OutlinedButton(
+                                onClick = {
+                                    invoiceTransactionActions = null
+                                    installmentTransaction = transaction
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
+                                Spacer(Modifier.width(FinanceSpacing.xs))
+                                Text("Parcelar compra")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    invoiceTransactionActions = null
+                                    debitTransaction = transaction
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.Rounded.AccountBalance, contentDescription = null)
+                                Spacer(Modifier.width(FinanceSpacing.xs))
+                                Text("Mover para débito em conta")
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { invoiceTransactionActions = null }) {
+                        Text("Fechar")
+                    }
+                },
+            )
+        }
+
+        installmentTransaction?.let { transaction ->
+            var installmentCount by remember(transaction.id) { mutableStateOf("2") }
+            val parsedInstallments = installmentCount.toIntOrNull()?.takeIf { it in 2..48 }
+            val total = transaction.amount.toBigDecimalOrNull()
+            val preview = if (parsedInstallments != null && total != null) {
+                runCatching {
+                    InstallmentPlanCalculator.split(total, parsedInstallments)
+                }.getOrNull()
+            } else null
+            AlertDialog(
+                onDismissRequest = { installmentTransaction = null },
+                title = { Text("Parcelar compra") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
+                        Text(
+                            "Total da compra: " + formatCurrency(transaction.amount),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedTextField(
+                            value = installmentCount,
+                            onValueChange = { value ->
+                                installmentCount = value.filter(Char::isDigit).take(2)
+                            },
+                            label = { Text("Número de parcelas") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                        )
+                        preview?.let { parts ->
+                            Text(
+                                "As parcelas serão lançadas desta fatura em diante. " +
+                                    "Primeira: " +
+                                    formatCurrency(parts.first().toPlainString()) +
+                                    " · última: " +
+                                    formatCurrency(parts.last().toPlainString()),
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (
+                                store.convertCardPurchaseToInstallments(
+                                    transactionId = transaction.id,
+                                    installments = checkNotNull(parsedInstallments),
+                                    firstInvoicePeriod = invoice.closingPeriod,
+                                )
+                            ) {
+                                installmentTransaction = null
+                                onTransactionChanged()
+                            }
+                        },
+                        enabled = parsedInstallments != null && total?.signum() == 1,
+                    ) {
+                        Text("Parcelar")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { installmentTransaction = null }) {
+                        Text("Cancelar")
+                    }
+                },
+            )
+        }
+
+        debitTransaction?.let { transaction ->
+            var selectedBankId by remember(transaction.id) {
+                mutableStateOf(bankAccounts.singleOrNull()?.id ?: bankAccounts.firstOrNull()?.id)
+            }
+            var bankMenuExpanded by remember(transaction.id) { mutableStateOf(false) }
+            AlertDialog(
+                onDismissRequest = { debitTransaction = null },
+                title = { Text("Mover compra para débito") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(FinanceSpacing.sm)) {
+                        Text(
+                            "A compra será removida desta fatura e registrada como saída " +
+                                "realizada na conta escolhida, mantendo a data original.",
+                        )
+                        if (bankAccounts.isEmpty()) {
+                            Text(
+                                "Cadastre uma conta bancária antes de mover a compra.",
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            Box {
+                                OutlinedButton(
+                                    onClick = { bankMenuExpanded = true },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        bankAccounts.firstOrNull { it.id == selectedBankId }?.name
+                                            ?: "Selecionar conta"
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = bankMenuExpanded,
+                                    onDismissRequest = { bankMenuExpanded = false },
+                                ) {
+                                    bankAccounts.forEach { bankAccount ->
+                                        DropdownMenuItem(
+                                            text = { Text(bankAccount.name) },
+                                            onClick = {
+                                                selectedBankId = bankAccount.id
+                                                bankMenuExpanded = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (
+                                store.moveCardPurchaseToBankAccount(
+                                    transactionId = transaction.id,
+                                    bankAccountId = checkNotNull(selectedBankId),
+                                )
+                            ) {
+                                debitTransaction = null
+                                onTransactionChanged()
+                            }
+                        },
+                        enabled = selectedBankId != null,
+                    ) {
+                        Text("Mover para débito")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { debitTransaction = null }) {
+                        Text("Cancelar")
+                    }
+                },
+            )
+        }
+
         editingInvoiceTransaction?.let { transaction ->
             if (
                 transaction.type == FinancialTransactionType.CARD_PURCHASE &&
