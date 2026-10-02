@@ -85,6 +85,41 @@ class AccountBalanceCalculatorTest {
     }
 
     @Test
+    fun checkpointAbsorbsTransactionsAlreadyRealizedAtReconciliation() {
+        assertFalse(
+            BalanceCheckpointPolicy.includesRealizedTransaction(
+                reconciledAdjustmentId = 10L,
+                checkpointId = 10L,
+            ),
+        )
+        assertFalse(
+            BalanceCheckpointPolicy.includesRealizedTransaction(
+                reconciledAdjustmentId = 8L,
+                checkpointId = 10L,
+            ),
+        )
+        assertTrue(
+            BalanceCheckpointPolicy.includesRealizedTransaction(
+                reconciledAdjustmentId = null,
+                checkpointId = 10L,
+            ),
+        )
+        assertTrue(
+            BalanceCheckpointPolicy.includesRealizedTransaction(
+                reconciledAdjustmentId = 12L,
+                checkpointId = 10L,
+            ),
+        )
+    }
+
+    @Test
+    fun checkpointOnlyAppliesMovementsCreatedAfterIt() {
+        assertFalse(BalanceCheckpointPolicy.includesMovement(10L, 10L))
+        assertFalse(BalanceCheckpointPolicy.includesMovement(9L, 10L))
+        assertTrue(BalanceCheckpointPolicy.includesMovement(11L, 10L))
+    }
+
+    @Test
     fun transferChangesAccountsButNotConsolidatedBalance() {
         val debit = AccountMovementRecord(
             id = 1,

@@ -182,6 +182,17 @@ class DiagnosticStore(context: Context) :
                 "ALTER TABLE transactions ADD COLUMN ignore_invoice_link INTEGER NOT NULL DEFAULT 0"
             )
         }
+        if (oldVersion in 7..23) {
+            db.execSQL(
+                "ALTER TABLE transactions ADD COLUMN reconciled_adjustment_id INTEGER"
+            )
+        }
+        if (oldVersion in 13..23) {
+            db.execSQL("ALTER TABLE account_movements ADD COLUMN balance_after TEXT")
+            db.execSQL(
+                "ALTER TABLE account_movements ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+            )
+        }
         createIndexes(db)
         createCategoryRulesTable(db)
 
@@ -608,7 +619,7 @@ class DiagnosticStore(context: Context) :
 
         val db = writableDatabase
         val metadata = db.rawQuery(
-            "SELECT direction,type,rule_key,series_id,series_index FROM transactions WHERE id = ?",
+            "SELECT direction,type,rule_key,series_id,series_index,status FROM transactions WHERE id = ?",
             arrayOf(transactionId.toString()),
         ).use { cursor ->
             if (!cursor.moveToFirst()) return@use null
@@ -622,6 +633,7 @@ class DiagnosticStore(context: Context) :
                 ruleKey = cursor.getString(2),
                 seriesId = cursor.getString(3),
                 seriesIndex = if (cursor.isNull(4)) null else cursor.getInt(4),
+                status = TransactionStatus.fromStored(cursor.getString(5)),
             )
         } ?: return false
 
@@ -630,6 +642,12 @@ class DiagnosticStore(context: Context) :
             type = metadata.type,
             category = category,
             ruleKey = metadata.ruleKey,
+        )
+        val effectivePaidAt = TransactionRealizationPolicy.resolvedPaidAt(
+            previousStatus = metadata.status,
+            newStatus = status,
+            requestedPaidAt = paidAt,
+            today = LocalDate.now(),
         )
 
         var updated = false
@@ -649,15 +667,13 @@ class DiagnosticStore(context: Context) :
                     if (subcategory.isNullOrBlank()) putNull("subcategory")
                     else put("subcategory", subcategory.trim())
                     put("category_source", TransactionCategorySource.MANUAL.name)
-                    put(
-                        "status",
-                        if (paidAt != null) TransactionStatus.REALIZED.name else status.name,
-                    )
+                    put("status", status.name)
                     put("amount", amount.toPlainString())
                     if (dueDate == null) putNull("due_date") else put("due_date", dueDate.toString())
                     if (plannedPaymentDate == null) putNull("planned_payment_date")
                     else put("planned_payment_date", plannedPaymentDate.toString())
-                    if (paidAt == null) putNull("paid_at") else put("paid_at", paidAt.toString())
+                    if (effectivePaidAt == null) putNull("paid_at")
+                    else put("paid_at", effectivePaidAt.toString())
                 },
                 "id = ?",
                 arrayOf(transactionId.toString()),
@@ -918,15 +934,18 @@ class DiagnosticStore(context: Context) :
             }
             if (accountId == -1L) return false
             if (balanceAdjustment != null && balanceAdjustment.signum() != 0) {
-                db.insertOrThrow(
+                val adjustmentDate = checkNotNull(openingBalanceDate)
+                val adjustmentId = db.insertOrThrow(
                     "account_movements",
                     null,
                     ContentValues().apply {
                         put("account_id", accountId)
                         put("type", AccountMovementType.BALANCE_ADJUSTMENT.name)
                         put("amount", balanceAdjustment.abs().toPlainString())
-                        put("occurred_at", checkNotNull(openingBalanceDate).toString())
+                        put("occurred_at", adjustmentDate.toString())
                         put("description", "Ajuste de saldo")
+                        put("balance_after", openingBalance.toPlainString())
+                        put("created_at", System.currentTimeMillis())
                         put(
                             "direction",
                             if (balanceAdjustment.signum() > 0) {
@@ -935,6 +954,33 @@ class DiagnosticStore(context: Context) :
                         )
                     },
                 )
+
+                // O saldo informado passa a ser um checkpoint. Tudo o que já estava
+                // realizado até a data da conciliação fica absorvido por esse saldo.
+                db.rawQuery(
+                    """SELECT id,occurred_at,paid_at FROM transactions
+                       WHERE account_id = ? AND status = ?""",
+                    arrayOf(accountId.toString(), TransactionStatus.REALIZED.name),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val occurredDate = runCatching {
+                            LocalDateTime.parse(cursor.getString(1)).toLocalDate()
+                        }.getOrNull() ?: continue
+                        val effectiveDate = cursor.getString(2)?.let { value ->
+                            runCatching { LocalDate.parse(value) }.getOrNull()
+                        } ?: occurredDate
+                        if (!effectiveDate.isAfter(adjustmentDate)) {
+                            db.update(
+                                "transactions",
+                                ContentValues().apply {
+                                    put("reconciled_adjustment_id", adjustmentId)
+                                },
+                                "id = ?",
+                                arrayOf(cursor.getLong(0).toString()),
+                            )
+                        }
+                    }
+                }
             }
             linkTransactionsToAccount(db, accountId, normalizedKey)
             rebuildCreditCardInvoices(db, accountId)
@@ -1221,7 +1267,8 @@ class DiagnosticStore(context: Context) :
 
     fun accountMovements(accountId: Long): List<AccountMovementRecord> = readableDatabase.rawQuery(
         """SELECT movements.id,movements.direction,movements.type,movements.amount,
-                  movements.occurred_at,movements.description,related.name
+                  movements.occurred_at,movements.description,related.name,
+                  movements.balance_after,movements.created_at
            FROM account_movements AS movements
            LEFT JOIN financial_accounts AS related ON related.id = movements.related_account_id
            WHERE movements.account_id = ? ORDER BY movements.occurred_at DESC,movements.id DESC""",
@@ -1241,6 +1288,8 @@ class DiagnosticStore(context: Context) :
                         occurredAt = LocalDate.parse(cursor.getString(4)),
                         description = cursor.getString(5),
                         relatedAccountName = cursor.getString(6),
+                        balanceAfter = cursor.getString(7)?.toBigDecimalOrNull(),
+                        createdAt = cursor.getLong(8),
                     )
                 )
             }
@@ -1252,46 +1301,82 @@ class DiagnosticStore(context: Context) :
         throughDate: LocalDate? = null,
     ): AccountBalanceSummary {
         val fromDate = account.openingBalanceDate
+        val allMovements = accountMovements(account.id)
+        val checkpoint = allMovements
+            .asSequence()
+            .filter {
+                it.type == AccountMovementType.BALANCE_ADJUSTMENT &&
+                    it.balanceAfter != null &&
+                    (throughDate == null || !it.occurredAt.isAfter(throughDate))
+            }
+            .maxByOrNull { it.id }
+        val baseBalance = checkpoint?.balanceAfter ?: account.openingBalance
+
         val transactions = readableDatabase.rawQuery(
-            "SELECT direction,amount,occurred_at,status,due_date,planned_payment_date,paid_at " +
-                "FROM transactions WHERE account_id = ?",
+            "SELECT direction,amount,occurred_at,status,due_date,planned_payment_date,paid_at," +
+                "reconciled_adjustment_id FROM transactions WHERE account_id = ?",
             arrayOf(account.id.toString()),
         ).use { cursor ->
             buildList {
-            while (cursor.moveToNext()) {
-                val originalDate = runCatching {
-                    LocalDateTime.parse(cursor.getString(2)).toLocalDate()
-                }.getOrNull() ?: continue
-                val status = TransactionStatus.fromStored(cursor.getString(3))
-                val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
-                    cursor.getString(6)
-                } else cursor.getString(5) ?: cursor.getString(4)
-                val date = effectiveStoredDate?.let {
-                    runCatching { LocalDate.parse(it) }.getOrNull()
-                } ?: originalDate
-                if (
-                    !AccountBalanceDatePolicy.includesTransaction(
-                        status = status,
-                        effectiveDate = date,
-                        openingBalanceDate = fromDate,
-                        throughDate = throughDate,
-                    )
-                ) continue
-                val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
-                val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
-                    ?: continue
+                while (cursor.moveToNext()) {
+                    val originalDate = runCatching {
+                        LocalDateTime.parse(cursor.getString(2)).toLocalDate()
+                    }.getOrNull() ?: continue
+                    val status = TransactionStatus.fromStored(cursor.getString(3))
+                    val effectiveStoredDate = if (status == TransactionStatus.REALIZED) {
+                        cursor.getString(6)
+                    } else cursor.getString(5) ?: cursor.getString(4)
+                    val date = effectiveStoredDate?.let {
+                        runCatching { LocalDate.parse(it) }.getOrNull()
+                    } ?: originalDate
+
+                    if (throughDate != null && date.isAfter(throughDate)) continue
+
+                    if (checkpoint == null) {
+                        if (
+                            !AccountBalanceDatePolicy.includesTransaction(
+                                status = status,
+                                effectiveDate = date,
+                                openingBalanceDate = fromDate,
+                                throughDate = throughDate,
+                            )
+                        ) continue
+                    } else if (status == TransactionStatus.REALIZED) {
+                        val reconciledAdjustmentId = if (cursor.isNull(7)) null else cursor.getLong(7)
+                        if (
+                            !BalanceCheckpointPolicy.includesRealizedTransaction(
+                                reconciledAdjustmentId = reconciledAdjustmentId,
+                                checkpointId = checkpoint.id,
+                            )
+                        ) continue
+                    }
+
+                    val amount = cursor.getString(1).toBigDecimalOrNull() ?: continue
+                    val direction = FinancialTransactionDirection.fromStored(cursor.getString(0))
+                        ?: continue
                     add(AccountBalanceEntry(direction, amount, status))
                 }
             }
         }
-        val movements = accountMovements(account.id).filter { movement ->
-            AccountBalanceDatePolicy.includesMovement(
-                occurredAt = movement.occurredAt,
-                openingBalanceDate = fromDate,
-                throughDate = throughDate,
-            )
+
+        val movements = if (checkpoint == null) {
+            allMovements.filter { movement ->
+                AccountBalanceDatePolicy.includesMovement(
+                    occurredAt = movement.occurredAt,
+                    openingBalanceDate = fromDate,
+                    throughDate = throughDate,
+                )
+            }
+        } else {
+            allMovements.filter { movement ->
+                BalanceCheckpointPolicy.includesMovement(
+                    movementId = movement.id,
+                    checkpointId = checkpoint.id,
+                ) && (throughDate == null || !movement.occurredAt.isAfter(throughDate))
+            }
         }
-        return AccountBalanceCalculator.calculate(account.openingBalance, transactions, movements)
+
+        return AccountBalanceCalculator.calculate(baseBalance, transactions, movements)
     }
 
     fun generalProjectedBalance(throughDate: LocalDate): java.math.BigDecimal {
@@ -1553,6 +1638,168 @@ class DiagnosticStore(context: Context) :
             ) == 1
             if (updated) rebuildCreditCardInvoices(db, accountId)
             db.setTransactionSuccessful()
+            updated
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun convertCardPurchaseToInstallments(
+        transactionId: Long,
+        installments: Int,
+        firstInvoicePeriod: YearMonth,
+    ): Boolean {
+        if (installments !in 2..48) return false
+        val db = writableDatabase
+        val row = db.query(
+            "transactions", null, "id = ?", arrayOf(transactionId.toString()),
+            null, null, null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            cursorRowToJson(cursor)
+        }
+        if (FinancialTransactionType.fromStored(row.optString("type")) !=
+            FinancialTransactionType.CARD_PURCHASE
+        ) return false
+        if (!row.isNull("series_total")) return false
+        val accountId = if (row.isNull("account_id")) return false else row.getLong("account_id")
+        val accountType = db.rawQuery(
+            "SELECT type FROM financial_accounts WHERE id = ?",
+            arrayOf(accountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            FinancialAccountType.fromStored(cursor.getString(0))
+        }
+        if (accountType != FinancialAccountType.CREDIT_CARD) return false
+
+        val total = row.optString("amount").toBigDecimalOrNull() ?: return false
+        val amounts = runCatching { InstallmentPlanCalculator.split(total, installments) }
+            .getOrNull() ?: return false
+        val baseDescription = row.optString("description").trim()
+            .replace(Regex("""\s*\(\d{1,2}/\d{1,2}\)\s*$"""), "")
+        val seriesId = UUID.randomUUID().toString()
+        val columns = tableColumns(db, "transactions")
+
+        db.beginTransaction()
+        return try {
+            val firstUpdated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("amount", amounts.first().toPlainString())
+                    put("description", "$baseDescription (1/$installments)")
+                    put("series_id", seriesId)
+                    put("series_index", 1)
+                    put("series_total", installments)
+                    put("invoice_period_override", firstInvoicePeriod.toString())
+                    putNull("invoice_id")
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (!firstUpdated) error("Could not update first installment")
+
+            for (index in 2..installments) {
+                val values = jsonToContentValues(row, columns).apply {
+                    remove("id")
+                    putNull("source_event_id")
+                    putNull("invoice_id")
+                    putNull("reconciled_adjustment_id")
+                    put("amount", amounts[index - 1].toPlainString())
+                    put("description", "$baseDescription ($index/$installments)")
+                    put("series_id", seriesId)
+                    put("series_index", index)
+                    put("series_total", installments)
+                    put(
+                        "invoice_period_override",
+                        firstInvoicePeriod.plusMonths((index - 1).toLong()).toString(),
+                    )
+                    put("import_key", "INSTALLMENT:$seriesId:$index")
+                }
+                if (db.insertOrThrow("transactions", null, values) == -1L) {
+                    error("Could not insert installment")
+                }
+            }
+
+            rebuildCreditCardInvoices(db, accountId)
+            db.setTransactionSuccessful()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun moveCardPurchaseToBankAccount(
+        transactionId: Long,
+        bankAccountId: Long,
+    ): Boolean {
+        val db = writableDatabase
+        data class CardMoveSource(
+            val accountId: Long,
+            val type: FinancialTransactionType,
+            val occurredAt: LocalDateTime,
+            val seriesTotal: Int?,
+        )
+
+        val source = db.rawQuery(
+            """SELECT account_id,type,occurred_at,series_total
+               FROM transactions WHERE id = ?""",
+            arrayOf(transactionId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return false
+            CardMoveSource(
+                accountId = cursor.getLong(0),
+                type = FinancialTransactionType.fromStored(cursor.getString(1)) ?: return false,
+                occurredAt = runCatching {
+                    LocalDateTime.parse(cursor.getString(2))
+                }.getOrNull() ?: return false,
+                seriesTotal = if (cursor.isNull(3)) null else cursor.getInt(3),
+            )
+        }
+        val sourceAccountId = source.accountId
+        if (source.type != FinancialTransactionType.CARD_PURCHASE) return false
+        if (source.seriesTotal != null) return false
+
+        val bankName = db.rawQuery(
+            "SELECT name,type FROM financial_accounts WHERE id = ?",
+            arrayOf(bankAccountId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            if (FinancialAccountType.fromStored(cursor.getString(1)) !=
+                FinancialAccountType.BANK_ACCOUNT
+            ) return false
+            cursor.getString(0)
+        }
+        val paidAt = source.occurredAt.toLocalDate()
+
+        db.beginTransaction()
+        return try {
+            val updated = db.update(
+                "transactions",
+                ContentValues().apply {
+                    put("type", FinancialTransactionType.IMPORTED_EXPENSE.name)
+                    put("direction", FinancialTransactionDirection.EXPENSE.name)
+                    put("account", bankName)
+                    put("account_id", bankAccountId)
+                    putNull("invoice_id")
+                    putNull("invoice_period_override")
+                    put("ignore_invoice_link", 1)
+                    put("status", TransactionStatus.REALIZED.name)
+                    put("paid_at", paidAt.toString())
+                    putNull("planned_payment_date")
+                    putNull("due_date")
+                    putNull("reconciled_adjustment_id")
+                },
+                "id = ?",
+                arrayOf(transactionId.toString()),
+            ) == 1
+            if (updated) {
+                rebuildCreditCardInvoices(db, sourceAccountId)
+                db.setTransactionSuccessful()
+            }
             updated
         } catch (_: Exception) {
             false
@@ -2233,6 +2480,7 @@ class DiagnosticStore(context: Context) :
                 subcategory TEXT,
                 invoice_period_override TEXT,
                 ignore_invoice_link INTEGER NOT NULL DEFAULT 0,
+                reconciled_adjustment_id INTEGER,
                 import_key TEXT UNIQUE
             )"""
         )
@@ -2319,7 +2567,9 @@ class DiagnosticStore(context: Context) :
                 invoice_payment_id INTEGER UNIQUE,
                 direction TEXT NOT NULL DEFAULT 'DEBIT',
                 related_account_id INTEGER,
-                transfer_group TEXT
+                transfer_group TEXT,
+                balance_after TEXT,
+                created_at INTEGER NOT NULL DEFAULT 0
             )"""
         )
     }
@@ -2707,6 +2957,11 @@ class DiagnosticStore(context: Context) :
                ON transactions(invoice_id) WHERE invoice_id IS NOT NULL"""
         )
         db.execSQL(
+            """CREATE INDEX IF NOT EXISTS idx_transactions_reconciled_adjustment
+               ON transactions(reconciled_adjustment_id)
+               WHERE reconciled_adjustment_id IS NOT NULL"""
+        )
+        db.execSQL(
             """CREATE INDEX IF NOT EXISTS idx_invoices_account_due
                ON credit_card_invoices(account_id,due_date DESC)"""
         )
@@ -2842,6 +3097,7 @@ class DiagnosticStore(context: Context) :
         val ruleKey: String?,
         val seriesId: String?,
         val seriesIndex: Int?,
+        val status: TransactionStatus,
     )
 
     private data class KnownAccountPreset(
@@ -2854,7 +3110,7 @@ class DiagnosticStore(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "notification_diagnostics.db"
-        const val DATABASE_VERSION = 23
+        const val DATABASE_VERSION = 24
         const val BACKUP_FORMAT_VERSION = 1
         const val MAX_BACKUP_CHARACTERS = 50_000_000
         val BACKUP_TABLES = listOf(

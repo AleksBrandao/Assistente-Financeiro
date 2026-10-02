@@ -39,6 +39,8 @@ data class AccountMovementRecord(
     val occurredAt: LocalDate,
     val description: String,
     val relatedAccountName: String? = null,
+    val balanceAfter: BigDecimal? = null,
+    val createdAt: Long = 0L,
 )
 
 data class AccountBalanceSummary(
@@ -63,6 +65,19 @@ object ForwardProjectedBalanceCalculator {
         currentBalance.realizedBalance +
             throughDateBalance.pendingIncome -
             throughDateBalance.pendingExpense
+}
+
+object BalanceCheckpointPolicy {
+    fun includesRealizedTransaction(
+        reconciledAdjustmentId: Long?,
+        checkpointId: Long,
+    ): Boolean =
+        reconciledAdjustmentId == null || reconciledAdjustmentId > checkpointId
+
+    fun includesMovement(
+        movementId: Long,
+        checkpointId: Long,
+    ): Boolean = movementId > checkpointId
 }
 
 object AccountBalanceDatePolicy {
