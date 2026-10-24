@@ -58,6 +58,18 @@ class FinancialNotificationClassifierTest {
     }
 
     @Test
+    fun keepsForeignPurchasePendingForBrlRateReview() {
+        for (currency in listOf("USD", "EUR")) {
+            val result = classify(
+                title = "Compra aprovada!",
+                body = "Compra no cartão final 3409, de $currency 21,05, em 17/10/26, às 08:16, em Avolta MAD WT T, aprovada.",
+            )
+            assertEquals(NotificationClassification.PENDING_RULE, result.classification)
+            assertNull(result.transaction)
+        }
+    }
+
+    @Test
     fun keepsUnknownSantanderNotificationPending() {
         val result = classify(
             title = "Pix recebido",

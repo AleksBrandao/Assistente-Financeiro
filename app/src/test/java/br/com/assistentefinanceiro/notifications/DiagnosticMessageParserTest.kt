@@ -24,6 +24,52 @@ class DiagnosticMessageParserTest {
     }
 
     @Test
+    fun parsesEurPurchaseFromScreenshot() {
+        val hint = DiagnosticMessageParser.parse(
+            event(
+                title = "Compra aprovada!",
+                body = "Compra no cartão final 3409, de EUR 21,05, em 17/10/26, às 08:16, em Avolta MAD WT T, aprovada.",
+            ),
+        )
+
+        assertNotNull(hint)
+        assertEquals("EUR", hint?.currency)
+        assertEquals(BigDecimal("21.05"), hint?.amount)
+        assertEquals("3409", hint?.cardLastFour)
+        assertEquals("Avolta MAD WT T", hint?.description)
+        assertEquals(LocalDate.of(2026, 10, 17), hint?.occurredAt?.toLocalDate())
+    }
+
+    @Test
+    fun parsesEurPurchaseWithPendingMerchantName() {
+        val hint = DiagnosticMessageParser.parse(
+            event(
+                title = "Compra aprovada!",
+                body = "Compra no cartão final 5253, de EUR 14,98, em 17/10/26, às 06:42, em UBER . PENDING, aprovada.",
+            ),
+        )
+
+        assertNotNull(hint)
+        assertEquals("EUR", hint?.currency)
+        assertEquals(BigDecimal("14.98"), hint?.amount)
+        assertEquals("5253", hint?.cardLastFour)
+        assertEquals("UBER . PENDING", hint?.description)
+    }
+
+    @Test
+    fun parsesBrlPurchaseWithoutConversion() {
+        val hint = DiagnosticMessageParser.parse(
+            event(
+                title = "Compra aprovada!",
+                body = "Compra no cartão final 3409, de R$ 10,00, em 17/10/26, às 08:16, em LOJA LOCAL, aprovada.",
+            ),
+        )
+
+        assertEquals("BRL", hint?.currency)
+        assertEquals(BigDecimal("10.00"), hint?.amount)
+    }
+
+    @Test
     fun parsesScheduledAutomaticDebitAsPendingExpense() {
         val hint = DiagnosticMessageParser.parse(
             event(

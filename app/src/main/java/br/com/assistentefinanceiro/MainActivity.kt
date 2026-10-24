@@ -6315,7 +6315,8 @@ class MainActivity : ComponentActivity() {
             )
         }
         var amountText by remember(event.id) {
-            mutableStateOf(hint?.amount?.toPlainString().orEmpty())
+            mutableStateOf(if (hint?.currency == "USD" || hint?.currency == "EUR") ""
+                else hint?.amount?.toPlainString().orEmpty())
         }
         var dateText by remember(event.id) {
             mutableStateOf((hint?.occurredAt ?: LocalDateTime.now()).toLocalDate().toString())
@@ -6333,19 +6334,19 @@ class MainActivity : ComponentActivity() {
         var quoteLoading by remember(event.id) { mutableStateOf(false) }
 
         LaunchedEffect(event.id, hint?.currency) {
-            if (hint?.currency == "USD") {
+            if (hint != null && (hint.currency == "USD" || hint.currency == "EUR")) {
                 quoteLoading = true
                 quoteStatus = runCatching {
                     val quote = withContext(Dispatchers.IO) {
-                        BcbExchangeRateService.usdSellingRate(hint.occurredAt.toLocalDate())
+                        BcbExchangeRateService.sellingRate(hint.currency, hint.occurredAt.toLocalDate())
                     }
                     val converted = hint.amount.multiply(quote.rate)
                         .setScale(2, java.math.RoundingMode.HALF_UP)
-                    amountText = converted.toPlainString()
-                    "USD ${hint.amount.toPlainString()} × PTAX ${quote.rate.toPlainString()} = " +
+                    if (amountText.isBlank()) amountText = converted.toPlainString()
+                    "${hint.currency} ${hint.amount.toPlainString()} × PTAX ${quote.rate.toPlainString()} = " +
                         formatCurrency(converted.toPlainString())
                 }.getOrElse {
-                    "Não foi possível consultar a PTAX. Informe o valor em reais."
+                    "Não foi possível consultar a PTAX de ${hint.currency}. Informe o valor em reais."
                 }
                 quoteLoading = false
             }
