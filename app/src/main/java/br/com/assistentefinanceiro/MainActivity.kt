@@ -485,35 +485,14 @@ class MainActivity : ComponentActivity() {
         }
         val statementInvoiceItems = remember(invoicesByAccount) {
             invoicesByAccount.mapNotNull { (account, invoice) ->
-                        val statementDate = invoice.statementDate()
-                        if (invoice.total.signum() == 0) return@mapNotNull null
-                        val isCredit = invoice.total.signum() < 0
-                        StatementInvoiceItem(
-                            account = account,
-                            invoice = invoice,
-                            transaction = FinancialTransactionRecord(
-                                id = -invoice.id,
-                                sourceEventId = null,
-                                direction = if (isCredit) {
-                                    FinancialTransactionDirection.INCOME
-                                } else FinancialTransactionDirection.EXPENSE,
-                                type = if (isCredit) {
-                                    FinancialTransactionType.IMPORTED_INCOME
-                                } else FinancialTransactionType.IMPORTED_EXPENSE,
-                                amount = invoice.total.abs().toPlainString(),
-                                occurredAt = statementDate.atTime(23, 59, 59).toString(),
-                                description = "Fatura ${account.name}",
-                                sourcePackage = "credit-card-invoice",
-                                status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                                    TransactionStatus.REALIZED
-                                } else TransactionStatus.PENDING,
-                                account = account.name,
-                                accountId = account.id,
-                                invoiceId = invoice.id,
-                                dueDate = invoice.dueDate?.toString(),
-                            ),
-                        )
-                    }
+                statementInvoiceTransaction(account, invoice)?.let { transaction ->
+                    StatementInvoiceItem(
+                        account = account,
+                        invoice = invoice,
+                        transaction = transaction,
+                    )
+                }
+            }
         }
         val invoiceItemByTransactionId = remember(statementInvoiceItems) {
             statementInvoiceItems.associateBy { it.transaction.id }
@@ -5661,7 +5640,7 @@ class MainActivity : ComponentActivity() {
         onBack: () -> Unit,
     ) {
         var selectedYear by remember { mutableIntStateOf(LocalDate.now().year) }
-        val transactions = remember(selectedYear) { granularTransactions(store) }
+        val transactions = remember(selectedYear) { consolidatedTransactions(store) }
         val rows = remember(selectedYear, transactions) {
             (1..12).map { month ->
                 val period = YearMonth.of(selectedYear, month)
@@ -5839,36 +5818,43 @@ class MainActivity : ComponentActivity() {
         val cardIds = cards.map { it.id }.toSet()
         val invoices = cards.flatMap { account ->
             store.creditCardInvoices(account.id).mapNotNull { invoice ->
-                val statementDate = invoice.statementDate()
-                if (invoice.total.signum() == 0) return@mapNotNull null
-                val paidAt = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                    store.invoicePayments(invoice).maxOfOrNull { it.paidAt }
-                } else null
-                FinancialTransactionRecord(
-                    id = -invoice.id,
-                    sourceEventId = null,
-                    direction = if (invoice.total.signum() < 0) {
-                        FinancialTransactionDirection.INCOME
-                    } else FinancialTransactionDirection.EXPENSE,
-                    type = if (invoice.total.signum() < 0) {
-                        FinancialTransactionType.IMPORTED_INCOME
-                    } else FinancialTransactionType.IMPORTED_EXPENSE,
-                    amount = invoice.total.abs().toPlainString(),
-                    occurredAt = statementDate.atStartOfDay().toString(),
-                    description = "Fatura ${account.name}",
-                    sourcePackage = "credit-card-invoice",
-                    status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
-                        TransactionStatus.REALIZED
-                    } else TransactionStatus.PENDING,
-                    dueDate = invoice.dueDate?.toString(),
-                    paidAt = paidAt?.toString(),
-                )
+                statementInvoiceTransaction(account, invoice)
             }
         }
         return transactions.filterNot { transaction ->
             transaction.type == FinancialTransactionType.CARD_PURCHASE ||
                 (transaction.accountId != null && transaction.accountId in cardIds)
         } + invoices
+    }
+
+    private fun statementInvoiceTransaction(
+        account: FinancialAccountRecord,
+        invoice: CreditCardInvoiceRecord,
+    ): FinancialTransactionRecord? {
+        if (invoice.total.signum() == 0) return null
+        val statementDate = invoice.statementDate()
+        val isCredit = invoice.total.signum() < 0
+        return FinancialTransactionRecord(
+            id = -invoice.id,
+            sourceEventId = null,
+            direction = if (isCredit) {
+                FinancialTransactionDirection.INCOME
+            } else FinancialTransactionDirection.EXPENSE,
+            type = if (isCredit) {
+                FinancialTransactionType.IMPORTED_INCOME
+            } else FinancialTransactionType.IMPORTED_EXPENSE,
+            amount = invoice.total.abs().toPlainString(),
+            occurredAt = statementDate.atTime(23, 59, 59).toString(),
+            description = "Fatura ${account.name}",
+            sourcePackage = "credit-card-invoice",
+            status = if (invoice.status == CreditCardInvoiceStatus.PAID) {
+                TransactionStatus.REALIZED
+            } else TransactionStatus.PENDING,
+            account = account.name,
+            accountId = account.id,
+            invoiceId = invoice.id,
+            dueDate = invoice.dueDate?.toString(),
+        )
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
