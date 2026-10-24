@@ -15,15 +15,10 @@ data class ExchangeRateQuote(
 object BcbExchangeRateService {
     private val apiDate = DateTimeFormatter.ofPattern("MM-dd-yyyy")
 
-    fun usdSellingRate(date: LocalDate): ExchangeRateQuote {
-        val start = date.minusDays(7).format(apiDate)
-        val end = date.format(apiDate)
-        val endpoint =
-            "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/" +
-                "CotacaoDolarPeriodo(dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)" +
-                "?@dataInicial='$start'&@dataFinalCotacao='$end'" +
-                "&%24orderby=dataHoraCotacao%20desc&%24top=1&%24format=json"
-        val connection = URL(endpoint).openConnection() as HttpURLConnection
+    fun usdSellingRate(date: LocalDate): ExchangeRateQuote = sellingRate("USD", date)
+
+    fun sellingRate(currency: String, date: LocalDate): ExchangeRateQuote {
+        val connection = URL(quoteUrl(currency, date)).openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
@@ -41,5 +36,21 @@ object BcbExchangeRateService {
         } finally {
             connection.disconnect()
         }
+    }
+
+    internal fun quoteUrl(currency: String, date: LocalDate): String {
+        require(currency == "USD" || currency == "EUR") { "Moeda não suportada" }
+        val start = date.minusDays(7).format(apiDate)
+        val end = date.format(apiDate)
+        val resource = if (currency == "USD") {
+            "CotacaoDolarPeriodo(dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)"
+        } else {
+            "CotacaoMoedaPeriodo(moeda=@moeda,dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)"
+        }
+        val currencyParameter = if (currency == "EUR") "?@moeda='EUR'&" else "?"
+        return "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/" +
+            resource + currencyParameter +
+            "@dataInicial='$start'&@dataFinalCotacao='$end'" +
+            "&%24orderby=dataHoraCotacao%20desc&%24top=1&%24format=json"
     }
 }
