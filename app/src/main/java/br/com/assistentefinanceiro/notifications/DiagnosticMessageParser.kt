@@ -20,7 +20,7 @@ data class DiagnosticMessageHint(
 object DiagnosticMessageParser {
     private val fullDateTime = DateTimeFormatter.ofPattern("dd/MM/yy HH:mm", Locale("pt", "BR"))
     private val cardPattern = Regex(
-        """cart[aã]o\s+final\s+(\d{4}),\s+de\s+(R\$|USD)\s*([\d.]+,\d{2}),\s+em\s+(\d{2}/\d{2}/\d{2}),\s+[àa]s\s+(\d{2}:\d{2}),\s+em\s+(.+?),\s+aprovada""",
+        """cart[aã]o\s+final\s+(\d{4}),\s+de\s+(R\$|USD|EUR)\s*([\d.]+,\d{2}),\s+em\s+(\d{2}/\d{2}/\d{2}),\s+[àa]s\s+(\d{2}:\d{2}),\s+em\s+(.+?),\s+aprovada""",
         RegexOption.IGNORE_CASE,
     )
     private val automaticDebitPattern = Regex(
@@ -37,7 +37,8 @@ object DiagnosticMessageParser {
                 occurredAt = LocalDateTime.parse("$rawDate $rawTime", fullDateTime),
                 description = merchant.trim(),
                 pending = false,
-                currency = if (currencyToken.equals("USD", true)) "USD" else "BRL",
+                currency = if (currencyToken.equals("R$", true)) "BRL"
+                else currencyToken.uppercase(Locale.ROOT),
                 cardLastFour = lastFour,
             )
         }
